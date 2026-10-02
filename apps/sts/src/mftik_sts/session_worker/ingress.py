@@ -16,11 +16,14 @@ so ``on_stop`` still receives acks and fills (I1). :meth:`offer` during
 :meth:`pull` keeps returning ``None``.
 
 B4-03 keeps that queue inside :meth:`offer`. The bound is
-:attr:`Delivery.capacity`. Past it, the oldest event is dropped. There
-is no drop count and the session does not fail: a must-deliver overflow
-fails the session only once :meth:`Delivery.accept` owns the queue
-(B5-01). There is one queue; the temporary buffer does not survive that
-delegation.
+:attr:`Delivery.capacity`. Past it, the oldest market-data event is
+dropped and the burst is logged with a count. A :attr:`StreamKind.TD`
+event is never dropped: fills and order updates are how the strategy
+sees inventory. If the buffer is over capacity and holds nothing but
+TD, the process fails the session instead of dropping one. That
+MD-only policy stands until :meth:`Delivery.accept` owns the queue
+(B5-01). There is one queue; the temporary buffer does not survive
+that delegation.
 
 **What this object is the authority for (§3.3), once it runs:**
 
@@ -42,6 +45,7 @@ B5-04.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -52,14 +56,21 @@ from mftik.protocol import (
     StsStatusProgress,
 )
 
-from mftik_sts.session_worker.delivery import Delivery
+from mftik_sts.session_worker.delivery import MUST_DELIVER, Delivery
 from mftik_sts.session_worker.errors import (
     IngressEnded,
     IngressNotMainThread,
     StrategyStillRunning,
 )
-from mftik_sts.session_worker.events import Inbound, LogRecord
+from mftik_sts.session_worker.events import Inbound, LogRecord, StreamKind
 from mftik_sts.session_worker.phase import Phase
+
+logger = logging.getLogger(__name__)
+
+#: Why a TD-only buffer past capacity fails the session. The process
+#: passes this to ``progress.fail``, which runs phase 5 and exits
+#: non-zero. Market data does not use it.
+TD_DELIVERY_OVERFLOW = "td delivery overflow"
 
 
 class Ingress:
@@ -78,7 +89,8 @@ class Ingress:
 
     ``capacity`` is forwarded to :class:`Delivery` and is also the bound
     of the temporary buffer :meth:`offer` keeps until B5-01. No default:
-    the plan doesn't name one.
+    the plan doesn't name one. Past the bound, market data is what
+    gets dropped. TD is not.
     """
 
     def __init__(
@@ -103,6 +115,7 @@ class Ingress:
         self._log_seq = 0
         self._lock = threading.Lock()
         self._on_queued: Callable[[], None] | None = None
+        self._on_failure: Callable[[str], None] | None = None
 
     def bind_runner(self, runner: object) -> None:
         """The strategy thread :meth:`close` and :meth:`abort` have to see."""
@@ -115,6 +128,16 @@ class Ingress:
         tests never set it.
         """
         self._on_queued = callback
+
+    def set_failure_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Called, outside the lock, when TD would have been dropped.
+
+        The process wires this to ``progress.fail`` with
+        :data:`TD_DELIVERY_OVERFLOW` and then stops, so phase 5 runs
+        and the process exits non-zero. Market-data overflow does not
+        call it.
+        """
+        self._on_failure = callback
 
     @property
     def phase(self) -> Phase | None:
@@ -175,17 +198,25 @@ class Ingress:
         including when that event arrived during ``on_start`` or
         ``on_ready``. During :attr:`Phase.STOPPING` it is queued at once.
 
-        The temporary buffer drops the oldest event past
-        :attr:`Delivery.capacity`. It does not call :meth:`Delivery.accept`.
+        Past :attr:`Delivery.capacity`, the oldest market-data event is
+        dropped. A :attr:`StreamKind.TD` event stays. A buffer that is
+        still over capacity with nothing but TD fails the session
+        instead of dropping. This does not call :meth:`Delivery.accept`.
         """
         notify = False
+        reason: str | None = None
+        callback: Callable[[str], None] | None = None
         with self._lock:
             self._remember(event)
             if self._phase in (Phase.RUNNING, Phase.STOPPING):
-                self._enqueue(event)
+                reason = self._enqueue(event)
                 notify = True
             else:
-                self._hold(event)
+                reason = self._hold(event)
+            if reason is not None:
+                callback = self._on_failure
+        if reason is not None:
+            self._report_failure(reason, callback)
         if notify:
             self._kick()
 
@@ -215,6 +246,8 @@ class Ingress:
     def advance(self, phase: Phase) -> None:
         """Move to ``phase``. Entering :attr:`Phase.RUNNING` releases held events."""
         notify = False
+        reason: str | None = None
+        callback: Callable[[str], None] | None = None
         with self._lock:
             if self._ended:
                 raise IngressEnded(
@@ -222,8 +255,12 @@ class Ingress:
                 )
             self._phase = phase
             if phase is Phase.RUNNING:
-                self._release_held()
+                reason = self._release_held()
                 notify = True
+            if reason is not None:
+                callback = self._on_failure
+        if reason is not None:
+            self._report_failure(reason, callback)
         if notify:
             self._kick()
 
@@ -319,24 +356,75 @@ class Ingress:
             )
         )
 
-    def _hold(self, event: Inbound) -> None:
+    def _hold(self, event: Inbound) -> str | None:
         self._held.append(event)
-        self._trim(self._held)
+        return self._trim(self._held)
 
-    def _enqueue(self, event: Inbound) -> None:
+    def _enqueue(self, event: Inbound) -> str | None:
         self._ready.append(event)
-        self._trim(self._ready)
+        return self._trim(self._ready)
 
-    def _release_held(self) -> None:
+    def _release_held(self) -> str | None:
+        reason: str | None = None
         while self._held:
-            self._enqueue(self._held.popleft())
+            failed = self._enqueue(self._held.popleft())
+            if reason is None:
+                reason = failed
+        return reason
 
-    def _trim(self, buf: deque[Inbound]) -> None:
+    def _trim(self, buf: deque[Inbound]) -> str | None:
+        """Drop oldest market data until ``buf`` fits.
+
+        TD is never removed. :data:`MUST_DELIVER` covers ``feed_end``
+        and RPC replies the same way; those are not market data. When
+        nothing left is market data and the buffer is still over
+        capacity, TD overflow fails the session instead of dropping.
+        """
         limit = self.delivery.capacity
+        dropped = 0
         while len(buf) > limit:
-            buf.popleft()
+            index = _oldest_market(buf)
+            if index is None:
+                if dropped:
+                    self._log_md_drops(dropped)
+                if any(event.kind is StreamKind.TD for event in buf):
+                    return TD_DELIVERY_OVERFLOW
+                return None
+            del buf[index]
+            dropped += 1
+        if dropped:
+            self._log_md_drops(dropped)
+        return None
+
+    def _log_md_drops(self, dropped: int) -> None:
+        """One line per trim that dropped, carrying how many."""
+        logger.warning(
+            "md buffer dropped %d oldest event(s) session=%s",
+            dropped,
+            self.spec.session_id,
+        )
+
+    def _report_failure(
+        self, reason: str, callback: Callable[[str], None] | None
+    ) -> None:
+        if callback is None:
+            logger.error(
+                "%s with no failure callback session=%s",
+                reason,
+                self.spec.session_id,
+            )
+            return
+        callback(reason)
 
     def _kick(self) -> None:
         callback = self._on_queued
         if callback is not None:
             callback()
+
+
+def _oldest_market(buf: deque[Inbound]) -> int | None:
+    """Index of the oldest event trim is allowed to drop, or ``None``."""
+    for index, event in enumerate(buf):
+        if event.kind not in MUST_DELIVER:
+            return index
+    return None

@@ -394,6 +394,14 @@ async def amain(
             strategy_loop[0].call_soon_threadsafe(_noop)
         kick()
 
+    def _td_overflow(reason: str) -> None:
+        # ``fail`` is what marks the exit non-zero. ``request_stop`` is
+        # what leaves the hook and runs phase 5. A TD event was not dropped.
+        progress.fail(reason)
+        request_stop(reason)
+
+    ingress.set_failure_callback(_td_overflow)
+
     token = uuid.uuid4().hex
     inbox_wild = f"_INBOX.{token}.*"
 

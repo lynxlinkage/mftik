@@ -9,6 +9,8 @@ here sleeps or opens NATS.
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -28,7 +30,7 @@ from mftik.strategy.errors import NotReady
 from mftik.strategy.eventlog import EventLog
 from mftik_sts.session_worker.dispatch import dispatch_md
 from mftik_sts.session_worker.events import Inbound, StreamKind
-from mftik_sts.session_worker.ingress import Ingress
+from mftik_sts.session_worker.ingress import TD_DELIVERY_OVERFLOW, Ingress
 from mftik_sts.session_worker.pending import PendingTable
 from mftik_sts.session_worker.readiness import resolve_feeds
 from mftik_sts.session_worker.runner import StrategyRunner
@@ -48,6 +50,46 @@ def _book(event_id: str) -> Inbound:
         body=b"{}",
         event_id=event_id,
     )
+
+
+def _td(event_id: str) -> Inbound:
+    return Inbound(
+        kind=StreamKind.TD,
+        feed="td.7",
+        recv_ts=0.0,
+        body=b"{}",
+        event_id=event_id,
+    )
+
+
+def _open(capacity: int) -> tuple[Ingress, StrategyRunner]:
+    """Ingress in ``on_ready``. Delivery is held. Orders are already allowed."""
+    ingress = Ingress(_spec(), capacity=capacity)
+    ingress.start()
+    runner = StrategyRunner(ingress, Strategy())
+    runner.start()
+    runner.begin_on_start()
+    runner.end_on_start()
+    runner.begin_on_ready()
+    return ingress, runner
+
+
+def _drain(ingress: Ingress) -> list[Inbound]:
+    pulled: list[Inbound] = []
+    while True:
+        event = ingress.pull()
+        if event is None:
+            return pulled
+        pulled.append(event)
+
+
+def _offer_td_then_md(ingress: Ingress) -> None:
+    ingress.offer(_td("fill"))
+    for index in range(10):
+        ingress.offer(_book(f"m{index}"))
+
+
+_MD_DROP = re.compile(r"md buffer dropped (\d+)")
 
 
 class _SeesBooks(Strategy):
@@ -192,6 +234,72 @@ def test_paper_orderbook_resolves_and_other_feeds_are_missing() -> None:
     atom = resolved[0].atoms[0]
     assert atom.policy is JoinPolicy.NEXT_PUSH
     assert atom.subject.startswith("md.a.Paper.")
+
+
+def test_a_held_td_event_is_pulled_after_md_is_trimmed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Capacity 4. One TD then ten MD while delivery is held.
+
+    Advancing to RUNNING still pulls the TD. The trim drops the oldest
+    market-data events and logs that burst with a count. The session
+    does not fail.
+    """
+    ingress, runner = _open(4)
+    reasons: list[str] = []
+    ingress.set_failure_callback(reasons.append)
+    with caplog.at_level(
+        logging.WARNING, logger="mftik_sts.session_worker.ingress"
+    ):
+        _offer_td_then_md(ingress)
+    runner.end_on_ready()
+    pulled = _drain(ingress)
+    assert [event.event_id for event in pulled] == ["fill", "m7", "m8", "m9"]
+    assert reasons == []
+    counts = [
+        int(match.group(1))
+        for record in caplog.records
+        if (match := _MD_DROP.search(record.message))
+    ]
+    assert counts
+    assert sum(counts) == 7
+    runner.finish()
+    ingress.close()
+
+
+def test_a_ready_td_event_is_pulled_after_md_is_trimmed() -> None:
+    """The same burst, offered straight into the running queue."""
+    ingress, runner = _open(4)
+    reasons: list[str] = []
+    ingress.set_failure_callback(reasons.append)
+    runner.end_on_ready()
+    _offer_td_then_md(ingress)
+    pulled = _drain(ingress)
+    assert [event.event_id for event in pulled] == ["fill", "m7", "m8", "m9"]
+    assert reasons == []
+    runner.finish()
+    ingress.close()
+
+
+def test_td_only_overflow_fails_the_session() -> None:
+    """Nothing but TD, past capacity, fails instead of dropping a fill."""
+    for held in (True, False):
+        ingress, runner = _open(4)
+        reasons: list[str] = []
+        ingress.set_failure_callback(reasons.append)
+        if not held:
+            runner.end_on_ready()
+        for index in range(5):
+            ingress.offer(_td(f"t{index}"))
+        assert reasons == [TD_DELIVERY_OVERFLOW]
+        if held:
+            runner.end_on_ready()
+        pulled = _drain(ingress)
+        assert [event.event_id for event in pulled] == [
+            f"t{index}" for index in range(5)
+        ]
+        runner.finish()
+        ingress.close()
 
 
 def test_the_temporary_buffer_drops_the_oldest() -> None:
