@@ -26,6 +26,16 @@ TEMP_BUFFER_CAPACITY = ALL_QUEUE_CAPACITY
 
 #: Minimum gap between logged drop warnings for one feed. The drop count
 #: still moves on every drop, and :meth:`Delivery.warnings` keeps one
-#: line per drop. The plan says the log is rate-limited and does not
-#: name the window. Provisional (#286).
+#: line per drop up to :data:`WARNING_RETENTION`. The plan says the log
+#: is rate-limited and does not name the window. Provisional (#286).
 DROP_WARN_INTERVAL_S = 1.0
+
+#: How many disposition marks :class:`Delivery` keeps. A long session
+#: marks every event; without a cap that dict grows until the process
+#: runs out of memory. Older marks are forgotten. B5-02 persists the
+#: event log and can drop a mark once it has been written.
+MARK_RETENTION = 1024
+
+#: How many drop-warning lines :meth:`Delivery.warnings` retains.
+#: Oldest first, then forgotten. The drop count is not capped.
+WARNING_RETENTION = 1024

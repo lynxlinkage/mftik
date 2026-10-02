@@ -502,9 +502,9 @@ def test_notices_survive_a_market_data_flood() -> None:
     """Notices share the must-deliver queue. A latest book does not push one out.
 
     Two notices fit in a queue of 2 beside any number of books on one
-    feed: the books conflate to the newest. A third notice overflows
-    that queue and fails the session. It is not dropped, and it is not
-    pulled.
+    feed: the books conflate to the newest. Both notices come out
+    before that book. A third notice overflows that queue and fails
+    the session. It is not dropped, and it is not pulled.
     """
     ingress = Ingress(
         StsCreateSessionRequest(session_id="abc123", created_by=1, strategy="noop"),
@@ -550,7 +550,7 @@ def test_notices_survive_a_market_data_flood() -> None:
         if event is None:
             break
         pulled.append(event.event_id)
-    assert pulled == ["md", "c", "td"]
+    assert pulled == ["md", "td", "c"]
     assert "resync" not in pulled
     assert reasons == ["resync_overflow"]
     assert ingress.delivery.dropped == 0

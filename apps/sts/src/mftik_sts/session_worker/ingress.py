@@ -114,6 +114,9 @@ class Ingress:
         self._thread: threading.Thread | None = None
         self._ended = False
         self._runner: object | None = None
+        # One line per offer for the life of the session. Unbounded, and
+        # already so before B5-01. B5-02 persists this list and is the
+        # place that bounds it. Delivery's marks and warnings are capped.
         self._logs: list[LogRecord] = []
         self._log_seq = 0
         self._lock = threading.Lock()

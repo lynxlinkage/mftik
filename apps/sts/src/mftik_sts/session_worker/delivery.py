@@ -35,13 +35,20 @@ conflate.
 
 Must-deliver kinds share one FIFO, so a fill and the RPC reply about
 the same order cannot swap, and a ``RESYNC`` stays ahead of the
-deferred ``ready`` offered after it. :meth:`Delivery.take` round-robins
-that queue with the market-data feeds, must-deliver first: slot 0 is
-the shared FIFO, then each feed in the order it was first seen. An
-empty slot is skipped. Inside one kline feed the smallest ``bar_open``
-comes out first, so a closed bar is delivered before a later bar whose
-bytes arrived earlier. Inside one ``all`` feed the order is arrival
-order.
+deferred ``ready`` offered after it. :meth:`Delivery.take` drains that
+FIFO before any market data. A full book does not stand between a
+strategy and a fill: market data is what drops when the strategy is
+behind. Once the FIFO is empty, market-data feeds are round-robin in
+the order they were first seen. An empty feed is skipped. Inside one
+kline feed the smallest ``bar_open`` comes out first, so a closed bar
+is delivered before a later bar whose bytes arrived earlier. Inside
+one ``all`` feed the order is arrival order.
+
+Disposition marks and drop-warning lines are capped
+(:data:`~mftik_sts.session_worker.limits.MARK_RETENTION`,
+:data:`~mftik_sts.session_worker.limits.WARNING_RETENTION`). The drop
+count is not. B5-02 persists the event log; these caps bound the
+in-memory notes until that writer can discard a line it has stored.
 
 The lookup functions below are the table. They are pure. The queues
 apply the table.
@@ -52,7 +59,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from enum import StrEnum
 
@@ -67,7 +74,11 @@ from mftik.protocol import (
 
 from mftik_sts.session_worker.errors import SessionFailed
 from mftik_sts.session_worker.events import Inbound, LogMark, LogRecord, StreamKind
-from mftik_sts.session_worker.limits import DROP_WARN_INTERVAL_S
+from mftik_sts.session_worker.limits import (
+    DROP_WARN_INTERVAL_S,
+    MARK_RETENTION,
+    WARNING_RETENTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,10 +210,11 @@ class Delivery:
 
     **State this object holds (§3.3):** the not-yet-delivered events,
     the per-feed drop counts the ingress publishes on
-    ``sts.status.{session_id}``, and the in-memory disposition mark of
-    each event. The file those marks are written to is the event log,
-    also this layer's, written by the writer thread rather than by
-    :meth:`accept`.
+    ``sts.status.{session_id}``, and the most recent disposition marks.
+    The file those marks are written to is the event log, also this
+    layer's, written by the writer thread rather than by :meth:`accept`.
+    Marks older than :data:`MARK_RETENTION` are dropped here. B5-02 is
+    what stores them first.
 
     Not locked against itself beyond the lock below. :class:`Ingress`
     calls :meth:`accept` and :meth:`take` from two threads and holds
@@ -239,10 +251,10 @@ class Delivery:
         self._feeds: list[str] = []
         self._modes: dict[str, str] = {}
         self._rr = 0
-        self._marks: dict[str, LogMark] = {}
+        self._marks: OrderedDict[str, LogMark] = OrderedDict()
         self._dropped = 0
         self._dropped_by_feed: dict[str, int] = {}
-        self._warnings: list[str] = []
+        self._warnings: deque[str] = deque(maxlen=WARNING_RETENTION)
         self._warned_at: dict[str, float] = {}
         self._failed = False
         self._fail_reason: str | None = None
@@ -279,20 +291,19 @@ class Delivery:
         """The next event for the strategy thread to decode, or ``None``.
 
         ``None`` is the empty queue. Taking an event marks it
-        ``delivered``. Must-deliver is slot 0 of the round-robin; each
-        market-data feed follows, in first-seen order.
+        ``delivered``. The must-deliver FIFO is drained first. Only
+        when it is empty does a market-data feed come out, round-robin
+        in first-seen order.
         """
         with self._lock:
-            sources = 1 + len(self._feeds)
-            for _ in range(sources):
-                slot = self._rr % sources
-                self._rr = slot + 1
-                event = self._pop(slot)
-                if event is None:
-                    continue
-                self._marks[event.event_id] = LogMark.DELIVERED
-                return event
-            return None
+            if self._must:
+                event: Inbound | None = self._must.popleft()
+            else:
+                event = self._next_market()
+            if event is None:
+                return None
+            self._remember_mark(event.event_id, LogMark.DELIVERED)
+            return event
 
     @property
     def dropped(self) -> int:
@@ -330,7 +341,9 @@ class Delivery:
     def mark(self, event_id: str) -> LogMark | None:
         """The disposition of ``event_id``, or ``None`` if it has none yet.
 
-        ``None`` means not accepted, or accepted and still waiting.
+        ``None`` means not accepted, accepted and still waiting, or
+        forgotten because a newer mark pushed it past
+        :data:`MARK_RETENTION`.
         """
         with self._lock:
             return self._marks.get(event_id)
@@ -339,8 +352,9 @@ class Delivery:
         """Warning lines written when an ``all`` feed dropped an event.
 
         Empty until something is dropped. One line per drop, not one
-        line per event that survived. The logger is rate-limited; this
-        tuple is not.
+        line per event that survived, and only the most recent
+        :data:`WARNING_RETENTION` lines. The logger is rate-limited;
+        this tuple is not. The drop count is not trimmed with it.
         """
         with self._lock:
             return tuple(self._warnings)
@@ -398,7 +412,7 @@ class Delivery:
         queue = self._all.setdefault(event.feed, deque())
         if len(queue) >= self.capacity:
             oldest = queue.popleft()
-            self._marks[oldest.event_id] = LogMark.DROPPED
+            self._remember_mark(oldest.event_id, LogMark.DROPPED)
             self._dropped += 1
             count = self._dropped_by_feed.get(event.feed, 0) + 1
             self._dropped_by_feed[event.feed] = count
@@ -413,7 +427,7 @@ class Delivery:
     def _accept_latest(self, event: Inbound) -> None:
         previous = self._latest.get(event.feed)
         if previous is not None:
-            self._marks[previous.event_id] = LogMark.SUPERSEDED
+            self._remember_mark(previous.event_id, LogMark.SUPERSEDED)
         self._latest[event.feed] = event
 
     def _accept_kline(self, event: Inbound) -> None:
@@ -421,15 +435,23 @@ class Delivery:
         key = (event.feed, event.bar_open)
         previous = self._kline.get(key)
         if previous is not None:
-            self._marks[previous.event_id] = LogMark.SUPERSEDED
+            self._remember_mark(previous.event_id, LogMark.SUPERSEDED)
         self._kline[key] = event
 
-    def _pop(self, slot: int) -> Inbound | None:
-        if slot == 0:
-            if not self._must:
-                return None
-            return self._must.popleft()
-        feed = self._feeds[slot - 1]
+    def _next_market(self) -> Inbound | None:
+        count = len(self._feeds)
+        if count == 0:
+            return None
+        for _ in range(count):
+            index = self._rr % count
+            self._rr = index + 1
+            event = self._pop_feed(index)
+            if event is not None:
+                return event
+        return None
+
+    def _pop_feed(self, index: int) -> Inbound | None:
+        feed = self._feeds[index]
         mode = self._modes[feed]
         if mode == DELIVERY_ALL:
             queue = self._all.get(feed)
@@ -450,6 +472,12 @@ class Delivery:
         if chosen is None:
             return None
         return self._kline.pop(chosen)
+
+    def _remember_mark(self, event_id: str, mark: LogMark) -> None:
+        self._marks[event_id] = mark
+        self._marks.move_to_end(event_id)
+        while len(self._marks) > MARK_RETENTION:
+            self._marks.popitem(last=False)
 
     def _warn_drop(self, feed: str, line: str) -> None:
         now = self._monotonic()

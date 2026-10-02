@@ -29,7 +29,11 @@ from mftik_sts.session_worker.dispatch import dispatch_md
 from mftik_sts.session_worker.errors import SessionFailed
 from mftik_sts.session_worker.events import Inbound, LogMark, StreamKind
 from mftik_sts.session_worker.ingress import Ingress
-from mftik_sts.session_worker.limits import DROP_WARN_INTERVAL_S
+from mftik_sts.session_worker.limits import (
+    DROP_WARN_INTERVAL_S,
+    MARK_RETENTION,
+    WARNING_RETENTION,
+)
 from mftik_sts.session_worker.process import (
     _inbound,
     delivery_overrides_of,
@@ -88,12 +92,11 @@ def test_an_availability_notice_overflow_fails_and_drops_nothing(
 
 
 def test_must_deliver_kinds_share_one_fifo_ahead_of_each_feed() -> None:
-    """Round-robin, must-deliver first.
+    """The shared FIFO is drained before any market-data feed.
 
-    Slot 0 is the shared FIFO, then each market-data feed in the order
-    it was first seen. A fill and the RPC reply offered after it stay
-    in that order, with one trade between them rather than either queue
-    draining dry first.
+    A fill and the RPC reply offered after it stay in that order, and
+    both come out before the trades that were already queued. Market
+    data does not take a turn between them.
     """
     trade = "trade.Paper_Spot_BTCUSDT"
     lane = Delivery(capacity=8)
@@ -103,20 +106,76 @@ def test_must_deliver_kinds_share_one_fifo_ahead_of_each_feed() -> None:
     lane.accept(_event(StreamKind.TRADE, trade, "t2", seq=2, recv_ts=4))
     assert [event.event_id for event in _drain(lane)] == [
         "fill",
-        "t1",
         "ack",
+        "t1",
         "t2",
     ]
 
 
 def test_a_resync_stays_ahead_of_the_deferred_ready() -> None:
-    """Offered in that order, taken in that order, with a print between."""
+    """Offered in that order, both notices come out before the print."""
     trade = "trade.Paper_Spot_BTCUSDT"
     lane = Delivery(capacity=8)
     lane.accept(_event(StreamKind.TRADE, trade, "t", seq=1))
     lane.accept(_event(StreamKind.RESYNC, "td.7", "resync"))
     lane.accept(_event(StreamKind.TD_NOTICE, "td.7", "ready"))
-    assert [event.event_id for event in _drain(lane)] == ["resync", "t", "ready"]
+    assert [event.event_id for event in _drain(lane)] == ["resync", "ready", "t"]
+
+
+def test_a_saturated_market_does_not_hold_a_fill_or_overflow_it() -> None:
+    """Several ``all`` feeds stay full. The next ``take`` is still the fill.
+
+    Market data drops its oldest print. Must-deliver does not share
+    those turns, so a strategy that keeps taking drains every fill
+    before another book, and the must-deliver queue never fills.
+    """
+    clock = FakeClock()
+    feeds = (
+        "trade.Paper_Spot_BTCUSDT",
+        "trade.Paper_Spot_ETHUSDT",
+        "trade.Paper_Spot_SOLUSDT",
+    )
+    lane = Delivery(capacity=4, clock=clock)
+    for feed in feeds:
+        for seq in range(lane.capacity):
+            lane.accept(
+                _event(
+                    StreamKind.TRADE,
+                    feed,
+                    f"{feed}-{seq}",
+                    seq=seq,
+                    recv_ts=clock.now(),
+                )
+            )
+    for burst in range(lane.capacity * 3):
+        clock.advance(0.05)
+        for feed in feeds:
+            lane.accept(
+                _event(
+                    StreamKind.TRADE,
+                    feed,
+                    f"{feed}-more-{burst}",
+                    seq=100 + burst,
+                    recv_ts=clock.now(),
+                )
+            )
+        fill = f"fill-{burst}"
+        lane.accept(_event(StreamKind.TD, "td.7", fill, recv_ts=clock.now()))
+        got = lane.take()
+        assert got is not None
+        assert got.event_id == fill
+        assert got.kind is StreamKind.TD
+        assert lane.failed is False
+    assert lane.dropped > 0
+    assert lane.fail_reason is None
+    rest: list[Inbound] = []
+    while True:
+        event = lane.take()
+        if event is None:
+            break
+        rest.append(event)
+    assert len(rest) == lane.capacity * len(feeds)
+    assert all(event.kind is not StreamKind.TD for event in rest)
 
 
 def test_strategy_yml_overrides_apply_and_cannot_move_must_deliver() -> None:
@@ -254,6 +313,32 @@ def test_drop_warnings_are_rate_limited_per_feed(
     assert len(lane.warnings()) == 3
     assert len(logged) == 2
     assert lane.dropped_by_feed == {feed: 3}
+
+
+def test_marks_and_warnings_forget_the_oldest() -> None:
+    """A long session does not keep one note per event.
+
+    The drop count still names every loss. The mark dict and the
+    warning deque keep only the recent window.
+    """
+    clock = FakeClock()
+    feed = "trade.Paper_Spot_BTCUSDT"
+    lane = Delivery(capacity=1, clock=clock)
+    total = MARK_RETENTION + 2
+    for seq in range(total):
+        clock.advance(0.001)
+        lane.accept(
+            _event(StreamKind.TRADE, feed, f"e{seq}", seq=seq, recv_ts=clock.now())
+        )
+    drops = total - 1
+    assert lane.dropped == drops
+    assert lane.mark("e0") is None
+    assert lane.mark(f"e{drops - 1}") is LogMark.DROPPED
+    assert lane.mark(f"e{total - 1}") is None
+    lines = lane.warnings()
+    assert len(lines) == WARNING_RETENTION
+    assert lines[0].endswith("seq=1 count=2")
+    assert lines[-1].endswith(f"seq={drops - 1} count={drops}")
 
 
 def test_seq_and_bar_open_come_from_the_envelope() -> None:
