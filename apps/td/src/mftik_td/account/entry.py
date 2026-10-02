@@ -1,4 +1,4 @@
-"""Process entry for one paper account worker.
+"""Process entry for one account worker.
 
 ``python -m mftik_td.account`` builds one :class:`AccountWorker` from
 the argv and the ``apis`` row, heartbeats to the shim, and serves
@@ -6,10 +6,12 @@ the argv and the ``apis`` row, heartbeats to the shim, and serves
 not import this module. The order path does not go through the
 controller (§7.1).
 
-Paper only. Any other venue logs and exits before ``ready``, which is
-B6-02's trading layer. The paper trading layer stays up for the life
-of the process: there is no wire type for ``PUSH_TRADING`` yet
-(DEFAULT 1). Shutdown is the only :meth:`TradingLayer.deactivate`.
+Every bound venue starts. The resident layer comes up first. The
+trading layer stays off until ``td.account.trading`` says on. Paper's
+resident connector and the trading session's private client are
+different objects, so closing the book does not close the resident
+connection. A real venue's trading REST client borrows the resident
+pool (R4) and does not close it.
 """
 
 from __future__ import annotations
@@ -31,11 +33,11 @@ from mftik.symbols import SymbolClient
 
 from mftik_td.account.handlers import account_subject_handler
 from mftik_td.account.heartbeat import beat_until, write_heartbeat
-from mftik_td.account.session import Session
 from mftik_td.account.worker import AccountWorker
 from mftik_td.backfill.executor import BackfillExecutor
 from mftik_td.backfill.reader import HistoryReaderFactory
 from mftik_td.db import account_credential, get_api
+from mftik_td.session.factory import VenueSessionFactory
 
 logger = logging.getLogger("mftik_td.account")
 
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 async def run(argv: list[str] | None = None) -> int:
-    """Serve one paper account until SIGINT or SIGTERM. Returns an exit code."""
+    """Serve one account until SIGINT or SIGTERM. Returns an exit code."""
     args = _parse(argv)
     stop = asyncio.Event()
     _install_signals(stop)
@@ -85,14 +87,6 @@ async def run(argv: list[str] | None = None) -> int:
                 row.venue,
             )
             return 1
-        if venue != "Paper":
-            logger.error(
-                "account worker api_id=%s venue=%s is not paper; "
-                "real venues are B6-02",
-                args.api_id,
-                venue,
-            )
-            return 1
         if row.cancel_on_disconnect != args.cancel_on_disconnect:
             logger.info(
                 "account worker api_id=%s cancel_on_disconnect argv=%s row=%s; "
@@ -102,26 +96,24 @@ async def run(argv: list[str] | None = None) -> int:
                 row.cancel_on_disconnect,
             )
         async with Broker() as broker:
-            private = PaperRemotePrivateClient(
-                broker,
-                api_key=row.api_key,
-                api_secret=row.api_secret,
-                passphrase=row.passphrase,
-            )
             symbols = SymbolClient(broker)
-            session = Session(
-                api_id=row.api_id,
-                broker=broker,
-                private=private,
-                symbols=symbols,
-            )
+            # Paper has no HTTP pool. Its resident connection is a
+            # private client of its own, not the one the trading
+            # session will close.
+            resident_connector = None
+            if venue == "Paper":
+                resident_connector = PaperRemotePrivateClient(
+                    broker,
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    passphrase=row.passphrase,
+                )
             worker = AccountWorker(
                 row.api_id,
                 venue=venue,
                 incarnation=args.incarnation,
                 cancel_on_disconnect=row.cancel_on_disconnect,
-                private=private,
-                session=session,
+                resident_connector=resident_connector,
                 clock=SystemClock(),
                 backfill=BackfillExecutor(
                     broker=broker,
@@ -130,8 +122,25 @@ async def run(argv: list[str] | None = None) -> int:
                 ),
             )
             try:
+                # Not wrapped in wait_for. Cancelling the resident's
+                # first keepalive leaves the layer half-started, and
+                # that call is already best-effort inside start. The
+                # client timeout on that call is 10s and the start
+                # budget is 8s; the plan does not say to cut the warm
+                # call short to fit. Recon is not part of ready: the
+                # trading layer is off.
                 await worker.resident.start()
-                await worker.trading.activate()
+                factory = VenueSessionFactory(
+                    broker, load_api=account_credential, symbols=symbols
+                )
+                pool = worker.resident.pool
+                client_for = pool.client_for if pool is not None else None
+
+                async def build_session():
+                    return await factory.create(row.api_id, client_for=client_for)
+
+                worker.trading.set_factory(build_session)
+                worker.trading.adopt(await build_session())
             except Exception:
                 logger.exception(
                     "account worker api_id=%s failed to start", args.api_id
@@ -157,12 +166,8 @@ async def run(argv: list[str] | None = None) -> int:
                 name=f"td-account-{worker.api_id}",
             )
             try:
-                await _listen(
-                    broker, Topics.td_order(worker.api_id), STS_ORDER_SUBMIT
-                )
-                await _listen(
-                    broker, Topics.td_account(worker.api_id), TD_OMS_VIEW
-                )
+                await _listen(broker, Topics.td_order(worker.api_id), STS_ORDER_SUBMIT)
+                await _listen(broker, Topics.td_account(worker.api_id), TD_OMS_VIEW)
             except Exception:
                 logger.exception(
                     "account worker api_id=%s subjects did not answer",
@@ -170,15 +175,13 @@ async def run(argv: list[str] | None = None) -> int:
                 )
                 for task in (order_task, account_task):
                     task.cancel()
-                await asyncio.gather(
-                    order_task, account_task, return_exceptions=True
-                )
+                await asyncio.gather(order_task, account_task, return_exceptions=True)
                 await _shutdown(worker)
                 return 1
             ready = True
             write_heartbeat(True)
             logger.info(
-                "account worker ready api_id=%s incarnation=%s",
+                "account worker ready api_id=%s incarnation=%s trading=off",
                 worker.api_id,
                 worker.incarnation,
             )

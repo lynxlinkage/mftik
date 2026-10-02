@@ -101,8 +101,9 @@ async def _reconcile_once(
     supervisor: Supervisor,
     orchestrator: TdOrchestrator,
     observations,
+    broker: Broker,
 ) -> None:
-    """Read bindings, name actions, apply spawn, stop and release."""
+    """Read bindings, name actions, apply spawn, stop, release and the trading bit."""
     accounts, flags = await load_accounts(INSTANCE)
     views = await account_views(supervisor, observations, accounts)
     actions = orchestrator.reconcile(accounts, intent_book().rows(), views)
@@ -112,6 +113,7 @@ async def _reconcile_once(
         accounts,
         code_ref=orchestrator.code_ref,
         cancel_on_disconnect=flags,
+        broker=broker,
     )
 
 
@@ -119,6 +121,7 @@ async def _reconcile_loop(
     supervisor: Supervisor,
     orchestrator: TdOrchestrator,
     observations,
+    broker: Broker,
     stop: asyncio.Event,
 ) -> None:
     """Later passes. The boot pass already ran, before the subjects opened."""
@@ -129,7 +132,7 @@ async def _reconcile_loop(
         except TimeoutError:
             pass
         try:
-            await _reconcile_once(supervisor, orchestrator, observations)
+            await _reconcile_once(supervisor, orchestrator, observations, broker)
         except Exception:
             logger.exception("TD reconcile pass failed")
 
@@ -188,7 +191,7 @@ async def amain() -> bool:
             # :func:`mftik.intent_gc.watch_sts_reports`.
             intents = intent_book()
             try:
-                await _reconcile_once(supervisor, orchestrator, observations)
+                await _reconcile_once(supervisor, orchestrator, observations, broker)
             except Exception:
                 logger.exception("TD reconcile pass failed")
             logger.info("TD started instance=%s", INSTANCE)
@@ -217,7 +220,7 @@ async def amain() -> bool:
                 name="td-intent-gc",
             )
             reconcile_task = asyncio.create_task(
-                _reconcile_loop(supervisor, orchestrator, observations, stop),
+                _reconcile_loop(supervisor, orchestrator, observations, broker, stop),
                 name="td-reconcile",
             )
             report_task = asyncio.create_task(
@@ -225,9 +228,7 @@ async def amain() -> bool:
                     supervisor,
                     plane=SOURCE,
                     instance=INSTANCE,
-                    publish=lambda subject, envelope: broker.publish(
-                        subject, envelope
-                    ),
+                    publish=lambda subject, envelope: broker.publish(subject, envelope),
                     clock=SystemClock(),
                 ),
                 name="td-procman-report",

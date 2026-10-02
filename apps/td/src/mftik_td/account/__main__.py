@@ -1,4 +1,4 @@
-"""``python -m mftik_td.account`` — one paper account worker."""
+"""``python -m mftik_td.account`` — one account worker."""
 
 from mftik_td.account.entry import main
 

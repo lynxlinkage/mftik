@@ -6,18 +6,32 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+import httpx
 from mftik.broker import Broker
 from mftik.exchange import PaperExchange, venues
 from mftik.exchange.binance.delivery.private import BinanceDeliveryPrivateClient
+from mftik.exchange.binance.delivery.protocol import BINANCE_DELIVERY_REST_URL
+from mftik.exchange.binance.delivery.rest import BinanceDeliveryRest
 from mftik.exchange.binance.future.private import BinanceFuturePrivateClient
+from mftik.exchange.binance.future.protocol import BINANCE_FUTURE_REST_URL
+from mftik.exchange.binance.future.rest import BinanceFutureRest
 from mftik.exchange.binance.spot.private import BinanceSpotPrivateClient
 from mftik.exchange.bitget.private import BitgetPrivateClient
+from mftik.exchange.bitget.protocol import BITGET_REST_URL
+from mftik.exchange.bitget.rest import BitgetRest
 from mftik.exchange.bybit.private import BybitPrivateClient
+from mftik.exchange.bybit.protocol import BYBIT_REST_URL
+from mftik.exchange.bybit.rest import BybitRest
 from mftik.exchange.deribit.private import DeribitPrivateClient
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.gate.future.private import GateFuturesPrivateClient
+from mftik.exchange.gate.future.protocol import GATE_FUTURES_REST_URL
+from mftik.exchange.gate.future.rest import GateFuturesRest
 from mftik.exchange.gate.spot.private import GateSpotPrivateClient
+from mftik.exchange.gate.spot.rest import GATE_SPOT_REST_URL, GateSpotRest
 from mftik.exchange.okx.private import OkxPrivateClient
+from mftik.exchange.okx.protocol import OKX_REST_URL
+from mftik.exchange.okx.rest import OkxRest
 from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik.symbols import SymbolClient
 
@@ -27,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 #: Loads the ``apis`` row for an api_id (``mftik_td.db.get_api`` in production).
 LoadApi = Callable[[int], Awaitable[Any]]
+#: ``ResidentLayer.pool.client_for``. The trading REST client borrows
+#: that warm client and does not close it.
+ClientFor = Callable[[str], httpx.AsyncClient]
 
 
 class SessionFactory(Protocol):
@@ -154,7 +171,21 @@ class VenueSessionFactory:
     def paper(self) -> PaperSessionFactory:
         return self._paper
 
-    async def create(self, api_id: int) -> Session:
+    async def create(
+        self, api_id: int, *, client_for: ClientFor | None = None
+    ) -> Session:
+        """Build (but do not start) a session for ``api_id``.
+
+        ``client_for`` is the resident pool. When it is set, the
+        venue's trading REST client is constructed with that warm
+        ``httpx.AsyncClient`` (``client=``) and passed in as ``rest=``.
+        The connector must not close it: ``_owns_client`` stays false
+        because the client was supplied. ``None`` keeps the previous
+        construction, where the REST client opens its own connection.
+        Binance spot and Deribit have no trading REST client (spot
+        orders go on the WS API, Deribit on the WS RPC). Their pool is
+        still the resident keepalive; there is nothing here to inject.
+        """
         row = await self._load_api(api_id)
         if row is None:
             raise ExchangeError(f"no api credential for api_id={api_id}")
@@ -174,6 +205,15 @@ class VenueSessionFactory:
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    GATE_SPOT_REST_URL,
+                    lambda client: GateSpotRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building Gate session api_id=%s key=%s…",
@@ -187,6 +227,15 @@ class VenueSessionFactory:
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    GATE_FUTURES_REST_URL,
+                    lambda client: GateFuturesRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building GateFutures session api_id=%s key=%s…",
@@ -209,6 +258,15 @@ class VenueSessionFactory:
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    BYBIT_REST_URL,
+                    lambda client: BybitRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building Bybit session api_id=%s key=%s…",
@@ -221,6 +279,11 @@ class VenueSessionFactory:
             # ``api_secret`` is the Ed25519 private key, not a shared secret.
             # It is parsed here, at construction, so a malformed credential
             # fails the session build rather than the first order.
+            #
+            # Spot order entry is the WS API. There is no ``rest=`` to
+            # point at the resident pool. The pool still serves keepalive
+            # and, later, backfill.
+            self._no_trading_rest(api_id, venue.name, client_for)
             private = BinanceSpotPrivateClient(
                 api_key=row.api_key,
                 api_secret=row.api_secret,
@@ -241,6 +304,16 @@ class VenueSessionFactory:
                 api_secret=row.api_secret,
                 passphrase=row.passphrase or "",
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    OKX_REST_URL,
+                    lambda client: OkxRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        passphrase=row.passphrase or "",
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building Okx session api_id=%s key=%s…",
@@ -252,6 +325,9 @@ class VenueSessionFactory:
         if venue is venues.DERIBIT:
             # Same unified-account story as Bybit: one HMAC credential,
             # no passphrase, every book this venue lists.
+            # Orders are WS RPC. There is no trading REST client to
+            # borrow the resident pool. The pool stays for keepalive.
+            self._no_trading_rest(api_id, venue.name, client_for)
             private = DeribitPrivateClient(
                 api_key=row.api_key,
                 api_secret=row.api_secret,
@@ -273,6 +349,16 @@ class VenueSessionFactory:
                 api_secret=row.api_secret,
                 passphrase=row.passphrase or "",
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    BITGET_REST_URL,
+                    lambda client: BitgetRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        passphrase=row.passphrase or "",
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building Bitget session api_id=%s key=%s…",
@@ -293,6 +379,15 @@ class VenueSessionFactory:
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    BINANCE_FUTURE_REST_URL,
+                    lambda client: BinanceFutureRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building BinanceUM session api_id=%s key=%s…",
@@ -308,6 +403,15 @@ class VenueSessionFactory:
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
+                **self._rest(
+                    client_for,
+                    BINANCE_DELIVERY_REST_URL,
+                    lambda client: BinanceDeliveryRest(
+                        api_key=row.api_key,
+                        api_secret=row.api_secret,
+                        client=client,
+                    ),
+                ),
             )
             logger.info(
                 "TD building BinanceCM session api_id=%s key=%s…",
@@ -318,6 +422,35 @@ class VenueSessionFactory:
 
         raise ExchangeError(
             f"venue {venue.name!r} is registered but TD has no client for it"
+        )
+
+    @staticmethod
+    def _rest(
+        client_for: ClientFor | None,
+        base_url: str,
+        build: Callable[[httpx.AsyncClient], Any],
+    ) -> dict[str, Any]:
+        """``rest=`` for a pooled client, or nothing so the connector builds one.
+
+        Passing ``rest=None`` is not the same as omitting it for every
+        constructor, and omitting it is what the existing callers rely
+        on. The built client does not own the pool client.
+        """
+        if client_for is None:
+            return {}
+        return {"rest": build(client_for(base_url))}
+
+    @staticmethod
+    def _no_trading_rest(
+        api_id: int, venue: str, client_for: ClientFor | None
+    ) -> None:
+        if client_for is None:
+            return
+        logger.info(
+            "TD api_id=%s venue=%s has no trading REST client; "
+            "the resident pool stays for keepalive",
+            api_id,
+            venue,
         )
 
     def _session(self, api_id: int, private: Any) -> Session:

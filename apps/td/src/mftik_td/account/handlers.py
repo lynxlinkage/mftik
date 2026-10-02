@@ -10,7 +10,7 @@ message in, one reply or ``None`` out. It does not see the broker
   submit, cancel, and ``td.order.cancel_session``.
 * ``td.account.{api_id}`` (:meth:`~mftik.protocol.Topics.td_account`):
   ``oms.view`` (including ``settled``), ``oms.order``, ``ledger.view``,
-  and ``td.backfill`` (the resident layer, B6-05).
+  ``td.account.trading`` (B6-02), and ``td.backfill`` (B6-05).
 
 ``td.oms.{api_id}`` and ``td.ledger.{api_id}`` stay fan-out subjects
 (:meth:`~mftik.protocol.Topics.td_oms`,
@@ -111,6 +111,7 @@ from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_ACCOUNT_TRADING,
     TD_BACKFILL,
     TD_ERROR,
     TD_LEDGER_VIEW,
@@ -1081,9 +1082,11 @@ class LedgerHandler:
 
 
 def account_subject_handler(worker: AccountWorker) -> Handler:
-    """``td.account.{api_id}``: OMS reads and the ledger, one subject."""
+    """``td.account.{api_id}``: OMS, the ledger, backfill, the trading bit."""
 
     async def handle(message: UntypedEnvelope) -> Reply | None:
+        if message.type == TD_ACCOUNT_TRADING:
+            return await worker.trading.handle(message)
         if message.type == TD_BACKFILL:
             return await worker.resident.handle_backfill(message)
         if message.type in worker.oms.TYPES:

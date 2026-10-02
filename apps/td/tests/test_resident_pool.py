@@ -1,9 +1,9 @@
 """R1–R5 for a non-paper resident layer (B6-01).
 
 In-process. The venue is Bybit behind :class:`httpx.MockTransport`, and
-the clock is a :class:`~mftik.clock.FakeClock`. Paper still has no pool:
-the contract test that asks a paper worker for one stays ``xfail``
-until B6-02, because that test also switches the trading layer.
+the clock is a :class:`~mftik.clock.FakeClock`. Paper still has no pool.
+The contract test that switches the trading layer uses Bybit for that
+reason (B6-02).
 
 A backfill that is not a ``TdBackfill`` is refused and does not replace
 the pool. The pool still has more than one connection, which is what

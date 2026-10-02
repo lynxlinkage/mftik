@@ -1,8 +1,8 @@
 """What the account worker will do, written down before it does it (IF-11).
 
-Each test is ``xfail(strict=True)``. It describes behaviour §7.1 already
-settles, and it fails today because the surface returns null data.
-``strict`` is the point: the ticket that implements one of these cannot
+A test still marked ``xfail(strict=True)`` names the later ticket that
+owns it. The trading-layer toggle is B6-02 and runs. ``strict`` is the
+point: the ticket that implements one of the remaining tests cannot
 merge while the marker is still on it.
 
 Nothing here reaches a venue or a broker. The fakes are the connector
@@ -17,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import AsyncIterator
 from decimal import Decimal
 
+import httpx
 import pytest
-from mftik.exchange.models import Order, OrderStatus, OrderType, Side
+from mftik.exchange.models import Balance, Order, OrderStatus, OrderType, Side
 from mftik.exchange.oms import Position
 from mftik.protocol import TdCancelSessionRequest, TdOmsViewRequest
 from mftik.strategy.client_order_id import format_client_order_id
@@ -168,9 +170,69 @@ class _ChaseWhenReleased:
 # --- trading layer vs resident layer (F35) ---------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="B6-02 switches the trading layer; B6-01 keeps the resident pool",
+class _ToggleConnector:
+    """A private book with no sockets. Recon is an empty snapshot."""
+
+    name = "Bybit"
+
+    def __init__(self) -> None:
+        self.connected = False
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def close(self) -> None:
+        self.connected = False
+
+    async def place_order(self, request: object) -> Order:
+        raise AssertionError(request)
+
+    async def cancel_by_client_order_id(self, client_order_id: str) -> Order:
+        raise AssertionError(client_order_id)
+
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+        return []
+
+    async def fetch_balances(self) -> list[Balance]:
+        return []
+
+    def stream_orders(self) -> AsyncIterator[Order]:
+        return _quiet()
+
+    def stream_fills(self) -> AsyncIterator[object]:
+        return _quiet()
+
+    def stream_balances(self) -> AsyncIterator[Balance]:
+        return _quiet()
+
+
+async def _quiet() -> AsyncIterator[object]:
+    await asyncio.Event().wait()
+    yield None
+
+
+def _bybit_time(request: httpx.Request) -> httpx.Response:
+    del request
+    return httpx.Response(
+        200,
+        json={
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "timeSecond": "1700000000",
+                "timeNano": "1700000000000000000",
+            },
+            "time": 1_700_000_000_000,
+        },
+    )
+
+
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason=(
+        "Session.start arms a sweep that sleeps; the resident clock "
+        "does not drive that loop"
+    )
 )
 async def test_trading_layer_toggle_leaves_the_resident_layer_up() -> None:
     """Activate and deactivate do not rebuild the pool or drop keepalive (T1, R2).
@@ -178,25 +240,43 @@ async def test_trading_layer_toggle_leaves_the_resident_layer_up() -> None:
     The resident layer was already up, and it is still the same object
     afterwards: same pool, same hook, still open. The trading layer
     itself does change. That is the whole of the switch.
+
+    Paper has no HTTP pool, so the worker is Bybit and the transport is
+    in-process. The probe is installed after ``start``: that first
+    keepalive is the pool's own warm call, and the two calls below are
+    the two pings this contract counts.
     """
     probe = _Probe()
-    worker = AccountWorker(API, venue="Paper", keepalive=probe)
-    await worker.resident.start()
-    pool = worker.resident.pool
-    assert worker.resident.started
-    assert pool is not None
+    session = Session(
+        api_id=API,
+        broker=_QuietBroker(),  # type: ignore[arg-type]
+        private=_ToggleConnector(),  # type: ignore[arg-type]
+    )
+    worker = AccountWorker(API, venue="Bybit", session=session)
+    await worker.resident.start(transport=httpx.MockTransport(_bybit_time))
+    worker.resident.keepalive = probe
+    try:
+        pool = worker.resident.pool
+        assert worker.resident.started
+        assert pool is not None
 
-    await worker.trading.activate()
-    assert worker.trading.active
-    await worker.resident.keepalive_once()
+        await worker.trading.activate()
+        assert worker.trading.active
+        await worker.resident.keepalive_once()
 
-    await worker.trading.deactivate()
-    assert worker.trading.active is False
-    assert worker.resident.started
-    assert worker.resident.pool is pool
-    assert worker.resident.keepalive is probe
-    await worker.resident.keepalive_once()
-    assert probe.pings == 2
+        await worker.trading.deactivate()
+        assert worker.trading.active is False
+        assert worker.resident.started
+        assert worker.resident.pool is pool
+        assert worker.resident.keepalive is probe
+        await worker.resident.keepalive_once()
+        assert probe.pings == 2
+    finally:
+        if worker.trading.session is not None and not worker.trading.session.destroyed:
+            if worker.trading.session.started or worker.trading.active:
+                await worker.trading.session.destroy()
+        if worker.resident.started:
+            await worker.resident.close()
 
 
 # --- cancel_session confirmation (F10) -------------------------------------
