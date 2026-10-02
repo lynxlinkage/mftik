@@ -131,11 +131,12 @@ def test_the_process_supervisor_takes_the_pin_path(
     seen: dict[str, object] = {}
 
     class _Supervisor:
-        def __init__(self, work_dir, *, plane, instance, pin_path=None):
+        def __init__(self, work_dir, *, plane, instance, pin_path=None, budget=None):
             seen["work_dir"] = work_dir
             seen["plane"] = plane
             seen["instance"] = instance
             seen["pin_path"] = pin_path
+            seen["budget"] = budget
 
     monkeypatch.setattr("mftik.procman.Supervisor", _Supervisor)
     monkeypatch.setattr("mftik.procman.pinned_releases_path", lambda: pin)
@@ -143,6 +144,7 @@ def test_the_process_supervisor_takes_the_pin_path(
     assert seen["plane"] == "sts"
     assert seen["instance"] == app.INSTANCE
     assert seen["pin_path"] == pin
+    assert seen["budget"] is None
     assert seen["work_dir"] == app._supervisor_work_dir("sts", app.INSTANCE)
 
 
