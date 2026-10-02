@@ -1,10 +1,10 @@
-"""``StsOrchestrator`` — one reconcile per session (§5.1).
+"""``StsOrchestrator`` — one reconcile per session (§5.1, §5.2).
 
-B4-02 wires this into the STS process: create, stop, mark terminal,
-reattach, and the status snapshot. Crash class, cleanup and rehang stay
-``NotImplementedError("IF-04")`` for B5-06. Registry and env handler
-signatures are IF-16 and raise until B5-10. This module does not import
-strategy code (F39).
+B4-02 wires create, stop, mark terminal, reattach, and the status
+snapshot. B5-06 fills the crash path: cleanup, the ``restarting`` write,
+the error line, and the rehang. Registry and env handler signatures are
+IF-16 and raise until B5-10. This module does not import strategy code
+(F39) and does not import the session worker.
 """
 
 from __future__ import annotations
@@ -12,26 +12,32 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Protocol
 
+from mftik.broker import NoRespondersError, RequestTimeoutError
 from mftik.clock import Clock, SystemClock
 from mftik.procman import (
     ALIVE_PHASES,
     CapacityExceeded,
     CloseMode,
     DesiredSlot,
-    ObservedWorker,
+    MessageError,
     ProcmanError,
     ReattachAction,
     ReattachObservation,
     Supervisor,
     WorkerPhase,
+    count_restarts_in_window,
     current_release,
+    decode_exit,
+    exit_record_path,
     reattach_action,
 )
 from mftik.protocol import (
     STS_SESSION_STATUS,
+    TD_ORDER_CANCEL_SESSION,
     Envelope,
     ListSessionsRequest,
     ListSessionsResult,
@@ -42,14 +48,26 @@ from mftik.protocol import (
     StsSessionEndRequest,
     StsSessionEndResult,
     StsSessionStatus,
+    TdCancelSessionRequest,
+    TdCancelSessionResult,
     Topics,
 )
+from mftik.protocol.session_log import publish_sts_log
+from pydantic import ValidationError
 
-from mftik_sts.controller._ticket import unimplemented
+from mftik_sts.controller.decisions import (
+    CONTROLLER_LOG_SOURCE,
+    classify_crash,
+    crash_log_message,
+    decide_restart,
+    retains_intents,
+    spawn_allowed,
+)
 from mftik_sts.controller.defaults import (
     FIRST_INCARNATION,
     SESSION_HB_TIMEOUT_S,
     SESSION_STOP_GRACE_S,
+    STS_CLEANUP_TIMEOUT_S,
 )
 from mftik_sts.controller.env import forwarded_env
 from mftik_sts.controller.spawn import session_worker_argv, write_session_request
@@ -61,8 +79,12 @@ from mftik_sts.controller.status import (
 )
 from mftik_sts.controller.types import (
     ActionKind,
+    Cleanup,
+    CrashCause,
+    CrashClass,
     DesiredPhase,
     OrchestratorAction,
+    RestartVerdict,
     SessionPhase,
     SessionSpec,
     SessionStatus,
@@ -72,6 +94,7 @@ from mftik_sts.controller.worker import (
     procman_start_timeout_s,
     session_worker_spec,
 )
+from mftik_sts.exit_codes import cause_for_exit
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +117,26 @@ _DEAD_PHASES = frozenset(
     }
 )
 
-Publish = Callable[[str, Envelope[StsSessionStatus]], Awaitable[None]]
+Publish = Callable[[str, object], Awaitable[None]]
 ArgvFor = Callable[[Path], Sequence[str]]
+
+
+class _CancelBroker(Protocol):
+    """The ``request`` half of a broker. Tests pass a double."""
+
+    async def request(
+        self, subject: str, envelope: object, *, timeout: float
+    ) -> object: ...
+
+
+class _LogBus:
+    """Adapts the orchestrator's publish callback to :func:`publish_sts_log`."""
+
+    def __init__(self, publish: Publish) -> None:
+        self._publish = publish
+
+    async def publish(self, topic: str, envelope: object) -> None:
+        await self._publish(topic, envelope)
 
 
 @dataclass(frozen=True)
@@ -133,6 +174,17 @@ class _Held:
     spawn_started: bool = False
     #: Set when that spawn refused with ``capacity_exceeded``.
     refusal: CallError | None = None
+    cleanup: Cleanup = Cleanup.NOT_RUN
+    crash_class: CrashClass | None = None
+    #: Monotonic instants of rehanges this process has spawned. A controller
+    #: restart drops the window. The lifetime count is ``restart_count``.
+    restarted_at: list[float] = field(default_factory=list)
+    restarts_in_window: int = 0
+    #: True after this controller's stop, until the next spawn. A kill that
+    #: follows it is ``stop_stuck``, not a death we did not ask for.
+    stop_sent: bool = False
+    #: Account → outstanding client order ids, or a failure token.
+    unconfirmed: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _terminal(phase: SessionPhase) -> bool:
@@ -160,8 +212,35 @@ def _present(status: SessionStatus) -> bool:
     return not (status.exit_recorded and status.pid_gone)
 
 
+def _plain_signal(value: object) -> int | None:
+    """A signal number. ``signal.Signals`` is an ``int`` enum, not ``int``."""
+    if value is None or type(value) is bool or not isinstance(value, int):
+        return None
+    return int(value)
+
+
+def _clean_exit(status: SessionStatus) -> bool:
+    """Exit 0 and no signal. Cleanup does not run. The strategy finished."""
+    return (
+        status.worker_incarnation > 0
+        and status.exit_recorded
+        and status.pid_gone
+        and status.crash_class is None
+        and status.signal is None
+        and status.exit_code == 0
+    )
+
+
+def _non_clean(status: SessionStatus) -> bool:
+    if status.crash_class is not None:
+        return True
+    if status.signal is not None:
+        return True
+    return status.exit_code is not None and status.exit_code != 0
+
+
 def _crash_pending(spec: SessionSpec, status: SessionStatus) -> bool:
-    """A death B5-06 has to classify. Create and stop never look like this."""
+    """A death the crash path has to finish. Create and stop never look like this."""
     if spec.desired is not DesiredPhase.RUNNING:
         return False
     if status.crash_class is not None or status.phase is SessionPhase.RESTARTING:
@@ -171,6 +250,139 @@ def _crash_pending(spec: SessionSpec, status: SessionStatus) -> bool:
         and status.pid_gone
         and status.worker_incarnation > 0
     )
+
+
+def _stop_actions(
+    spec: SessionSpec, status: SessionStatus
+) -> tuple[OrchestratorAction, ...]:
+    """End the session. A kill or a non-zero exit is cleaned up first.
+
+    A clean exit, and a session that never spawned, are ``done`` with no
+    cancel. Desired ``stopped`` does not rehang, even when F11 would.
+    """
+    if _needs_stop(status):
+        return (
+            OrchestratorAction(
+                kind=ActionKind.STOP,
+                session_id=spec.session_id,
+                incarnation=status.worker_incarnation,
+            ),
+        )
+    exited = status.exit_recorded and status.pid_gone
+    if status.phase is SessionPhase.STOPPING and not exited:
+        return ()
+    if not exited or status.worker_incarnation == 0 or not _non_clean(status):
+        return (
+            OrchestratorAction(
+                kind=ActionKind.MARK_TERMINAL,
+                session_id=spec.session_id,
+                phase=SessionPhase.DONE,
+            ),
+        )
+    return _crash_actions(spec, status, allow_rehang=False)
+
+
+def _crash_actions(
+    spec: SessionSpec,
+    status: SessionStatus,
+    *,
+    allow_rehang: bool = True,
+) -> tuple[OrchestratorAction, ...]:
+    """Cleanup, then fail or rehang. Waiting on the exit returns nothing."""
+    attempt = status.restarts_in_window + 1
+    if attempt < 1:
+        attempt = 1
+    decision = decide_restart(
+        restart=spec.restart,
+        crash_class=status.crash_class,
+        ready=status.ready,
+        cleanup=status.cleanup,
+        exit_recorded=status.exit_recorded,
+        pid_gone=status.pid_gone,
+        restarts_in_window=status.restarts_in_window,
+        incarnation=status.worker_incarnation,
+        attempt=attempt,
+        max_restarts=spec.max_restarts,
+    )
+    if decision.verdict is RestartVerdict.WAIT:
+        return ()
+    if decision.verdict is RestartVerdict.CLEANUP:
+        return (
+            OrchestratorAction(
+                kind=ActionKind.CLEANUP,
+                session_id=spec.session_id,
+                incarnation=status.worker_incarnation,
+                api_ids=spec.api_ids,
+            ),
+        )
+    if decision.verdict is RestartVerdict.REHANG and allow_rehang:
+        actions = [
+            OrchestratorAction(
+                kind=ActionKind.MARK_RESTARTING,
+                session_id=spec.session_id,
+                phase=SessionPhase.RESTARTING,
+                reason=decision.reason,
+                incarnation=status.worker_incarnation,
+            )
+        ]
+        if decision.error_log or decision.alert:
+            actions.append(_alert_action(spec, status, decision))
+        actions.append(
+            OrchestratorAction(
+                kind=ActionKind.SPAWN,
+                session_id=spec.session_id,
+                incarnation=decision.next_incarnation,
+                delay_s=decision.delay_s,
+            )
+        )
+        return tuple(actions)
+    actions = [
+        OrchestratorAction(
+            kind=ActionKind.MARK_TERMINAL,
+            session_id=spec.session_id,
+            phase=SessionPhase.FAILED,
+            reason=decision.reason,
+            incarnation=status.worker_incarnation,
+        )
+    ]
+    if decision.error_log or decision.alert:
+        actions.append(_alert_action(spec, status, decision))
+    return tuple(actions)
+
+
+def _alert_action(
+    spec: SessionSpec, status: SessionStatus, decision: object
+) -> OrchestratorAction:
+    reason = getattr(decision, "reason", None)
+    alert = bool(getattr(decision, "alert", False))
+    return OrchestratorAction(
+        kind=ActionKind.ALERT,
+        session_id=spec.session_id,
+        reason=reason,
+        alert=alert,
+        incarnation=status.worker_incarnation,
+    )
+
+
+def _exit_facts(
+    observed: ReattachObservation,
+) -> tuple[int | None, int | None, bool]:
+    """Exit code, signal, and the ready bit from a reattach observation."""
+    code: int | None = None
+    signal_no: int | None = None
+    ready = False
+    record = observed.exit_record
+    if record is not None:
+        code = record.exit_code
+        signal_no = _plain_signal(record.signal)
+        ready = bool(record.ready)
+    view = observed.status
+    if view is not None:
+        ready = bool(view.ready) or ready
+        if code is None and signal_no is None:
+            code = view.exit_code
+            signal_no = _plain_signal(view.signal)
+    return code, signal_no, ready
 
 
 def _restart_mode(value: str) -> str:
@@ -214,12 +426,14 @@ class StsOrchestrator:
       ``procman.report.sts`` publications (B4-07). A session accepted
       but not yet spawned is on that report via :meth:`extra_workers`.
       Once the slot is ``STARTING``, the supervisor lists it itself.
-    * Does not import strategy code (F39). Crash and rehang are B5-06.
-      ``CapacityExceeded`` on the first spawn is the start refusal
+    * Does not import strategy code (F39). A rehang carries no strategy
+      state. ``CapacityExceeded`` on the first spawn is the start refusal
       (``capacity_exceeded``), not a later snapshot.
+    * Asks ``td.order.cancel_session`` only after the old incarnation is
+      dead (R1). ``Cleanup.CONFIRMED`` requires ``ok`` from every
+      ``api_id``. Anything else is ``UNCONFIRMED`` and the session fails.
 
-    ``reconcile`` is pure. Idle is an empty tuple. A crash-shaped status
-    still raises ``NotImplementedError("IF-04")``.
+    ``reconcile`` is pure. Idle is an empty tuple.
     """
 
     def __init__(
@@ -231,6 +445,7 @@ class StsOrchestrator:
         publish: Publish | None = None,
         argv_for: ArgvFor | None = None,
         code_ref: str | None = None,
+        broker: _CancelBroker | None = None,
     ) -> None:
         if supervisor.plane != "sts":
             raise ValueError(
@@ -242,6 +457,7 @@ class StsOrchestrator:
         self._publish = publish
         self._argv_for = argv_for if argv_for is not None else session_worker_argv
         self._code_ref = code_ref
+        self._broker = broker
         self._sessions: dict[str, _Held] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -250,13 +466,11 @@ class StsOrchestrator:
     ) -> tuple[OrchestratorAction, ...]:
         """Compare desired phase with the worker and name the actions.
 
-        Create, stop, or mark terminal (§5.1). Empty means the worker
-        already matches the spec. A crash — exit recorded, pid gone, an
-        incarnation already spawned, or ``crash_class`` / ``restarting``
-        set while the session is still desired running — raises
-        ``NotImplementedError("IF-04")``. B5-06 names cleanup, the
-        ``restarting`` write, and the rehang. Those actions are not
-        returned from here.
+        Create, stop, mark terminal, or the crash path (§5.1, §5.2).
+        Empty means the worker already matches the spec, or the exit is
+        not confirmed yet (R1). A crash names cleanup, then ``restarting``
+        plus the error line plus a delayed spawn, or ``failed`` plus the
+        error line. A rehang carries no strategy state.
 
         ``spec.instance`` has to be this supervisor's instance. A session
         addressed to another STS is not reconciled here.
@@ -272,36 +486,15 @@ class StsOrchestrator:
             )
         if _terminal(status.phase):
             return ()
-        if _crash_pending(spec, status):
-            unimplemented()
         if spec.desired is DesiredPhase.STOPPED:
-            if (
-                status.phase is SessionPhase.STOPPING
-                and status.exit_recorded
-                and status.pid_gone
-            ):
-                return (
-                    OrchestratorAction(
-                        kind=ActionKind.MARK_TERMINAL,
-                        session_id=spec.session_id,
-                        phase=SessionPhase.DONE,
-                    ),
-                )
-            if _needs_stop(status):
-                return (
-                    OrchestratorAction(
-                        kind=ActionKind.STOP,
-                        session_id=spec.session_id,
-                        incarnation=status.worker_incarnation,
-                    ),
-                )
-            if status.phase is SessionPhase.STOPPING:
-                return ()
+            return _stop_actions(spec, status)
+        if _clean_exit(status):
             return (
                 OrchestratorAction(
                     kind=ActionKind.MARK_TERMINAL,
                     session_id=spec.session_id,
                     phase=SessionPhase.DONE,
+                    reason="worker_exited:0",
                 ),
             )
         if _present(status):
@@ -314,7 +507,9 @@ class StsOrchestrator:
                     incarnation=FIRST_INCARNATION,
                 ),
             )
-        unimplemented()
+        if _crash_pending(spec, status) or status.worker_incarnation > 0:
+            return _crash_actions(spec, status)
+        return ()
 
     async def boot(self) -> None:
         """Apply :meth:`Supervisor.start` observations. Does not spawn.
@@ -355,41 +550,62 @@ class StsOrchestrator:
         )
 
     def extra_workers(self) -> tuple[ProcmanWorker, ...]:
-        """Sessions accepted but not yet handed to :meth:`Supervisor.spawn`.
+        """Sessions the supervisor's own report does not already list.
 
-        ``STARTING``, ``RUNNING`` and ``STOPPING`` are already on
-        :meth:`Supervisor.report`. The gap before spawn is not. MD and TD
-        release an owner missing from two consecutive
-        ``procman.report.sts`` publications (B4-07), so that gap is
-        filled here. The id is ``sts/session/<session_id>``. Restarting
-        with no process is B5-06 and is not included. Entries do not
-        repeat an id the supervisor already lists: this stops when spawn
-        is entered.
+        ``STARTING``, ``RUNNING`` and ``STOPPING`` with a live pid are on
+        :meth:`Supervisor.report`. The gap before the first spawn is not,
+        and neither is a dead or ``restarting`` session (R4, §8.2). MD and
+        TD release an owner missing from two consecutive
+        ``procman.report.sts`` publications (B4-07). The id is
+        ``sts/session/<session_id>``. ``restarting`` is not a procman
+        phase, so a session between incarnations is reported as
+        ``crashed``: the supervisor is not listing that slot, and the
+        intents stay. Entries do not repeat an id the supervisor lists.
         """
-        chosen: list[str] = []
+        chosen: list[ProcmanWorker] = []
+        code_ref: str | None = None
         for session_id in sorted(self._sessions):
             held = self._sessions[session_id]
-            if held.spec.desired is not DesiredPhase.RUNNING:
+            if not retains_intents(held.phase):
                 continue
-            if held.spawn_started or held.phase is not SessionPhase.PENDING:
+            if (
+                held.spec.desired is DesiredPhase.STOPPED
+                and held.phase is SessionPhase.PENDING
+            ):
                 continue
-            if held.worker_incarnation != 0:
-                continue
-            chosen.append(session_id)
-        if not chosen:
-            return ()
-        code_ref = self._release_name()
-        return tuple(
-            ProcmanWorker(
-                id=session_worker_id(session_id),
-                code_ref=code_ref,
-                rss_bytes=None,
-                phase=WorkerPhase.STARTING.value,
-                ready=False,
-                incarnation=FIRST_INCARNATION,
+            supervisor_lists = (
+                held.spawn_started
+                and not held.pid_gone
+                and held.phase
+                in (
+                    SessionPhase.STARTING,
+                    SessionPhase.RUNNING,
+                    SessionPhase.STOPPING,
+                )
             )
-            for session_id in chosen
-        )
+            if supervisor_lists:
+                continue
+            if code_ref is None:
+                code_ref = self._release_name()
+            if held.phase is SessionPhase.PENDING and held.worker_incarnation == 0:
+                phase = WorkerPhase.STARTING.value
+                incarnation = FIRST_INCARNATION
+                ready = False
+            else:
+                phase = WorkerPhase.CRASHED.value
+                incarnation = held.worker_incarnation or FIRST_INCARNATION
+                ready = held.ready
+            chosen.append(
+                ProcmanWorker(
+                    id=session_worker_id(session_id),
+                    code_ref=code_ref,
+                    rss_bytes=None,
+                    phase=phase,
+                    ready=ready,
+                    incarnation=incarnation,
+                )
+            )
+        return tuple(chosen)
 
     async def finish_start(self, session_id: str) -> CallError | None:
         """Spawn an accepted session before the start reply is sent.
@@ -570,6 +786,11 @@ class StsOrchestrator:
             exit_recorded=held.exit_recorded,
             pid=held.pid,
             pid_gone=held.pid_gone,
+            exit_code=held.exit_code,
+            signal=held.signal,
+            cleanup=held.cleanup,
+            crash_class=held.crash_class,
+            restarts_in_window=held.restarts_in_window,
             generation=held.spec.generation,
             observed_generation=held.observed_generation,
             conditions=held.conditions,
@@ -581,52 +802,44 @@ class StsOrchestrator:
                 await self._commit(held)
                 return
             await self._refresh(held)
-            if self._died(held):
-                # Exit 0 while the session is still desired running is a
-                # strategy that finished. Non-zero stays ``failed``. The
-                # controller cannot see the worker log, so a clean exit
-                # is recorded as ``worker_exited:0``.
-                if held.exit_code == 0:
-                    await self._finish_clean(held)
-                else:
-                    await self._fail(held, self._death_reason(held))
-                return
+            held.restarts_in_window = self._restarts_in_window(held)
             actions = self.reconcile(held.spec, self._observed(held))
             if not actions:
                 await self._commit(held)
                 return
             for action in actions:
-                if action.kind is ActionKind.SPAWN:
-                    await self._spawn(held, action)
-                elif action.kind is ActionKind.STOP:
-                    await self._stop(held)
-                elif action.kind is ActionKind.MARK_TERMINAL:
-                    self._mark_terminal(held, action)
-                else:
-                    unimplemented()
-                if _terminal(held.phase):
-                    await self._commit(held)
-                    return
+                await self._apply(held, action)
             await self._commit(held)
+            if _terminal(held.phase):
+                await self._release_quiet(session_worker_id(held.spec.session_id))
+                return
         logger.error(
             "STS drive did not settle session=%s phase=%s",
             held.spec.session_id,
             held.phase.value,
         )
 
-    def _died(self, held: _Held) -> bool:
-        if held.spec.desired is not DesiredPhase.RUNNING:
-            return False
-        if _terminal(held.phase) or held.worker_incarnation <= 0:
-            return False
-        return held.exit_recorded and held.pid_gone
+    def _restarts_in_window(self, held: _Held) -> int:
+        return count_restarts_in_window(
+            held.restarted_at,
+            now_s=self._clock.monotonic(),
+            window_s=float(held.spec.restart_window_s),
+        )
 
-    def _death_reason(self, held: _Held) -> str:
-        if held.exit_code is not None:
-            return f"worker_exited:{held.exit_code}"
-        if held.signal is not None:
-            return f"worker_signal:{held.signal}"
-        return "worker_exited"
+    async def _apply(self, held: _Held, action: OrchestratorAction) -> None:
+        if action.kind is ActionKind.SPAWN:
+            await self._spawn(held, action)
+        elif action.kind is ActionKind.STOP:
+            await self._stop(held)
+        elif action.kind is ActionKind.CLEANUP:
+            await self._cleanup(held)
+        elif action.kind is ActionKind.MARK_RESTARTING:
+            self._mark_restarting(held, action)
+            await self._commit(held)
+        elif action.kind is ActionKind.MARK_TERMINAL:
+            self._mark_terminal(held, action)
+        elif action.kind is ActionKind.ALERT:
+            await self._alert(held, action)
 
     async def _refresh(self, held: _Held) -> None:
         worker_id = session_worker_id(held.spec.session_id)
@@ -642,9 +855,12 @@ class StsOrchestrator:
             held.exit_recorded = False
             held.pid_gone = False
             held.pid = view.pid
-            held.ready = view.ready
+            held.ready = bool(view.ready)
             held.exit_code = None
             held.signal = None
+            held.crash_class = None
+            held.cleanup = Cleanup.NOT_RUN
+            held.unconfirmed = {}
             if view.phase is WorkerPhase.STOPPING:
                 held.phase = SessionPhase.STOPPING
             elif view.phase is WorkerPhase.RUNNING:
@@ -657,10 +873,14 @@ class StsOrchestrator:
         if view.phase in _DEAD_PHASES:
             held.exit_recorded = True
             held.pid_gone = True
-            held.ready = False
+            held.ready = bool(view.ready)
             held.pid = None
-            held.exit_code = view.exit_code
-            held.signal = view.signal
+            if view.exit_code is not None or view.signal is not None:
+                held.exit_code = view.exit_code
+                held.signal = _plain_signal(view.signal)
+            else:
+                self._apply_exit_file(held)
+            self._classify(held)
 
     def _note_absent(self, held: _Held) -> None:
         if held.worker_incarnation == 0 and held.phase is SessionPhase.PENDING:
@@ -671,13 +891,82 @@ class StsOrchestrator:
         held.pid = None
         held.pid_gone = True
         held.exit_recorded = True
+        self._apply_exit_file(held)
+        self._classify(held)
+
+    def _apply_exit_file(self, held: _Held) -> None:
+        """Read the shim's exit record when the slot no longer carries it.
+
+        ``Supervisor.stop`` releases the slot, so ``status`` is ``None``
+        and the file is the only remaining fact. A missing file leaves the
+        code and signal unset.
+        """
+        if held.exit_code is not None or held.signal is not None:
+            return
+        path = exit_record_path(
+            self.supervisor.work_dir, session_worker_id(held.spec.session_id)
+        )
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return
+        try:
+            record = decode_exit(raw)
+        except MessageError:
+            logger.warning(
+                "STS exit record is unreadable session=%s", held.spec.session_id
+            )
+            return
+        held.exit_code = record.exit_code
+        held.signal = _plain_signal(record.signal)
+
+    def _classify(self, held: _Held) -> None:
+        """Map the exit onto a crash class. A clean exit stays unclassified."""
+        if held.crash_class is not None:
+            return
+        if not (
+            held.exit_recorded and held.pid_gone and held.worker_incarnation > 0
+        ):
+            return
+        if held.exit_code == 0 and held.signal is None:
+            return
+        if (
+            held.exit_code is None
+            and held.signal is None
+            and (held.stop_sent or held.spec.desired is DesiredPhase.STOPPED)
+        ):
+            # No exit file after a stop this controller asked for. A real
+            # kill writes the file before the slot is released. Treat the
+            # gap as clean so a finished ``on_stop`` stays ``done``.
+            return
+        if held.exit_code is None and held.signal is None:
+            held.crash_class = CrashClass.C
+            return
+        name = cause_for_exit(
+            exit_code=held.exit_code,
+            signal_no=held.signal,
+            stopped_by_controller=held.stop_sent,
+        )
+        if name is None:
+            return
+        held.crash_class = classify_crash(CrashCause(name))
 
     async def _spawn(self, held: _Held, action: OrchestratorAction) -> None:
+        if action.delay_s:
+            await self._clock.sleep(action.delay_s)
         if held.request is None:
             await self._fail(held, "missing_request")
             return
-        path = write_session_request(self.supervisor.work_dir, held.request)
         incarnation = action.incarnation or FIRST_INCARNATION
+        previous = held.worker_incarnation
+        if previous > 0 and not spawn_allowed(
+            exit_recorded=held.exit_recorded,
+            pid_gone=held.pid_gone,
+            cleanup=held.cleanup,
+        ):
+            await self._fail(held, "spawn_refused")
+            return
+        path = write_session_request(self.supervisor.work_dir, held.request)
         worker = session_worker_spec(
             held.spec,
             incarnation=incarnation,
@@ -703,9 +992,20 @@ class StsOrchestrator:
         held.column = column_status_for(SessionPhase.STARTING)
         held.pid_gone = False
         held.exit_recorded = False
+        held.exit_code = None
+        held.signal = None
+        held.crash_class = None
+        held.cleanup = Cleanup.NOT_RUN
+        held.unconfirmed = {}
+        held.stop_sent = False
+        held.ready = False
         held.conditions = {"phase": SessionPhase.STARTING.value}
+        if previous > 0 and incarnation > previous:
+            held.restart_count += 1
+            held.restarted_at.append(self._clock.monotonic())
 
     async def _stop(self, held: _Held) -> None:
+        held.stop_sent = True
         held.phase = SessionPhase.STOPPING
         held.column = column_status_for(SessionPhase.STOPPING)
         held.conditions = {"phase": SessionPhase.STOPPING.value}
@@ -727,29 +1027,131 @@ class StsOrchestrator:
         held.phase = phase
         held.column = column_status_for(phase)
         held.conditions = {"phase": phase.value}
+        if action.reason:
+            held.reason = action.reason[:256]
         if held.finished_at is None:
             held.finished_at = self._clock.now()
 
-    async def _finish_clean(self, held: _Held) -> None:
-        """A worker exited 0 while desired was still ``running``.
+    def _mark_restarting(self, held: _Held, action: OrchestratorAction) -> None:
+        """Step 1. The row says ``restarting`` before the next spawn.
 
-        That is ``done``, not ``failed``. Crash class, cleanup and rehang
-        stay B5-06. Who releases intents for a session that ended itself
-        stays #314.
+        The restart is counted when that spawn succeeds, not here. A
+        reconcile that runs again before the spawn must not see the
+        attempt twice.
         """
-        if _terminal(held.phase):
+        held.phase = SessionPhase.RESTARTING
+        held.column = column_status_for(SessionPhase.RESTARTING)
+        held.conditions = {"phase": SessionPhase.RESTARTING.value}
+        if action.reason:
+            held.reason = action.reason[:256]
+
+    async def _cleanup(self, held: _Held) -> None:
+        """One ``cancel_session`` per account. No retry.
+
+        Asked only after the old incarnation is dead. Empty ``api_ids``
+        is confirmed without a call. A timeout, no responders, a call
+        error, a decode error, or ``ok`` false on any account is
+        ``UNCONFIRMED``.
+        """
+        if held.cleanup is not Cleanup.NOT_RUN:
             return
-        held.phase = SessionPhase.DONE
-        held.column = column_status_for(SessionPhase.DONE)
-        held.reason = "worker_exited:0"
-        held.conditions = {"phase": SessionPhase.DONE.value}
-        held.exit_recorded = True
-        held.pid_gone = True
-        held.pid = None
-        if held.finished_at is None:
-            held.finished_at = self._clock.now()
-        await self._commit(held)
-        await self._release_quiet(session_worker_id(held.spec.session_id))
+        if not (held.exit_recorded and held.pid_gone):
+            return
+        api_ids = held.spec.api_ids
+        if not api_ids:
+            held.cleanup = Cleanup.CONFIRMED
+            held.unconfirmed = {}
+            return
+        if self._broker is None:
+            held.cleanup = Cleanup.UNCONFIRMED
+            held.unconfirmed = {
+                api_id: ("no_responders",) for api_id in api_ids
+            }
+            return
+        outcomes = await asyncio.gather(
+            *(
+                self._cancel_one(held.spec.session_id, api_id)
+                for api_id in api_ids
+            )
+        )
+        unconfirmed: dict[int, tuple[str, ...]] = {}
+        for api_id, outcome in zip(api_ids, outcomes, strict=True):
+            if outcome is not None:
+                unconfirmed[api_id] = outcome
+        held.unconfirmed = unconfirmed
+        held.cleanup = (
+            Cleanup.UNCONFIRMED if unconfirmed else Cleanup.CONFIRMED
+        )
+
+    async def _cancel_one(
+        self, session_id: str, api_id: int
+    ) -> tuple[str, ...] | None:
+        """``None`` when this account confirmed. Otherwise the tokens."""
+        assert self._broker is not None
+        envelope = Envelope[TdCancelSessionRequest].wrap(
+            TdCancelSessionRequest(session_id=session_id),
+            type=TD_ORDER_CANCEL_SESSION,
+            source="sts",
+            session_id=session_id,
+        )
+        try:
+            reply = await self._broker.request(
+                Topics.td_order(api_id),
+                envelope,
+                timeout=STS_CLEANUP_TIMEOUT_S,
+            )
+        except NoRespondersError:
+            return ("no_responders",)
+        except (RequestTimeoutError, TimeoutError):
+            return ("timeout",)
+        except Exception:
+            logger.warning(
+                "STS cancel_session failed session=%s api_id=%s",
+                session_id,
+                api_id,
+                exc_info=True,
+            )
+            return ("call_error",)
+        reply_type = getattr(reply, "type", None)
+        if reply_type != TD_ORDER_CANCEL_SESSION:
+            return ("call_error",)
+        payload = getattr(reply, "payload", None)
+        try:
+            if isinstance(payload, TdCancelSessionResult):
+                result = payload
+            elif hasattr(payload, "model_dump"):
+                result = TdCancelSessionResult.model_validate(payload.model_dump())
+            else:
+                result = TdCancelSessionResult.model_validate(payload)
+        except ValidationError:
+            return ("decode_error",)
+        if result.ok:
+            return None
+        if not result.unconfirmed:
+            return ("unconfirmed",)
+        return tuple(result.unconfirmed)
+
+    async def _alert(self, held: _Held, action: OrchestratorAction) -> None:
+        message = crash_log_message(
+            crash_class=held.crash_class,
+            reason=action.reason or "",
+            incarnation=held.worker_incarnation,
+            unconfirmed=(
+                held.unconfirmed if held.cleanup is Cleanup.UNCONFIRMED else None
+            ),
+        )
+        if self._publish is None:
+            logger.error(
+                "STS crash session=%s %s", held.spec.session_id, message
+            )
+            return
+        await publish_sts_log(
+            _LogBus(self._publish),
+            held.spec.session_id,
+            message,
+            source=CONTROLLER_LOG_SOURCE,
+            level="error",
+        )
 
     async def _fail(self, held: _Held, reason: str) -> None:
         if _terminal(held.phase):
@@ -790,6 +1192,9 @@ class StsOrchestrator:
             held.reason,
             held.finished_at,
             held.observed_generation,
+            held.restart_count,
+            held.cleanup,
+            held.crash_class,
             tuple(sorted(held.conditions.items())),
         )
         if signature == held.published:
@@ -918,6 +1323,18 @@ class StsOrchestrator:
         held.type_name = stored.type_name
         held.restart_count = stored.restart_count
         held.worker_incarnation = observed.incarnation or FIRST_INCARNATION
+        held.spawn_started = True
+        held.phase = SessionPhase.RUNNING
+        held.column = column_status_for(SessionPhase.RUNNING)
+        held.conditions = {"phase": SessionPhase.RUNNING.value}
+        code, signal_no, ready = _exit_facts(observed)
+        held.exit_code = code
+        held.signal = signal_no
+        held.ready = ready
+        held.exit_recorded = True
+        held.pid_gone = True
+        held.pid = None
+        held.request = self._load_request(spec.session_id)
         held.observed_generation = (
             stored.observed_generation
             if stored.observed_generation is not None
@@ -925,7 +1342,22 @@ class StsOrchestrator:
         )
         async with self._lock(spec.session_id):
             self._sessions[spec.session_id] = held
-            await self._fail(held, _reattach_reason(observed))
+            await self._drive(held)
+
+    def _load_request(self, session_id: str) -> StsCreateSessionRequest | None:
+        """The pinned request, so a rehang after reattach can spawn again."""
+        path = self.supervisor.work_dir / "sessions" / f"{session_id}.json"
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            return StsCreateSessionRequest.model_validate_json(raw)
+        except ValueError:
+            logger.warning(
+                "STS request file is unreadable session=%s", session_id
+            )
+            return None
 
     def _spec_from_row(self, stored: StoredSession) -> SessionSpec:
         return SessionSpec(
@@ -964,21 +1396,3 @@ def _session_id_of(worker_id: str) -> str | None:
         return None
     return session_id
 
-
-def _reattach_reason(observed: ReattachObservation) -> str:
-    record = observed.exit_record
-    if record is not None:
-        if record.exit_code is not None:
-            return f"worker_exited:{record.exit_code}"
-        if record.signal is not None:
-            return f"worker_signal:{record.signal}"
-    if observed.status is not None:
-        if observed.status.exit_code is not None:
-            return f"worker_exited:{observed.status.exit_code}"
-        if observed.status.signal is not None:
-            return f"worker_signal:{observed.status.signal}"
-    if observed.observed is ObservedWorker.LOST:
-        return "lost"
-    if observed.observed is ObservedWorker.ABSENT:
-        return "absent"
-    return "worker_exited"

@@ -38,10 +38,17 @@ the controller (§7.1).
 * **C2.** ``PENDING_NEW`` and ``UNKNOWN`` stay in scope. They are
   resolved first, then treated like any other order: resting is
   cancelled, terminal is confirmed. Where the connector has
-  ``fetch_order_by_client_order_id``, that is
-  :meth:`~mftik_td.account.session.Session.resolve_unknown` /
-  :meth:`~mftik_td.account.session.Session.mark_unknown_and_resolve`.
-  Where it does not (paper's remote client, on purpose), one
+  ``fetch_order_by_client_order_id``, ``UNKNOWN`` is
+  :meth:`~mftik_td.account.session.Session.resolve_unknown`.
+  ``PENDING_NEW`` with no venue ``order_id`` is
+  :meth:`~mftik_td.account.session.Session.mark_unknown_and_resolve`
+  (``if_missing=REJECTED``: the submit never landed). One that already
+  has a venue id — OKX, Bybit, Bitget, and sometimes Deribit ack
+  ``place_order`` as ``PENDING_NEW`` — is not turned into ``REJECTED``
+  when that lookup misses. It is cancelled with ``cancel_order`` on
+  the venue id, or left ``unconfirmed``.
+  Where the connector has no per-cid lookup (paper's remote client,
+  on purpose), one
   :meth:`~mftik_td.account.session.Session.reconcile` inside the
   timeout is the venue answer: an in-scope cid absent from the open
   orders is not resting, one still listed is cancelled.
@@ -139,6 +146,7 @@ from mftik.strategy.client_order_id import session_id_of
 from pydantic import ValidationError
 
 from mftik_td.account._ticket import TICKET
+from mftik_td.account.session import UNKNOWN_RESOLVE_TIMEOUT_S
 from mftik_td.errors import is_unfilled_immediate, normalize
 
 logger = logging.getLogger(__name__)
@@ -642,11 +650,79 @@ class OrderHandler:
             if order.status is OrderStatus.UNKNOWN:
                 settled = await session.resolve_unknown(order)
             else:
-                settled = await session.mark_unknown_and_resolve(
-                    cid, if_missing=OrderStatus.REJECTED
-                )
+                settled = await self._resolve_pending_new(session, order)
             self._confirm_if_terminal(session, run, cid, settled)
         return True
+
+    async def _resolve_pending_new(
+        self, session: Session, order: Order
+    ) -> Order | None:
+        """Settle ``PENDING_NEW`` without inventing ``REJECTED``.
+
+        A venue id means ``place_order`` already accepted the order and
+        the book is still ``PENDING_NEW`` because the private stream has
+        not moved it. ``fetch_order_by_client_order_id`` returning
+        ``None`` is the index lag, not proof the submit never landed.
+        Cancel by that id. A cancel that is not a terminal answer leaves
+        the order where it is, so the cid is ``unconfirmed``. No venue
+        id still means the submit never landed.
+        """
+        cid = order.client_order_id
+        if not cid:
+            return None
+        if not order.order_id:
+            return await session.mark_unknown_and_resolve(
+                cid, if_missing=OrderStatus.REJECTED
+            )
+        found = await self._lookup_order(session, order)
+        if found is not None and found.status is not OrderStatus.PENDING_NEW:
+            await session.accept_venue_order(found)
+            current = session.oms.get_order(cid)
+            return current if current is not None else found
+        return await self._cancel_by_venue_id(session, order)
+
+    async def _lookup_order(self, session: Session, order: Order) -> Order | None:
+        fetch = getattr(session.private, "fetch_order_by_client_order_id", None)
+        cid = order.client_order_id
+        if fetch is None or not cid:
+            return None
+        try:
+            return await asyncio.wait_for(
+                fetch(cid, ticker=order.ticker),
+                UNKNOWN_RESOLVE_TIMEOUT_S,
+            )
+        except Exception:
+            logger.exception(
+                "cancel_session lookup failed api_id=%s cid=%s",
+                self._worker.api_id,
+                cid,
+            )
+            return None
+
+    async def _cancel_by_venue_id(
+        self, session: Session, order: Order
+    ) -> Order | None:
+        cid = order.client_order_id
+        cancel = getattr(session.private, "cancel_order", None)
+        if cancel is None or not order.order_id or not cid:
+            return None
+        try:
+            cancelled = await cancel(order.order_id)
+        except Exception:
+            logger.exception(
+                "cancel_session cancel by venue id failed api_id=%s cid=%s "
+                "order_id=%s",
+                self._worker.api_id,
+                cid,
+                order.order_id,
+            )
+            return None
+        if cancelled is None:
+            return None
+        await session.accept_venue_order(cancelled)
+        if not cancelled.status.is_terminal():
+            return None
+        return cancelled
 
     async def _cancel_one(self, session: Session, run: _CancelRun, cid: str) -> None:
         if cid in run.cancel_tried:

@@ -1,9 +1,9 @@
 """What B4-02 and B5-06 have to make true of the STS controller.
 
 Start, end, list, and the reconcile that creates or stops a worker are
-B4-02 and run. Crash class, F11, and R1–R4 are B5-06 and stay
-``xfail(strict=True)``. R4's report membership is what keeps MD/TD from
-reclaiming intents during ``restarting``; the reclaim itself is B4-07.
+B4-02. Crash class, F11, and R1–R4 are B5-06. R4's report membership is
+what keeps MD/TD from reclaiming intents during ``restarting``; the
+reclaim itself is B4-07.
 """
 
 from __future__ import annotations
@@ -59,8 +59,6 @@ from mftik_sts.controller import (
     start_handler,
 )
 
-_B5 = "B5-06: crash class, cleanup, and rehang"
-
 
 def _orch(tmp_path: Path) -> StsOrchestrator:
     return StsOrchestrator(Supervisor(tmp_path, plane="sts", instance="sts"))
@@ -107,7 +105,6 @@ def _model(reply_payload: object, model: type):
 # --- crash class -----------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 @pytest.mark.parametrize(
     ("cause", "crash_class"),
     [
@@ -128,7 +125,6 @@ def test_crash_cause_maps_to_class_a_b_or_c(
 # --- F11 -------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_restart_never_fails() -> None:
     """The default. An A-class crash after ``on_ready`` is still not hung
     up again."""
@@ -141,7 +137,6 @@ def test_f11_restart_never_fails() -> None:
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 @pytest.mark.parametrize(
     ("crash_class", "reason"),
     [
@@ -158,7 +153,6 @@ def test_f11_only_class_a_may_rehang(crash_class: CrashClass, reason: str) -> No
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 @pytest.mark.parametrize("crash_class", [CrashClass.B, CrashClass.C])
 def test_f11_class_b_and_c_alert_even_when_restart_is_never(
     crash_class: CrashClass,
@@ -171,7 +165,6 @@ def test_f11_class_b_and_c_alert_even_when_restart_is_never(
     assert decision.alert is True
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_crash_before_on_ready_is_not_restarted() -> None:
     """Still class A. Init failure is the restart rule, not the class."""
     assert classify_crash(CrashCause.STRATEGY_EXCEPTION) is CrashClass.A
@@ -182,7 +175,6 @@ def test_f11_crash_before_on_ready_is_not_restarted() -> None:
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_init_timeout_is_not_restarted() -> None:
     """``start_timeout_s``, TD missing ``ready_timeout_s``, and ``on_ready``
     over its wall clock are init failures. They are not class B."""
@@ -193,7 +185,6 @@ def test_f11_init_timeout_is_not_restarted() -> None:
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_class_b_before_ready_is_still_class_b() -> None:
     """The class rule is listed before the init-failure rule."""
     decision = _rehang(crash_class=CrashClass.B, ready=False)
@@ -202,7 +193,6 @@ def test_f11_class_b_before_ready_is_still_class_b() -> None:
     assert decision.alert is True
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_four_restarts_in_the_window_still_rehang() -> None:
     """``max_restarts=5`` allows a fifth. Four already started, so this one
     still rehanges. ``attempt`` does not decide the cap."""
@@ -218,7 +208,6 @@ def test_f11_four_restarts_in_the_window_still_rehang() -> None:
     assert decision.cancels_positions is False
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_the_restart_past_max_restarts_fails_and_alerts() -> None:
     """Five already started fills the default window. The next one fails."""
     decision = _rehang(restarts_in_window=5, attempt=1)
@@ -229,7 +218,6 @@ def test_f11_the_restart_past_max_restarts_fails_and_alerts() -> None:
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_unconfirmed_cleanup_fails_and_alerts() -> None:
     decision = _rehang(cleanup=Cleanup.UNCONFIRMED)
     assert decision.verdict is RestartVerdict.FAILED
@@ -238,7 +226,6 @@ def test_f11_unconfirmed_cleanup_fails_and_alerts() -> None:
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_unconfirmed_cleanup_alerts_even_when_restart_is_never() -> None:
     decision = _rehang(restart="never", cleanup=Cleanup.UNCONFIRMED)
     assert decision.verdict is RestartVerdict.FAILED
@@ -246,7 +233,6 @@ def test_f11_unconfirmed_cleanup_alerts_even_when_restart_is_never() -> None:
     assert decision.alert is True
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_intensity_alerts_even_when_restart_is_never() -> None:
     decision = _rehang(restart="never", restarts_in_window=5)
     assert decision.verdict is RestartVerdict.FAILED
@@ -254,7 +240,6 @@ def test_f11_intensity_alerts_even_when_restart_is_never() -> None:
     assert decision.alert is True
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_f11_class_a_on_failure_rehanges_from_on_start() -> None:
     decision = _rehang()
     assert decision.verdict is RestartVerdict.REHANG
@@ -269,7 +254,6 @@ def test_f11_class_a_on_failure_rehanges_from_on_start() -> None:
 # --- R1 --------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r1_waits_until_the_exit_record_exists() -> None:
     decision = _rehang(exit_recorded=False)
     assert decision.verdict is RestartVerdict.WAIT
@@ -280,14 +264,12 @@ def test_r1_waits_until_the_exit_record_exists() -> None:
     assert decision.delay_s is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r1_waits_while_the_old_pid_is_alive() -> None:
     decision = _rehang(pid_gone=False)
     assert decision.verdict is RestartVerdict.WAIT
     assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r1_asks_cleanup_before_any_restart_choice() -> None:
     """Cleanup runs before F11, including for a B-class crash and for
     ``restart: never``. The choice waits until cancel has been asked."""
@@ -304,7 +286,6 @@ def test_r1_asks_cleanup_before_any_restart_choice() -> None:
         assert decision.next_incarnation is None
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r1_spawn_allowed_only_after_exit_and_confirmed_cleanup() -> None:
     assert (
         spawn_allowed(
@@ -338,7 +319,6 @@ def test_r1_spawn_allowed_only_after_exit_and_confirmed_cleanup() -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r1_reconcile_does_not_spawn_before_cleanup_confirms(tmp_path: Path) -> None:
     orch = _orch(tmp_path)
     status = SessionStatus(
@@ -358,7 +338,6 @@ def test_r1_reconcile_does_not_spawn_before_cleanup_confirms(tmp_path: Path) -> 
 # --- R2 --------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r2_backoff_is_at_least_one_second_and_grows() -> None:
     """One second keeps the previous incarnation's last client_order_id and
     the next incarnation's first in different seconds. Seq restarts at 0."""
@@ -373,7 +352,6 @@ def test_r2_backoff_is_at_least_one_second_and_grows() -> None:
 # --- R3 --------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r3_rehang_keeps_positions() -> None:
     """Resting orders are gone because cleanup confirmed. The position is
     not cancelled, and the rehang does not grow a flatten step."""
@@ -385,7 +363,6 @@ def test_r3_rehang_keeps_positions() -> None:
 # --- R4 --------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 @pytest.mark.parametrize(
     "phase",
     [
@@ -399,13 +376,11 @@ def test_r4_desired_running_phases_retain_intents(phase: SessionPhase) -> None:
     assert retains_intents(phase) is True
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 @pytest.mark.parametrize("phase", [SessionPhase.DONE, SessionPhase.FAILED])
 def test_r4_terminal_phases_do_not_retain_intents(phase: SessionPhase) -> None:
     assert retains_intents(phase) is False
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_r4_restarting_retains_intents_with_no_pid() -> None:
     """The report lists desired-running sessions, not live pids. A session
     between incarnations has no process and still owns its intents."""
@@ -475,7 +450,6 @@ def test_reconcile_marks_done_when_the_stop_has_exited(tmp_path: Path) -> None:
     assert terminals[0].phase is SessionPhase.DONE
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 def test_reconcile_marks_restarting_before_the_next_spawn(tmp_path: Path) -> None:
     """Step 1 writes ``restarting`` and an error log, then the rehang spawns.
     The spawn carries the backoff. No strategy state rides along."""

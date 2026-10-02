@@ -63,6 +63,7 @@ from mftik.strategy import Ready, Strategy
 from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 
+from mftik_sts.exit_codes import STRATEGY_EXCEPTION
 from mftik_sts.session_worker.budget import ON_READY_LIMIT_S, ON_STOP_LIMIT_S
 from mftik_sts.session_worker.delivery import kind_of_topic
 from mftik_sts.session_worker.dispatch import dispatch_md, dispatch_td
@@ -1174,6 +1175,12 @@ async def _stop(
     failed, reason, _terminal = progress.snapshot_bits()
     if failed and reason:
         await log(reason, level="error")
+    # A hook that raised after ``on_ready`` returned. ``on_stop`` has
+    # already been attempted above. The controller maps this code to
+    # class A. Every other failure stays 1 (class C). The blocked-hook
+    # code is B5-04 and is not produced here.
+    if failed and reason is not None and reason.startswith("strategy_exception:"):
+        return STRATEGY_EXCEPTION
     return 1 if failed else 0
 
 

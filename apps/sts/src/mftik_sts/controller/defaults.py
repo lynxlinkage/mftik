@@ -52,6 +52,17 @@ SESSION_HB_TIMEOUT_S = 3.0
 #: Provisional, pending Yi Te (#286). The existing ``on_stop`` wall clock.
 SESSION_STOP_GRACE_S = ON_STOP_TIMEOUT_S
 
+#: The account worker's own bound on one ``cancel_session``
+#: (``WAIT_TIMEOUT_S`` in the TD worker). Kept here as a literal: this
+#: package does not import ``apps/td``. A cleanup budget shorter than
+#: this would abandon a cancel that is still going to answer.
+_TD_CANCEL_SESSION_WAIT_S = 30.0
+
+#: How long the controller waits for one account's
+#: ``td.order.cancel_session``, in seconds. Provisional, pending Yi Te
+#: (#286). One try; an expiry is ``Cleanup.UNCONFIRMED``.
+STS_CLEANUP_TIMEOUT_S = 45.0
+
 
 def sts_restart_intensity(
     *,

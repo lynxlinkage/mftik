@@ -2,13 +2,10 @@
 
 The shape is real: F11's defaults, a session spec, and the worker spec
 procman is allowed to see (``restart`` is ``never``). Classifying a crash
-and choosing a rehang still raise ``NotImplementedError("IF-04")``.
-Reconcile creates or stops a worker, and start / end / list answer.
-A crash-shaped reconcile still raises, so B5-06 stays the owner of that
-path.
+and choosing a rehang is B5-06. Reconcile creates, stops, or cleans up a
+worker, and start / end / list answer.
 
 What B4-02 and B5-06 have to make true is in ``test_controller_contract.py``.
-B5 stays xfail.
 """
 
 from __future__ import annotations
@@ -50,6 +47,7 @@ from mftik_sts.controller import (
     CrashCause,
     CrashClass,
     OrchestratorAction,
+    RestartVerdict,
     SessionPhase,
     SessionSpec,
     SessionStatus,
@@ -206,23 +204,23 @@ def test_session_worker_spec_labels_carry_the_pins() -> None:
     assert LABEL_STRATEGY_DIGEST not in env_only.labels
 
 
-def test_decisions_raise_if_04() -> None:
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        classify_crash(CrashCause.STRATEGY_EXCEPTION)
+def test_decisions_reject_a_bad_cause_and_a_ready_session() -> None:
+    """The validators stay. The bodies no longer raise IF-04."""
+    assert classify_crash(CrashCause.STRATEGY_EXCEPTION) is CrashClass.A
     with pytest.raises(ValueError):
         classify_crash("not-a-cause")  # type: ignore[arg-type]
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        decide_restart(
-            restart="on_failure",
-            crash_class=CrashClass.A,
-            ready=True,
-            cleanup=Cleanup.CONFIRMED,
-            exit_recorded=True,
-            pid_gone=True,
-            restarts_in_window=0,
-            incarnation=1,
-            attempt=1,
-        )
+    decision = decide_restart(
+        restart="on_failure",
+        crash_class=CrashClass.A,
+        ready=True,
+        cleanup=Cleanup.CONFIRMED,
+        exit_recorded=True,
+        pid_gone=True,
+        restarts_in_window=0,
+        incarnation=1,
+        attempt=1,
+    )
+    assert decision.verdict is RestartVerdict.REHANG
     with pytest.raises(ValueError, match="always"):
         decide_restart(
             restart="always",
@@ -249,22 +247,22 @@ def test_decisions_raise_if_04() -> None:
         )
     with pytest.raises(ValueError):
         backoff_s(0)
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        backoff_s(1)
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
+    assert backoff_s(1) == STS_MIN_BACKOFF_S
+    assert (
         spawn_allowed(
             exit_recorded=True, pid_gone=True, cleanup=Cleanup.CONFIRMED
         )
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        retains_intents(SessionPhase.RESTARTING)
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        reported_session_ids(())
+        is True
+    )
+    assert retains_intents(SessionPhase.RESTARTING) is True
+    assert retains_intents(SessionPhase.STOPPING) is True
+    assert reported_session_ids(()) == frozenset()
 
 
-def test_reconcile_checks_its_inputs_and_leaves_a_crash_to_b5(
+def test_reconcile_checks_its_inputs_and_asks_cleanup(
     tmp_path: Path,
 ) -> None:
-    """An empty status spawns. A crash-shaped one still raises (B5-06)."""
+    """An empty status spawns. A crash with cleanup still pending asks it."""
     orch = _orch(tmp_path)
     actions = orch.reconcile(_spec(), SessionStatus())
     assert any(action.kind is ActionKind.SPAWN for action in actions)
@@ -281,8 +279,9 @@ def test_reconcile_checks_its_inputs_and_leaves_a_crash_to_b5(
         pid_gone=True,
         crash_class=CrashClass.A,
     )
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        orch.reconcile(_spec(restart="on_failure"), crashed)
+    actions = orch.reconcile(_spec(restart="on_failure"), crashed)
+    assert any(action.kind is ActionKind.CLEANUP for action in actions)
+    assert all(action.kind is not ActionKind.SPAWN for action in actions)
 
 
 async def test_handlers_reject_a_bad_payload_instead_of_raising(

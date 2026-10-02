@@ -4,9 +4,9 @@ B4-02 runs one :class:`~mftik.procman.Supervisor` for this instance.
 ``start`` applies reattach before the control subject is served.
 ``SIGTERM`` closes with ``detach``, so the session workers keep running
 (§4.6). Reports are :func:`mftik.procman.publish_reports` with no phase
-filter. ``extra_workers`` lists a session that has been accepted and
-not yet spawned, so the next report still names it (B4-07). A
-``restarting`` session with no process is B5-06 and is not added.
+filter. ``extra_workers`` lists a session the supervisor's own report does
+not: accepted but not yet spawned (B4-07), and a dead or
+``restarting`` session so intent GC leaves it alone (R4).
 """
 
 from __future__ import annotations
@@ -270,10 +270,16 @@ async def amain() -> bool:
         from mftik_sts.controller.status import DbStatusStore
 
         supervisor = _open_supervisor()
+
+        async def _publish(subject: str, envelope: Any) -> None:
+            await broker.publish(subject, envelope)
+
         orchestrator = StsOrchestrator(
             supervisor,
             clock=SystemClock(),
             store=DbStatusStore(session_scope),
+            publish=_publish,
+            broker=broker,
         )
         bind_orchestrator(orchestrator)
         try:
@@ -315,9 +321,6 @@ async def amain() -> bool:
             ),
             name="sts-health",
         )
-
-        async def _publish(subject: str, envelope: Any) -> None:
-            await broker.publish(subject, envelope)
 
         report_task = asyncio.create_task(
             publish_reports(
