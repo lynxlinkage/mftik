@@ -861,7 +861,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B8-02 placement 與連線 worker 的生命週期（#239）
 
-- **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束；新 atom 只放到 `pv` 和 controller 相同的連線 worker 上，沒有就開新的（F41）。
+- **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束；controller 不對 `pv` 不同的連線 worker 推 desired，也不另開新 worker 承接它的 atom；`md.intent.put` 落在還有這種 worker 的 `(venue, endpoint)` 時，以 `protocol_mismatch` 拒絕，訊息列出要 `restart` 的 worker（F41）。
 - **依賴：** B8-01、B4-10
 - **決策：** F17、F22、F41
 
