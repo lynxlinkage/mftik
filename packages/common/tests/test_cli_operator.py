@@ -1,9 +1,10 @@
 """IF-15's CLI surface, as it behaves today.
 
 The new commands parse and then refuse, except ``mftik workers`` without
-``--stale``, which lists each worker's release (B3-07), and ``mftik run``,
-whose ``--wait`` is the default (B4-08). ``mftik --help`` lists the new
-commands because they are rows in the same table the dispatch reads.
+``--stale``, which lists each worker's release (B3-07), ``mftik td drain``,
+which posts one account (B6-04), and ``mftik run``, whose ``--wait`` is the
+default (B4-08). ``mftik --help`` lists the new commands because they are
+rows in the same table the dispatch reads.
 """
 
 from __future__ import annotations
@@ -78,7 +79,6 @@ def test_workers_help_lists_stale(capsys) -> None:
     [
         ["workers", "--stale"],
         ["md", "restart", "binance-um-1"],
-        ["td", "drain", "7"],
         ["intents", "gc", "--instance", "sts-jp"],
     ],
 )
@@ -265,7 +265,10 @@ def test_workers_with_nothing_reported_is_not_an_error(
 
 
 def test_decisions_raise_not_implemented() -> None:
-    """共同驗收: the surface returns ``NotImplementedError("IF-15")``."""
+    """md restart, stale workers and intent gc still raise ``IF-15``.
+
+    ``td_drain`` names the account (B6-04).
+    """
     worker = ProcmanWorker(
         id="md/conn/a",
         code_ref="1.4.0",
@@ -278,7 +281,53 @@ def test_decisions_raise_not_implemented() -> None:
         select_workers([worker], stale=True, latest="1.5.0")
     with pytest.raises(NotImplementedError, match="^IF-15$"):
         md_restart("binance-um-1")
-    with pytest.raises(NotImplementedError, match="^IF-15$"):
-        td_drain(7)
+    assert td_drain(7) == TdDrain(api_id=7)
     with pytest.raises(NotImplementedError, match="^IF-15$"):
         intent_gc("sts-jp")
+
+
+def test_td_drain_posts_that_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """O4. One POST, that api_id, and the new incarnation on stdout."""
+    _connect(tmp_path, monkeypatch)
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/td/accounts/7/drain":
+            return httpx.Response(
+                200,
+                json={"api_id": 7, "ok": True, "incarnation": 3, "reason": ""},
+            )
+        return httpx.Response(404, json={"detail": "nope"})
+
+    _stub_client(monkeypatch, handler)
+    assert main(["td", "drain", "7"]) == 0
+    out = capsys.readouterr().out
+    assert seen == [("POST", "/td/accounts/7/drain")]
+    assert "api_id=7" in out
+    assert "incarnation=3" in out
+
+
+def test_td_drain_refusal_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _connect(tmp_path, monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "api_id": 7,
+                "ok": False,
+                "incarnation": None,
+                "reason": "not_drained",
+            },
+        )
+
+    _stub_client(monkeypatch, handler)
+    assert main(["td", "drain", "7"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "not_drained" in err
+    assert "Traceback" not in err

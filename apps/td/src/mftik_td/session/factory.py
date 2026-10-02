@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -284,10 +285,14 @@ class VenueSessionFactory:
             # point at the resident pool. The pool still serves keepalive
             # and, later, backfill.
             self._no_trading_rest(api_id, venue.name, client_for)
+            # ``MFTIK_TD_VENUE_WS_URL`` points spot order entry at a
+            # stand-in. Unset, the client uses the production WS API.
+            ws_url = os.environ.get("MFTIK_TD_VENUE_WS_URL")
             private = BinanceSpotPrivateClient(
                 api_key=row.api_key,
                 api_secret=row.api_secret,
                 symbols=self._symbols,
+                **({"ws_url": ws_url} if ws_url else {}),
             )
             logger.info(
                 "TD building Binance session api_id=%s key=%s…",

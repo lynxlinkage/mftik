@@ -56,9 +56,12 @@ from mftik.broker.handler import Reply
 from mftik.clock import Clock, SystemClock
 from mftik.protocol import (
     TD_ACCOUNT_TRADING,
+    TD_TRADING_DRAIN,
     Envelope,
     TdAccountTrading,
     TdCancelSessionResult,
+    TdTradingDrain,
+    TdTradingDrainResult,
     UntypedEnvelope,
 )
 from pydantic import ValidationError
@@ -66,6 +69,7 @@ from pydantic import ValidationError
 from mftik_td.account._ticket import TICKET
 from mftik_td.account.handlers import WAIT_TIMEOUT_S, _error
 from mftik_td.account.resident import ResidentLayer
+from mftik_td.controller.defaults import DRAIN_TIMEOUT_S, QUIESCE_LEASE_S
 from mftik_td.oms import Ledger, Oms
 
 if TYPE_CHECKING:
@@ -109,6 +113,8 @@ class TradingLayer:
         session: Session | None = None,
         clock: Clock | None = None,
         drain_timeout_s: float = WAIT_TIMEOUT_S,
+        replace_timeout_s: float = DRAIN_TIMEOUT_S,
+        quiesce_lease_s: float = QUIESCE_LEASE_S,
     ) -> None:
         self.resident = resident
         self._clock: Clock = clock if clock is not None else SystemClock()
@@ -117,6 +123,16 @@ class TradingLayer:
         #: ``cancel_session`` waits :data:`WAIT_TIMEOUT_S`, so a shorter
         #: drain would destroy the book under that call. Provisional.
         self.drain_timeout_s = drain_timeout_s
+        #: How long :meth:`drain_for_replace` waits. Not a deactivate:
+        #: the book stays up either way. Provisional, the same number as
+        #: :data:`DRAIN_TIMEOUT_S` (issue #286).
+        self.replace_timeout_s = replace_timeout_s
+        #: How long a quiesced layer waits to be stopped (issue #286).
+        #:
+        #: The controller should ``STOP`` inside this window. If it
+        #: does not — the reply was lost, or the controller restarted —
+        #: the layer resumes so cancels are possible again.
+        self.quiesce_lease_s = quiesce_lease_s
         self._session = session
         self._factory: SessionBuilder | None = None
         if session is not None:
@@ -142,6 +158,17 @@ class TradingLayer:
         #: A new ``cancel_session`` in that window is not started: the
         #: book is about to go away, and the call would race it.
         self._closing = False
+        #: Drain-replace (F27). New submits are refused. Cancels still
+        #: run until :attr:`_quiesced`, which is set only when nothing
+        #: is in flight. A timeout clears both and service resumes.
+        #: This is not :meth:`deactivate`: the book is not destroyed.
+        self._draining = False
+        self._quiesced = False
+        #: Bumped whenever the quiesce ends or a new lease is armed.
+        #: A lease task that wakes with a stale epoch does not resume.
+        self._quiesce_epoch = 0
+        self._lease: asyncio.Task[None] | None = None
+        self._incarnation: int | None = None
 
     @property
     def session(self) -> Session | None:
@@ -158,6 +185,41 @@ class TradingLayer:
         that is still inside the handler.
         """
         return self._active
+
+    @property
+    def draining(self) -> bool:
+        """Whether new submits are refused ``TD_DRAINING`` (F27).
+
+        True from :meth:`drain_for_replace` until the wait finishes,
+        times out, the controller aborts, or the quiesce lease expires.
+        Cancels are still served while this is true and
+        :attr:`refusing_cancels` is false.
+        """
+        return self._draining
+
+    @property
+    def refusing_cancels(self) -> bool:
+        """Whether cancels are refused because nothing is left in flight.
+
+        Set in the same lock acquisition that sees the busy count hit
+        zero. Until then a cancel already inside, or one that arrives,
+        is served.
+        """
+        return self._quiesced
+
+    def note_incarnation(self, incarnation: int) -> None:
+        """Remember which process this layer is, and log it off.
+
+        The worker calls this once, at construction, before the trading
+        layer is opened. ``TdReady`` at this step is false. The account
+        state broadcast is B6-06; this log is the worker-local step.
+        """
+        self._incarnation = incarnation
+        logger.info(
+            "td ready api_id=%s incarnation=%s active=false",
+            self.resident.api_id,
+            incarnation,
+        )
 
     def set_factory(self, factory: SessionBuilder) -> None:
         """Where the next session comes from after :meth:`Session.destroy`.
@@ -210,7 +272,7 @@ class TradingLayer:
         cancel_session = handler.cancel_session
 
         async def tracked_submit(request):  # type: ignore[no-untyped-def]
-            tracked = await self._enter()
+            tracked = await self._enter(kind="submit")
             try:
                 return await submit(request)
             finally:
@@ -218,7 +280,7 @@ class TradingLayer:
                     await self._leave()
 
         async def tracked_cancel(request):  # type: ignore[no-untyped-def]
-            tracked = await self._enter()
+            tracked = await self._enter(kind="cancel")
             try:
                 return await cancel(request)
             finally:
@@ -324,6 +386,163 @@ class TradingLayer:
             raise
         self._bind(session)
         self._active = True
+        logger.info(
+            "td ready api_id=%s incarnation=%s active=true",
+            self.resident.api_id,
+            self._incarnation,
+        )
+
+    async def drain_for_replace(self) -> bool:
+        """Refuse new submits and wait for in-flight calls (F27).
+
+        Does not deactivate and does not destroy the book. When the
+        busy count hits zero, cancels are refused too and this returns
+        true: nothing is in flight, so the process may be stopped.
+        On timeout both flags are cleared and this returns false. The
+        worker keeps serving. A second call after this one already
+        quiesced returns true without waiting again, and does not
+        restart the quiesce lease.
+
+        Quiesce arms :data:`QUIESCE_LEASE_S`. The process is expected
+        to exit inside that window. If it is still up, the lease
+        clears both flags and service resumes. :meth:`resume_after_drain`
+        and a stop that has set :attr:`_closing` cancel the lease.
+
+        The account subject is served one message at a time, so this
+        is not entered twice concurrently.
+        """
+        async with self._gate:
+            if self._draining and self._quiesced:
+                return True
+            self._draining = True
+            self._quiesced = False
+            # A lease from an older quiesce must not clear this wait.
+            self._quiesce_epoch += 1
+            self._cancel_quiesce_lease_locked()
+        deadline = self._clock.monotonic() + self.replace_timeout_s
+        while True:
+            async with self._gate:
+                if self._busy == 0:
+                    self._quiesced = True
+                    self._arm_quiesce_lease_locked()
+                    logger.info(
+                        "trading layer drained api_id=%s",
+                        self.resident.api_id,
+                    )
+                    return True
+                if self._clock.monotonic() >= deadline:
+                    self._end_quiesce_locked()
+                    logger.info(
+                        "trading layer drain aborted api_id=%s; resuming",
+                        self.resident.api_id,
+                    )
+                    return False
+            remaining = deadline - self._clock.monotonic()
+            if remaining <= 0:
+                continue
+            await self._pause(remaining)
+
+    async def resume_after_drain(self) -> None:
+        """Clear a drain that the controller could not follow with a stop.
+
+        The success path leaves the layer refusing, because the process
+        is about to exit. If the stop did not happen, the old worker
+        has to accept again. A timeout already cleared the flags inside
+        :meth:`drain_for_replace`. This also cancels the quiesce lease,
+        so a late expiry does not race a newer drain.
+        """
+        async with self._gate:
+            self._end_quiesce_locked()
+        logger.info(
+            "trading layer drain aborted api_id=%s; resuming",
+            self.resident.api_id,
+        )
+
+    def _arm_quiesce_lease_locked(self) -> None:
+        """Start the resume lease. Caller holds :attr:`_gate`."""
+        self._cancel_quiesce_lease_locked()
+        self._quiesce_epoch += 1
+        epoch = self._quiesce_epoch
+        self._lease = asyncio.create_task(
+            self._quiesce_lease(epoch),
+            name=f"td-quiesce-{self.resident.api_id}",
+        )
+
+    def _cancel_quiesce_lease_locked(self) -> None:
+        """Drop the lease task. Caller holds :attr:`_gate`.
+
+        Cancelling the running lease task is a no-op: that task is
+        the one clearing the flags, and cancelling it would inject
+        :class:`asyncio.CancelledError` at its next await.
+        """
+        lease = self._lease
+        self._lease = None
+        if (
+            lease is None
+            or lease.done()
+            or lease is asyncio.current_task()
+        ):
+            return
+        lease.cancel()
+
+    def _end_quiesce_locked(self) -> None:
+        """Clear the drain flags and cancel the lease. Caller holds the gate."""
+        self._draining = False
+        self._quiesced = False
+        self._quiesce_epoch += 1
+        self._cancel_quiesce_lease_locked()
+
+    async def _quiesce_lease(self, epoch: int) -> None:
+        """Resume if this quiesce is still in force when the lease ends.
+
+        ``else`` runs only when the flags were cleared. An early return
+        and a cancellation leave the layer as the other path set it.
+        """
+        try:
+            await self._clock.sleep(self.quiesce_lease_s)
+            async with self._gate:
+                if (
+                    epoch != self._quiesce_epoch
+                    or self._closing
+                    or not self._quiesced
+                ):
+                    return
+                self._end_quiesce_locked()
+        except asyncio.CancelledError:
+            return
+        else:
+            logger.warning(
+                "trading layer quiesce lease expired api_id=%s; resuming",
+                self.resident.api_id,
+            )
+
+    async def handle_drain(self, message: UntypedEnvelope) -> Reply | None:
+        """Apply one ``td.trading.drain`` and say whether the worker is idle.
+
+        ``abort`` clears the draining flags and replies ``drained``
+        false. A bad payload does not change the flags.
+        """
+        try:
+            request = TdTradingDrain.model_validate(message.payload or {})
+        except ValidationError as exc:
+            return _error(message, "invalid_payload", str(exc))
+        if request.api_id != self.resident.api_id:
+            return _error(
+                message,
+                "invalid_payload",
+                f"api_id {request.api_id} is not this worker",
+            )
+        if request.abort:
+            await self.resume_after_drain()
+            drained = False
+        else:
+            drained = await self.drain_for_replace()
+        return Envelope[TdTradingDrainResult].wrap(
+            TdTradingDrainResult(api_id=self.resident.api_id, drained=drained),
+            type=TD_TRADING_DRAIN,
+            source="td",
+            session_id=message.session_id,
+        )
 
     async def deactivate(self) -> None:
         """Close the private book. The resident layer stays (T1).
@@ -368,7 +587,10 @@ class TradingLayer:
                 return
             # Held across destroy. ``_enter`` sees it and does not start
             # a ``cancel_session`` between this check and the close.
+            # The quiesce lease must not resume service under this stop.
             self._closing = True
+            self._quiesce_epoch += 1
+            self._cancel_quiesce_lease_locked()
         try:
             session = self._session
             if session is None:
@@ -405,12 +627,20 @@ class TradingLayer:
             self._session = None
         self._active = False
 
-    async def _enter(self, *, force: bool = False) -> bool:
+    async def _enter(self, *, force: bool = False, kind: str = "order") -> bool:
         async with self._gate:
             if self._closing:
                 return False
             session = self._session
             if session is not None and bool(getattr(session, "destroyed", False)):
+                return False
+            # Quiesced means the drain saw nothing in flight. A call
+            # that starts now would be the thing the stop races.
+            if self._quiesced:
+                return False
+            # Submits are refused for the whole drain. Cancels, and
+            # ``cancel_session``, keep being counted until quiesce.
+            if self._draining and kind == "submit":
                 return False
             if not self._active and not force:
                 return False

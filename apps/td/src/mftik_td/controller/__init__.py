@@ -2,8 +2,8 @@
 
 This is the layer §3.4 names ``mftik_td.controller``. It replaces the
 lease and refcount half of ``session/manager.py``. The account set, the
-trading level, the spawn gate and the intent reply are real (B4-07).
-Drain-replace still raises ``NotImplementedError("IF-12")``.
+trading level, the spawn gate, the intent reply and drain-replace
+are real (B4-07, B6-04).
 :func:`td_reattach` is procman's table (B3-03). ``pid_gone`` is
 :func:`~mftik.procman.previous_worker_gone`. ``MARK_FAILED``, and
 ``NONE`` while a shim is still waiting, name ``RELEASE`` for

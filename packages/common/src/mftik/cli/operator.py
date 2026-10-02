@@ -1,10 +1,10 @@
-"""Operator commands the plan adds and this ticket does not perform (IF-15).
+"""Operator commands the plan adds (IF-15).
 
 ``mftik workers``, ``mftik md restart``, ``mftik td drain`` and
-``mftik intents gc``. Each command parses, prints that it is not
-implemented, and exits non-zero. The functions below are the decisions
-those commands will make; each one raises ``NotImplementedError("IF-15")``
-until the ticket that owns the behaviour implements it.
+``mftik intents gc``. ``td drain`` performs a drain-replace of one
+account (B6-04, F27). The others parse, print that they are not
+implemented, and exit non-zero. Their decision functions still raise
+``NotImplementedError("IF-15")``.
 
 **State authority (§3.3): this layer holds none.** It does not write
 session status, worker sets, intents, connection placement, or the
@@ -41,8 +41,9 @@ trading layer. It reads, and it names an operator request:
   names that conn and no other. It is not a placement change.
 * **O4 — ``td drain`` is one account (F27).** The result names that
   ``api_id`` and no other. The platform does not drain on upgrade by
-  itself. What happens to orders during the drain (``td_draining``,
-  ``TdReady``) is the account worker's, in B6-04.
+  itself. New orders during the drain are refused ``td_draining``.
+  The worker logs ``TdReady`` false, then true on the new incarnation.
+  Sessions see that transition when B6-06 and B5-05 land.
 * **O5 — ``intents gc`` names one instance, and only an operator runs
   it (F32).** A blank name is refused: it would not name a machine.
   The result does not cancel orders. Nothing here treats a missing
@@ -152,13 +153,20 @@ def md_restart(conn: str) -> MdRestart:
     raise NotImplementedError("IF-15")
 
 
+#: Longer than the API's drain wait, so the API can answer before the
+#: client gives up. The worker's own wait is 30s, then a stop and a start.
+DRAIN_HTTP_TIMEOUT_S = 50.0
+
+
 def td_drain(api_id: int) -> TdDrain:
     """The drain ``mftik td drain`` asks for (O4).
 
-    Not implemented (IF-15). B6-04 performs it.
+    One positive ``api_id``. The command posts that account and no other.
+    A bool is not an id.
     """
-    del api_id
-    raise NotImplementedError("IF-15")
+    if type(api_id) is not int or api_id <= 0:
+        raise CliError("td drain needs a positive api_id")
+    return TdDrain(api_id=api_id)
 
 
 def intent_gc(instance: str) -> IntentGc:
@@ -276,9 +284,26 @@ def restart(args: argparse.Namespace) -> int:
 
 
 def drain(args: argparse.Namespace) -> int:
-    """``mftik td drain <api_id>``. Does not call :func:`td_drain` yet."""
-    del args
-    return _not_implemented("td drain")
+    """``mftik td drain <api_id>``.
+
+    ``POST /td/accounts/{api_id}/drain``. Exit 0 when the new incarnation
+    is up. Exit 1 when the API refuses, the account is unknown, or the
+    replace did not finish. The body is printed either way.
+    """
+    named = td_drain(args.api_id)
+    _profile, client = connected(args.profile, timeout=DRAIN_HTTP_TIMEOUT_S)
+    with client:
+        body = client.post(f"/td/accounts/{named.api_id}/drain")
+    if not isinstance(body, dict) or type(body.get("ok")) is not bool:
+        raise CliError("td drain did not return a result")
+    if body["ok"]:
+        incarnation = body.get("incarnation")
+        shown = "-" if incarnation is None else str(incarnation)
+        print(f"api_id={named.api_id} incarnation={shown}")
+        return 0
+    reason = body.get("reason") or "not drained"
+    fail(f"td drain api_id={named.api_id} refused: {reason}")
+    return EXIT_ERROR
 
 
 def gc(args: argparse.Namespace) -> int:

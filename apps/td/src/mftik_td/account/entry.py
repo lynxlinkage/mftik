@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 
 import uvloop
@@ -129,7 +130,14 @@ async def run(argv: list[str] | None = None) -> int:
                 # budget is 8s; the plan does not say to cut the warm
                 # call short to fit. Recon is not part of ready: the
                 # trading layer is off.
-                await worker.resident.start()
+                # ``MFTIK_TD_KEEPALIVE_URL`` points the first keepalive at
+                # a stand-in. Unset, the resident adapter's own URL is
+                # used, which is what production does.
+                keepalive_url = os.environ.get("MFTIK_TD_KEEPALIVE_URL")
+                if keepalive_url:
+                    await worker.resident.start(base_urls=(keepalive_url,))
+                else:
+                    await worker.resident.start()
                 factory = VenueSessionFactory(
                     broker, load_api=account_credential, symbols=symbols
                 )

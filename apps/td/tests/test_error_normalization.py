@@ -46,6 +46,7 @@ from mftik.protocol.reject_codes import (
     RejectCode,
     describe,
     is_normalized,
+    is_retryable,
     is_td_internal,
     is_venue,
 )
@@ -540,6 +541,17 @@ def test_none_is_not_a_refusal() -> None:
     assert not is_venue(RejectCode.NONE)
     assert not is_td_internal(RejectCode.NONE)
     assert not is_venue("")
+
+
+def test_only_td_draining_is_retryable() -> None:
+    """A drain refusal can be sent again. The other 1xx codes cannot."""
+    assert is_retryable(RejectCode.TD_DRAINING)
+    assert is_retryable(117)
+    for code in RejectCode:
+        if code is RejectCode.TD_DRAINING:
+            continue
+        assert not is_retryable(code)
+    assert not is_retryable("BALANCE_NOT_ENOUGH")
 
 
 # --- Bybit ------------------------------------------------------------------

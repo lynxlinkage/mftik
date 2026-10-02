@@ -1397,6 +1397,14 @@ TD_ACCOUNT_STATE = "td.account.state"
 #: controller's desired ``active``; the ack carries what the worker
 #: observed after applying it.
 TD_ACCOUNT_TRADING = "td.account.trading"
+#: Operator drain-replace of one account (F27). Subject is ``td.{instance}``,
+#: not this string. The request names the account; the reply is whether the
+#: new incarnation is up.
+TD_ACCOUNT_DRAIN = "td.account.drain"
+#: Account worker: refuse new submits and wait for in-flight calls (F27).
+#: Subject is ``td.account.{api_id}``, not this string. Not the operator
+#: request — that one is :data:`TD_ACCOUNT_DRAIN` on the control subject.
+TD_TRADING_DRAIN = "td.trading.drain"
 #: Published on ``td.{api_id}.global`` after a new incarnation rebuilds
 #: the ledger (§7.1).
 TD_ACCOUNT_RESET = "td.account.reset"

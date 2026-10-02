@@ -1,10 +1,9 @@
 """What the TD controller does (IF-12, B4-07).
 
-The account set, the trading level, the spawn gate, restart planning
-and reconcile answer. Reconcile uses procman's §4.4 table (B3-03).
-What is still ``xfail(strict=True)`` is drain-replace (B6-04).
-``strict`` is the point: that ticket cannot merge while the marker is
-still on it.
+The account set, the trading level, the spawn gate, restart planning,
+reconcile and drain-replace answer. Reconcile uses procman's §4.4
+table (B3-03). Drain-replace here is the pure plan (B6-04, F27).
+Waiting, stopping and the replacement spawn are the supervisor's.
 
 Nothing here starts a process or opens ``/proc``. The pid fence is the
 supervisor's observation on :class:`~mftik_td.controller.AccountView`,
@@ -53,8 +52,6 @@ from mftik_td.controller import (
     trading_active,
     trading_pushes,
 )
-
-_DRAIN = "B6-04 drain-replaces one account (F27)"
 
 
 def _intensity() -> RestartIntensity:
@@ -475,7 +472,6 @@ def test_account_restart_uses_the_callers_intensity(tmp_path: Path) -> None:
 # --- drain-replace (F27) ---------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_DRAIN)
 def test_drain_does_not_spawn_while_the_pid_is_alive(tmp_path: Path) -> None:
     """Extend, then drain, then stop. One account. The bit stays (D1, F36)."""
     view = _view(observed=ObservedWorker.RUNNING, pid_gone=False, incarnation=2)
@@ -488,7 +484,6 @@ def test_drain_does_not_spawn_while_the_pid_is_alive(tmp_path: Path) -> None:
     assert ActionKind.PUSH_TRADING not in kinds
 
 
-@pytest.mark.xfail(strict=True, reason=_DRAIN)
 def test_drain_spawns_the_next_incarnation_once_the_pid_is_gone(
     tmp_path: Path,
 ) -> None:

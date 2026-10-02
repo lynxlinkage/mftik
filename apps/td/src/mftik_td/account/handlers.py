@@ -136,6 +136,7 @@ from mftik.protocol import (
     TD_OMS_VIEW,
     TD_ORDER_ACK,
     TD_ORDER_CANCEL_SESSION,
+    TD_TRADING_DRAIN,
     Envelope,
     OrderAck,
     OrderCancel,
@@ -319,6 +320,22 @@ class OrderHandler:
         """
         if not isinstance(request, OrderSubmit):
             raise TypeError("submit expects OrderSubmit")
+        if request.api_id != self._worker.api_id:
+            return self._refused(
+                request.api_id,
+                request.client_order_id,
+                RejectCode.TD_WRONG_API_ID,
+                f"api_id {request.api_id} is not this worker",
+            )
+        # Before ``_offline``. A drain is not "venue not connected":
+        # the caller retries when the new incarnation is up.
+        if self._worker.trading.draining:
+            return self._refused(
+                request.api_id,
+                request.client_order_id,
+                RejectCode.TD_DRAINING,
+                "account is draining",
+            )
         refused = self._offline(request.api_id, request.client_order_id)
         if refused is not None:
             return refused
@@ -400,6 +417,22 @@ class OrderHandler:
         """Accept or refuse one cancel."""
         if not isinstance(request, OrderCancel):
             raise TypeError("cancel expects OrderCancel")
+        if request.api_id != self._worker.api_id:
+            return self._refused(
+                request.api_id,
+                request.client_order_id,
+                RejectCode.TD_WRONG_API_ID,
+                f"api_id {request.api_id} is not this worker",
+            )
+        # Cancels are served for the whole drain. They are refused only
+        # once nothing is left in flight, so a stop cannot race one.
+        if self._worker.trading.refusing_cancels:
+            return self._refused(
+                request.api_id,
+                request.client_order_id,
+                RejectCode.TD_DRAINING,
+                "account is draining",
+            )
         refused = self._offline(request.api_id, request.client_order_id)
         if refused is not None:
             return refused
@@ -1244,6 +1277,8 @@ def account_subject_handler(worker: AccountWorker) -> Handler:
     async def handle(message: UntypedEnvelope) -> Reply | Detached | None:
         if message.type == TD_ACCOUNT_TRADING:
             return await worker.trading.handle(message)
+        if message.type == TD_TRADING_DRAIN:
+            return await worker.trading.handle_drain(message)
         if message.type == TD_BACKFILL:
             return await worker.resident.handle_backfill(message)
         if message.type in worker.oms.TYPES:

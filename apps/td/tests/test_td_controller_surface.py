@@ -2,9 +2,8 @@
 
 The shape is real: an account binding, a trading bit, an action, and the
 worker spec procman is allowed to see (``restart`` is ``on_failure``).
-The account set, the trading level, the spawn gate, reconcile and
-intent put / delete answer (B4-07, B3-03). Drain-replace still raises
-``NotImplementedError("IF-12")``.
+The account set, the trading level, the spawn gate, reconcile,
+intent put / delete and drain-replace answer (B4-07, B3-03, B6-04).
 
 What B3 and B6-04 still have to make true is in
 ``test_td_controller_contract.py``, as xfail.
@@ -370,10 +369,10 @@ def test_a_bad_argument_is_refused_before_the_stub() -> None:
         close_actions("halt")  # type: ignore[arg-type]
 
 
-def test_reconcile_of_another_instance_is_empty_and_drain_still_raises(
+def test_reconcile_of_another_instance_is_empty_and_drain_names_that_account(
     tmp_path: Path,
 ) -> None:
-    """Another instance is not spawned here. Drain-replace is still B6-04."""
+    """Another instance is not spawned here. Drain names only this account."""
     orch = _orch(tmp_path)
     view = AccountView(
         api_id=7,
@@ -384,8 +383,11 @@ def test_reconcile_of_another_instance_is_empty_and_drain_still_raises(
     assert orch.reconcile((_account(instance="td-jp"),), (), ()) == ()
     with pytest.raises(TypeError):
         orch.reconcile(object(), (), ())  # type: ignore[arg-type]
-    with pytest.raises(NotImplementedError, match="^IF-12$"):
-        orch.drain_replace(_account(), view)
+    assert [action.kind for action in orch.drain_replace(_account(), view)] == [
+        ActionKind.EXTEND_DEADMAN,
+        ActionKind.DRAIN,
+        ActionKind.STOP,
+    ]
     with pytest.raises(ValueError, match="bound to"):
         orch.drain_replace(_account(instance="td-jp"), view)
     other = AccountView(
