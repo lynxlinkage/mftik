@@ -19,6 +19,10 @@ from mftik.protocol.messages import SymbolInfo
 from mftik_td.oms import Ledger
 from mftik_td.session.session import Session
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 DATED = UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")
 PERP = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 SPOT = UniversalTicker.parse("Binance_Spot_BTCUSDT")

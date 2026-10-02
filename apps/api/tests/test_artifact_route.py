@@ -45,6 +45,9 @@ from mftik.strategy.artifacts import (
 )
 from mftik_api.routes import artifacts as art
 
+# over the 50 ms unit call cap; still inside component
+pytestmark = pytest.mark.component
+
 
 class _Body:
     def __init__(self, data: bytes) -> None:

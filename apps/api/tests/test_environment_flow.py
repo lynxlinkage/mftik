@@ -43,6 +43,9 @@ from mftik_api.schemas import (
 from test_environment_api import EnvBroker, _write_pkg
 from test_registry_add import ReloadingBroker
 
+# over the 50 ms unit call cap; still inside component
+pytestmark = pytest.mark.component
+
 _TINY = """\
 from mftik.strategy import Strategy
 

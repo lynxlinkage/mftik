@@ -386,6 +386,8 @@ async def test_the_intent_handler_raises_if_12(tmp_path: Path) -> None:
         await intent_handler(_orch(tmp_path))(message)
 
 
+# walks the TD sources; over the 50 ms unit call cap
+@pytest.mark.component
 def test_the_td_process_does_not_import_the_controller() -> None:
     """B4-07 wires it. The process that is running today must not."""
     offenders: list[str] = []
