@@ -156,9 +156,17 @@ def test_a_venue_module_has_the_four_functions(venue: str) -> None:
         assert callable(getattr(module, name)), f"{venue} has no {name}"
 
 
-@pytest.mark.parametrize("venue", sorted(VENUE_ATOMS))
+@pytest.mark.parametrize(
+    "venue",
+    sorted(name for name in VENUE_ATOMS if name != "Paper"),
+)
 def test_a_venue_module_refuses_with_the_ticket_number(venue: str) -> None:
-    """Null data, and it says which ticket owns the gap (IF 共同驗收 2)."""
+    """Null data, and it says which ticket owns the gap (IF 共同驗收 2).
+
+    Paper is not in this list. B4-06 implements that module for the order
+    book so a connection worker can publish it. Measured capacity and the
+    topics the remote client does not stream stay B7-02g.
+    """
     module = VENUE_ATOMS[venue]
     atom = Atom(venue, "public", "whatever")
     ticker = UniversalTicker.parse(venues.require(venue).ticker_example)
