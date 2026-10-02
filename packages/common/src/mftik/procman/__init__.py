@@ -85,6 +85,8 @@ report, its generation, and the worker-tree Pss are real as of B3-04.
 Reattach, ``supervisor.json`` and the F36 pid fence are real as of B3-03.
 Admission is real as of B3-05. The release identity and the S-2 pin
 file are real as of B3-07.
+A worker writes its own heartbeat with :func:`write_heartbeat` and
+:func:`heartbeat_loop` (S6). Those two do not touch :class:`Supervisor`.
 """
 
 from mftik.procman._ticket import TICKET
@@ -117,6 +119,7 @@ from mftik.procman.errors import (
     MessageError,
     ProcmanError,
 )
+from mftik.procman.heartbeat import heartbeat_loop, status_fd, write_heartbeat
 from mftik.procman.messages import (
     PIPE_BUF,
     STATUS_FD_ENV,
@@ -252,6 +255,7 @@ __all__ = [
     "encode_supervisor_state",
     "exit_record_path",
     "exit_record_tmp_path",
+    "heartbeat_loop",
     "load_frame",
     "load_supervisor_state",
     "log_path",
@@ -266,8 +270,10 @@ __all__ = [
     "shim_main",
     "socket_path",
     "spawn_shim",
+    "status_fd",
     "supervisor_state_path",
     "transition",
     "validate_worker_id",
+    "write_heartbeat",
     "write_pinned_releases",
 ]
