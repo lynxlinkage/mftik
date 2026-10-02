@@ -16,9 +16,10 @@ holes in a book. Market data never goes back through the controller (P1).
 * **Feed liveness.** Broadcast on ``md.w.*``. Ten seconds of silence is
   the *listener's* rule for calling a feed ``down`` (§5.6); it only
   notifies, and it is not a timer this process runs.
-* **Per-atom ``seq`` (F25).** Stamped on each publication. Contiguous
-  inside one incarnation; a new incarnation starts again from the same
-  origin. See C6 for the boundary this ticket does not settle.
+* **Per-atom ``seq`` (F25).** Stamped on each publication and copied
+  onto the envelope. Contiguous inside one incarnation; a new
+  incarnation starts again from the same origin. See C6 for the
+  boundary this ticket does not settle.
 * **Tape and coverage** for an atom this worker holds (F20). Redis, one
   region, keyed by ``atom_id``. A hole left by a reconnect or an in-place
   restart is measured into coverage, not filled in.
@@ -85,35 +86,51 @@ own placement either: an atom is never moved onto another connection
 * **C12 — at most one publisher per atom (F22).** This worker publishes
   only atoms it holds, and it does not dedupe anyone else.
 
-Null data until the B tickets. :func:`reconcile` returns no actions.
-Everything that would touch a socket, a clock, Redis or a process raises
-``NotImplementedError("IF-10")``. The contract tests that name the
-behaviour are ``xfail(strict=True)``.
+:func:`reconcile` returns no actions. Paths that belong to a later
+ticket — venue acks, generation acceptance, the book fold, tape, the
+state broadcast, in-place restart — still raise
+``NotImplementedError("IF-10")``. B4-06 implements :class:`SeqClock`,
+:meth:`ConnWorker.publish` and :meth:`ConnWorker.run` for the paper
+connection worker: one frame is decoded once and published on
+``md.a.*``. The paper process entry is :mod:`mftik_md.conn_worker`.
+It does not call :meth:`ConnWorker.accept_desired`; the atom list is
+fixed at spawn (B8-03 owns the desired-set push).
 
-§3.3 puts ``seq`` on the envelope. The shared
-:class:`~mftik.protocol.envelope.Envelope` has no such field, and IF-05
-owns ``event.seq`` on the session side. This module carries ``seq`` and
-``owner`` on :class:`Publication` and does not change the envelope.
+§3.3 puts ``seq`` on the envelope. :class:`Publication` still carries
+``seq`` and ``owner`` in process. ``seq`` is copied onto
+:class:`~mftik.protocol.envelope.Envelope`. ``owner`` is not a wire
+field (C8): the worker id is the envelope ``source``, and the
+incarnation is written to this process's log.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any, Protocol
 
+from mftik.clock import Clock, SystemClock
 from mftik.exchange.atoms import (
     TOPIC_AGG_TRADE,
     TOPIC_LIQUIDATION,
     TOPIC_TRADE,
     Atom,
 )
+from mftik.exchange.models import OrderBook
 from mftik.protocol import (
     MD_ATOM_STATE,
+    MD_ORDERBOOK,
     MD_WORKER_STATE,
+    Envelope,
     MdAtomState,
     MdWorkerState,
     Topics,
 )
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 #: How often a quiet worker repeats its state (F14, §5.6). A change goes
 #: out immediately and does not wait for this. Five missed repeats is the
@@ -356,8 +373,9 @@ class Publication:
     that atom's next number in this incarnation. ``owner`` is not a
     fencing token a subscriber must check.
 
-    This is the in-process stamp, not a second envelope. The shared
-    envelope does not carry these fields yet.
+    ``seq`` is also set on the envelope this worker publishes.
+    ``owner`` stays off the wire: ``source`` is the worker id, and the
+    incarnation is logged (C8).
     """
 
     atom: Atom
@@ -427,20 +445,24 @@ class SeqClock:
     :data:`SEQ_ORIGIN`. Whether a reconnect inside that incarnation
     replaces the clock is the ``live`` reading of F25; this class does
     not reset itself.
-
-    B4-06 is the first publisher that has to advance this. Until then
-    :meth:`next` raises.
     """
 
     def __init__(self, incarnation: int) -> None:
         _count(incarnation, "incarnation")
         self.incarnation = incarnation
+        self._next: dict[str, int] = {}
 
     def next(self, atom_id: str) -> int:
-        """The next ``seq`` for ``atom_id`` in this incarnation."""
-        if not atom_id:
+        """The next ``seq`` for ``atom_id`` in this incarnation.
+
+        Contiguous from :data:`SEQ_ORIGIN`. A second atom has its own
+        counter. Calling this on a new :class:`SeqClock` starts over.
+        """
+        if not isinstance(atom_id, str) or not atom_id:
             raise ConnError("seq is per atom, so it needs an atom id")
-        raise NotImplementedError("IF-10")
+        seq = self._next.get(atom_id, SEQ_ORIGIN)
+        self._next[atom_id] = seq + 1
+        return seq
 
 
 class BookFold:
@@ -560,20 +582,51 @@ class StateBroadcast:
         raise NotImplementedError("IF-10")
 
 
+#: Envelope type for a platform model this worker knows how to publish.
+#: Paper's remote stream is the order book (B4-06). Other models stay
+#: unmapped until the venue that produces them is wired.
+_MD_ENVELOPE_TYPE: dict[type[BaseModel], str] = {
+    OrderBook: MD_ORDERBOOK,
+}
+
+
+class Publisher(Protocol):
+    """What :meth:`ConnWorker.run` needs from a broker.
+
+    :class:`mftik.broker.Broker` satisfies this. The connection worker
+    does not import the broker: a unit test passes a stand-in, and the
+    paper entry passes the real one.
+    """
+
+    async def publish(self, topic: str, envelope: Envelope[Any]) -> None:
+        """Send ``envelope`` on ``topic``."""
+
+
 class ConnWorker:
     """One connection process (C1).
 
     Constructing it does not open a socket and does not spawn a process.
-    :meth:`run` is that loop, and it is null. The last desired is null
-    too: :meth:`desired` returns ``None`` until B8-03 stores what
-    :func:`accept_generation` let through.
+    The last desired is null: :meth:`desired` returns ``None`` until
+    B8-03 stores what :func:`accept_generation` let through. B4-06's
+    paper entry does not call :meth:`accept_desired`. Its atom list is
+    fixed at spawn and handed to :meth:`run` as a frame source.
 
     Identity — the worker id, the broadcast subject, the diagnostic
     owner — is real, because it is a function of the constructor
     arguments and C1 fixes it.
+
+    ``clock`` supplies :meth:`run`'s ``recv_ts``. It defaults to the
+    process clock. A test passes a :class:`~mftik.clock.FakeClock`.
     """
 
-    def __init__(self, conn: ConnId, *, instance: str, incarnation: int) -> None:
+    def __init__(
+        self,
+        conn: ConnId,
+        *,
+        instance: str,
+        incarnation: int,
+        clock: Clock | None = None,
+    ) -> None:
         if not instance or "." in instance:
             raise ConnError(
                 f"invalid instance {instance!r}; it is one subject token, without a '.'"
@@ -582,6 +635,8 @@ class ConnWorker:
         self.conn = conn
         self.instance = instance
         self.incarnation = incarnation
+        self._clock: Clock = clock if clock is not None else SystemClock()
+        self._seq = SeqClock(incarnation)
 
     @property
     def worker_id(self) -> str:
@@ -608,16 +663,91 @@ class ConnWorker:
         """
         raise NotImplementedError("IF-10")
 
-    def run(self) -> None:
-        """The socket loop: read, decode once, publish, reconcile. B4-06."""
-        raise NotImplementedError("IF-10")
-
     def publish(self, atom: Atom, event: object, *, recv_ts: float) -> Publication:
-        """Stamp ``event`` with this incarnation's next ``seq`` and publish it.
+        """Stamp ``event`` with this incarnation's next ``seq``.
 
-        B4-06. ``event`` is the platform model ``decode`` returned.
+        ``event`` is the platform model ``decode`` returned. This does
+        not touch the network: :meth:`run` is what sends
+        :meth:`envelope_for`. The signature stays synchronous because
+        the stamp has no I/O of its own. ``recv_ts`` is the caller's
+        receive time; :meth:`run` passes :meth:`Clock.now`.
         """
-        raise NotImplementedError("IF-10")
+        if not isinstance(atom, Atom):
+            raise ConnError("publish names an atom")
+        if isinstance(recv_ts, bool) or not isinstance(recv_ts, int | float):
+            raise ConnError(f"recv_ts must be a timestamp, not {recv_ts!r}")
+        return Publication(
+            atom=atom,
+            event=event,
+            seq=self._seq.next(atom.atom_id),
+            owner=self.owner,
+            recv_ts=float(recv_ts),
+        )
+
+    def envelope_for(self, publication: Publication) -> Envelope[Any]:
+        """The ``md.a.*`` envelope for one stamped publication.
+
+        ``type`` is the existing MD type for that platform model.
+        ``source`` is the worker id. ``seq`` is the per-atom sequence
+        (F25). ``ts`` is ``recv_ts``. ``owner`` is not a field.
+        """
+        event = publication.event
+        if not isinstance(event, BaseModel):
+            raise ConnError("a publication's event is a platform model")
+        md_type = _MD_ENVELOPE_TYPE.get(type(event))
+        if md_type is None:
+            raise ConnError(
+                f"no MD envelope type for {type(event).__name__}"
+            )
+        wrapped = Envelope.wrap(
+            event,
+            type=md_type,
+            source=self.worker_id,
+            seq=publication.seq,
+        )
+        return wrapped.model_copy(update={"ts": publication.recv_ts})
+
+    async def run(
+        self,
+        frames: AsyncIterator[tuple[Atom, Mapping[str, Any]]],
+        *,
+        decode: Callable[[Atom, Mapping[str, Any]], Sequence[object]],
+        publisher: Publisher,
+    ) -> None:
+        """Read frames, decode each once, publish the platform models.
+
+        The IF signature was ``run(self) -> None`` and raised. A loop
+        that reads a socket and publishes is asynchronous, and the
+        frame source, the venue ``decode`` and the broker are not
+        constructor state: B8-03's desired-set push is what will own
+        the held atom list, and this ticket's paper entry passes the
+        fixed spawn set in as ``frames``. Reconcile stays
+        :func:`reconcile` (no actions, B8-03). A frame ``decode``
+        rejects is logged and skipped; it does not drop the socket.
+
+        One frame's events share one ``recv_ts``.
+        """
+        async for atom, frame in frames:
+            if not isinstance(frame, Mapping) or isinstance(frame, str | bytes):
+                raise ConnError("a frame is a mapping")
+            try:
+                events = decode(atom, frame)
+            except Exception:
+                logger.warning(
+                    "md conn decode failed worker=%s incarnation=%s atom=%s",
+                    self.worker_id,
+                    self.incarnation,
+                    atom.atom_id,
+                    exc_info=True,
+                )
+                continue
+            recv_ts = self._clock.now()
+            for event in events:
+                publication = self.publish(atom, event, recv_ts=recv_ts)
+                await publisher.publish(
+                    Topics.atom_subject(atom.atom_id),
+                    self.envelope_for(publication),
+                )
 
     def book(self, atom: Atom) -> BookFold:
         """The fold for ``atom``. Empty of state; applying still raises."""

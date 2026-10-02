@@ -6,10 +6,10 @@ IF-10 defines ``mftik_md.conn`` and returns null data. The tests split:
   and an observed set, the broadcast payloads, and the fact that every
   entry that would touch a socket or a process refuses with the ticket
   number. These run and pass.
-* What B4-06 and B8-03 will make true — ``xfail(strict=True)``, one per
-  case the ticket's acceptance names, plus the generation rule F18 states
-  and B8-03 has to satisfy. ``strict`` is the point: the implementation
-  cannot land without deleting the marker.
+* What B8-03 will make true — ``xfail(strict=True)``, one per case that
+  ticket's acceptance names, plus the generation rule F18 states.
+  ``strict`` is the point: the implementation cannot land without
+  deleting the marker. B4-06's per-atom ``seq`` case is a real test.
 """
 
 from __future__ import annotations
@@ -191,7 +191,12 @@ def test_reconcile_returns_no_actions() -> None:
 
 
 def test_the_unimplemented_entries_refuse_with_the_ticket_number() -> None:
-    """Every path that would do the work names IF-10 (共同驗收 2)."""
+    """Paths B4-06 does not own still name IF-10 (共同驗收 2).
+
+    :class:`SeqClock`, :meth:`ConnWorker.publish` and :meth:`ConnWorker.run`
+    are implemented. The ack, generation, fold, tape, broadcast and
+    in-place restart paths stay B8-03 / B7 / B8-06.
+    """
     worker = ConnWorker(CONN, instance=INSTANCE, incarnation=1)
     broadcast = StateBroadcast(instance=INSTANCE, conn=CONN, incarnation=1)
     tape = TapeAppend()
@@ -204,7 +209,6 @@ def test_the_unimplemented_entries_refuse_with_the_ticket_number() -> None:
         lambda: Reconciler.fold_ack(observed, ack),
         lambda: Reconciler.reset(observed),
         lambda: Reconciler.accept_generation(Generation(1, 0), Generation(1, 1)),
-        lambda: SeqClock(1).next(BOOK_BTC.atom_id),
         lambda: BookFold(BOOK_BTC).apply(object()),
         lambda: BookFold(BOOK_BTC).snapshot(),
         lambda: worker.book(BOOK_BTC).apply(object()),
@@ -212,8 +216,6 @@ def test_the_unimplemented_entries_refuse_with_the_ticket_number() -> None:
         lambda: tape.note_gap(TRADE_BTC, reason="reconnect"),
         lambda: broadcast.publish(broadcast.worker_state(state="live", version=1)),
         lambda: worker.accept_desired(Desired(Generation(1, 0), frozenset({BOOK_BTC}))),
-        lambda: worker.run(),
-        lambda: worker.publish(BOOK_BTC, object(), recv_ts=1.0),
         lambda: restart_in_place(CONN),
     ]
     assert calls
@@ -321,9 +323,6 @@ def test_a_book_gap_resyncs_only_that_atom() -> None:
     assert all(action.kind is not ActionKind.RESYNC for action in actions)
 
 
-@pytest.mark.xfail(
-    strict=True, reason="B4-06 stamps a per-atom seq inside one incarnation"
-)
 def test_seq_is_contiguous_within_one_incarnation() -> None:
     """Three publishes of one atom are ``1, 2, 3``; a sibling starts at 1 (C6).
 
