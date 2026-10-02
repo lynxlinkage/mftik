@@ -92,8 +92,11 @@ class Hold(Strategy):
     async def on_order_book(self, book: object) -> None:
         if self._spun:
             path = Path(self.paras["count"])
-            current = int(path.read_text(encoding="utf-8")) if path.is_file() else 0
-            path.write_text(str(current + 1), encoding="utf-8")
+            raw = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+            current = int(raw) if raw.isdigit() else 0
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(str(current + 1), encoding="utf-8")
+            tmp.replace(path)
             return
         self._spun = True
         spin = float(self.paras["spin_s"])
@@ -511,7 +514,10 @@ async def _hold(
             assert ack.read_text(encoding="utf-8") == "ack", detail
 
             async def _counted() -> bool:
-                return count.is_file() and int(count.read_text(encoding="utf-8")) >= 1
+                if not count.is_file():
+                    return False
+                text = count.read_text(encoding="utf-8").strip()
+                return text.isdigit() and int(text) >= 1
 
             await _until(_counted, seconds=2)
             reply = await end_handler(orch)(_end(session_id))
