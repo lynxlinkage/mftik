@@ -121,8 +121,11 @@ def test_session_row_columns() -> None:
         "rebuild_count",
         "st_facts",
     } <= sts_cols
-    assert "strategy_digest" not in sts_cols
-    assert "env_generation" not in sts_cols
+    assert "strategy_digest" in sts_cols
+    assert "env_generation" in sts_cols
+    assert StsSessionRow.__table__.c.strategy_digest.nullable
+    assert StsSessionRow.__table__.c.strategy_digest.type.length == 71
+    assert StsSessionRow.__table__.c.env_generation.nullable
     assert StsSessionRow.__table__.c.restart.type.length >= len("on_failure")
     assert StsSessionRow.__table__.c.generation.default.arg == 1
     assert StsSessionRow.__table__.c.restart_count.default.arg == 0

@@ -7,9 +7,11 @@ spec, the status, the action names, the F11 defaults, and the
 :class:`~mftik.procman.WorkerSpec` procman is allowed to see.
 
 Not wired into the STS process. B4-02 does that for start, end, and
-reconcile. B5-06 does crash and rehang. IF-16 adds the code-identity
-fields and the host-disk handlers. This package does not import strategy
-code (F39) and does not define those handlers (F40).
+reconcile. B5-06 does crash and rehang. The code-identity pins and the
+registry / env handler signatures are IF-16; those handlers raise
+``NotImplementedError("IF-16")`` until B5-10. This package does not
+import strategy code (F39). Artifact and event-log reads stay with
+B5-11 (F40).
 
 **State authority (§3.3).**
 
@@ -63,9 +65,13 @@ from mftik_sts.controller.defaults import (
     sts_restart_intensity,
 )
 from mftik_sts.controller.handlers import (
+    catch_up_registry,
     control_subject,
     end_handler,
+    env_sync_handler,
     list_handler,
+    registry_reload_handler,
+    registry_sync_handler,
     start_handler,
 )
 from mftik_sts.controller.orchestrator import StsOrchestrator
@@ -94,7 +100,11 @@ from mftik_sts.controller.types import (
     SessionStatus,
     session_worker_id,
 )
-from mftik_sts.controller.worker import session_worker_spec
+from mftik_sts.controller.worker import (
+    LABEL_ENV_GENERATION,
+    LABEL_STRATEGY_DIGEST,
+    session_worker_spec,
+)
 
 __all__ = [
     "FIRST_INCARNATION",
@@ -107,6 +117,8 @@ __all__ = [
     "REASON_RESTART_INTENSITY",
     "REASON_RESTART_NEVER",
     "REASON_WAITING_FOR_EXIT",
+    "LABEL_ENV_GENERATION",
+    "LABEL_STRATEGY_DIGEST",
     "SESSION_KIND",
     "STS_MAX_RESTARTS",
     "STS_MIN_BACKOFF_S",
@@ -126,11 +138,15 @@ __all__ = [
     "SessionStatus",
     "StsOrchestrator",
     "backoff_s",
+    "catch_up_registry",
     "classify_crash",
     "control_subject",
     "decide_restart",
     "end_handler",
+    "env_sync_handler",
     "list_handler",
+    "registry_reload_handler",
+    "registry_sync_handler",
     "reported_session_ids",
     "retains_intents",
     "session_worker_id",

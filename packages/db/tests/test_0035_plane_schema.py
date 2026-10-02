@@ -254,8 +254,9 @@ def test_planned_columns_and_nothing_on_hold() -> None:
     """§8.4's tuples, and none of the on-hold tables.
 
     Selector state is exactly ``(spec_hash, universe, epoch, center,
-    updated_at)``. Code identity, the registry, and artifacts are not
-    columns or tables in this revision (F39, F40, IF-16).
+    updated_at)``. Registry and artifact tables are not in the schema
+    (F40). ``strategy_digest`` and ``env_generation`` are nullable Spec
+    columns added by 0036 (F39, IF-16), not by this revision.
     """
     assert set(MdIntent.__table__.c.keys()) == {
         "session_id",
@@ -308,8 +309,11 @@ def test_planned_columns_and_nothing_on_hold() -> None:
         "artifacts",
         "sts_artifacts",
     }.isdisjoint(names)
-    assert "strategy_digest" not in StsSessionRow.__table__.c
-    assert "env_generation" not in StsSessionRow.__table__.c
+    digest = StsSessionRow.__table__.c.strategy_digest
+    env_generation = StsSessionRow.__table__.c.env_generation
+    assert digest.nullable
+    assert digest.type.length == 71
+    assert env_generation.nullable
 
 
 async def test_a_new_session_row_uses_the_f11_defaults(database_url: str) -> None:

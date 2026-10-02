@@ -3,12 +3,14 @@
 Constructing these is real. Deciding anything from them is
 :mod:`mftik_sts.controller.decisions`, and that raises.
 
-No ``strategy_digest`` and no ``env_generation``. Those two axes are
-IF-16 (#275), which depends on this ticket (F39).
+``strategy_digest`` and ``env_generation`` are the two pins F39 adds to
+the spec (IF-16). They are not procman fields. The orchestrator copies
+them onto ``WorkerSpec.labels``.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -21,11 +23,15 @@ from mftik.protocol.strategy_yml import (
     DEFAULT_START_TIMEOUT_S,
     MAX_START_TIMEOUT_S,
 )
+from mftik.registry.digest import DIGEST_PREFIX
 
 from mftik_sts.controller.defaults import STS_MAX_RESTARTS, STS_RESTART_WINDOW_S
 
 #: ``WorkerSpec.kind`` for an STS session worker (§3.1, §4.3).
 SESSION_KIND = "session"
+
+#: ``sha256:`` plus 64 hex characters, the width of ``sts_sessions.strategy_digest``.
+_DIGEST = re.compile(rf"^{re.escape(DIGEST_PREFIX)}[0-9a-f]{{64}}$")
 
 
 class DesiredPhase(StrEnum):
@@ -149,6 +155,24 @@ def _as_int(value: object, name: str) -> int:
     return value
 
 
+def _as_optional_int(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    return _as_int(value, name)
+
+
+def _as_digest(value: object) -> str | None:
+    """``None`` for a built-in strategy. Otherwise ``sha256:<64 hex>``."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+        raise ValueError(
+            "strategy_digest must be sha256:<64 hex> or None. "
+            "A built-in strategy has no digest; its code is the release (F39)."
+        )
+    return value
+
+
 def _as_float(value: object, name: str) -> float:
     if type(value) is bool or not isinstance(value, int | float):
         raise ValueError(f"{name} must be a number")
@@ -190,6 +214,14 @@ class SessionSpec:
 
     ``generation`` is the session's reconcile generation (§8.4), starting
     at 1. It is not an extras generation and not the worker incarnation.
+    The extras pin is :attr:`env_generation`.
+
+    ``strategy_digest`` and ``env_generation`` are the code identity the
+    API pinned at start (F39, §5.7). They do not change for the life of
+    the session, and a rehang uses this pair rather than whatever the
+    registry index currently names. ``strategy_digest`` is ``None`` for
+    a built-in strategy (``mftik_sts.impl``): that code is the platform
+    release. Both stay ``None`` on a row that predates the columns.
     """
 
     session_id: str
@@ -203,6 +235,8 @@ class SessionSpec:
     ready_timeout_s: float = DEFAULT_READY_TIMEOUT_S
     generation: int = 1
     api_ids: tuple[int, ...] = ()
+    strategy_digest: str | None = None
+    env_generation: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _session_segment(self.session_id))
@@ -247,8 +281,13 @@ class SessionSpec:
         object.__setattr__(self, "restart_window_s", window)
         object.__setattr__(self, "start_timeout_s", start)
         object.__setattr__(self, "ready_timeout_s", ready)
+        env_generation = _as_optional_int(self.env_generation, "env_generation")
+        if env_generation is not None and env_generation < 0:
+            raise ValueError("env_generation must be >= 0")
         object.__setattr__(self, "generation", generation)
         object.__setattr__(self, "api_ids", tuple(api_ids))
+        object.__setattr__(self, "strategy_digest", _as_digest(self.strategy_digest))
+        object.__setattr__(self, "env_generation", env_generation)
 
 
 @dataclass(frozen=True)

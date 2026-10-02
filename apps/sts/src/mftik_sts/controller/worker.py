@@ -11,6 +11,14 @@ from mftik.procman import OOM_SCORE_ADJ, WorkerSpec
 
 from mftik_sts.controller.types import SESSION_KIND, SessionSpec, session_worker_id
 
+#: ``WorkerSpec.labels`` keys for an STS session (F39, §4.3). Procman
+#: copies them and does not read them (P6). ``env_generation`` is stored
+#: with ``str(n)`` because every label value is a string. A missing pin
+#: omits its key: a label value cannot be empty, and ``"None"`` would be
+#: a digest.
+LABEL_STRATEGY_DIGEST = "strategy_digest"
+LABEL_ENV_GENERATION = "env_generation"
+
 
 def session_worker_spec(
     spec: SessionSpec,
@@ -45,9 +53,12 @@ def session_worker_spec(
     :meth:`~mftik.procman.Supervisor.spawn` with ``incarnation + 1`` and
     another spec from this function. ``restart`` is ``never`` again.
 
-    ``labels`` is empty. ``strategy_digest`` and ``env_generation`` are
-    IF-16. ``code_ref`` is the platform release the caller passes (§4.5),
-    not a digest.
+    ``labels`` carries the spec's pins under :data:`LABEL_STRATEGY_DIGEST`
+    and :data:`LABEL_ENV_GENERATION` (F39). Procman does not interpret
+    them. A built-in strategy has no digest, so that key is absent;
+    ``env_generation`` is absent when the spec did not pin one. The value
+    of ``env_generation`` is ``str(n)``. ``code_ref`` is the platform
+    release the caller passes (§4.5), not a digest.
 
     ``start_timeout_s``, ``hb_timeout_s`` and ``stop_grace_s`` are the
     caller's. This function does not copy ``spec.start_timeout_s`` into
@@ -69,5 +80,15 @@ def session_worker_spec(
         oom_score_adj=OOM_SCORE_ADJ[("sts", "session")],
         rlimit_data_bytes=rlimit_data_bytes,
         stop_grace_s=stop_grace_s,
-        labels={},
+        labels=_code_labels(spec),
     )
+
+
+def _code_labels(spec: SessionSpec) -> dict[str, str]:
+    """The two F39 pins, as strings. Absent when the spec has no pin."""
+    labels: dict[str, str] = {}
+    if spec.strategy_digest is not None:
+        labels[LABEL_STRATEGY_DIGEST] = spec.strategy_digest
+    if spec.env_generation is not None:
+        labels[LABEL_ENV_GENERATION] = str(spec.env_generation)
+    return labels

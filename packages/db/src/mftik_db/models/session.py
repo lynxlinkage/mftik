@@ -74,7 +74,8 @@ class StsSessionRow(Base):
     Status: phase (``status``, ``reason``), ``observed_generation``,
     ``worker_incarnation``, ``conditions``, ``restart_count``. Readers —
     API, UI, CLI — do not write those. ``strategy_digest`` and
-    ``env_generation`` are Spec too (F39) and are not columns until IF-16.
+    ``env_generation`` are Spec too (F39): the API writes them at start,
+    and the controller only reads them.
     """
 
     __tablename__ = "sts_sessions"
@@ -145,12 +146,20 @@ class StsSessionRow(Base):
     #: Spec generation (P2, §8.1). The API writes ``1`` at start and bumps
     #: it when the spec changes. The controller does not. Existing rows are
     #: backfilled to ``1``: the stored spec is generation 1 of itself.
-    #:
-    #: Pinned code identity ``(strategy_digest, env_generation)`` is also
-    #: Spec (F39) and is deliberately not a column here. IF-16 adds it.
+    #: Not the extras pin: that is :attr:`env_generation`.
     generation: Mapped[int] = mapped_column(
         Integer, default=1, server_default="1", nullable=False
     )
+    #: Spec (F39). The strategy-tree digest pinned at start,
+    #: ``sha256:`` plus 64 hex characters. Null for a built-in strategy,
+    #: whose code is the platform release, and for every row written
+    #: before 0036. The API writes it. The controller reads it and does
+    #: not update it; a rehang uses this value, not the registry index.
+    strategy_digest: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    #: Spec (F39). The extras generation (``env/gen-{N}``) pinned at start.
+    #: Null when the session has no extras pin, and on rows from before
+    #: 0036. Not :attr:`generation`.
+    env_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: Status. The generation the STS controller has reconciled to (P2's
     #: observedGeneration). Null until it records one — not ``0``, which
     #: would claim a generation that was never written.
