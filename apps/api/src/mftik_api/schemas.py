@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from mftik.protocol import SymbolInfo
+from mftik.protocol import StsStatusProgress, SymbolInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mftik_api.paging import MAX_LIST_OFFSET
@@ -63,12 +63,22 @@ class TdAttachOut(BaseModel):
 
 
 class DeployResponse(BaseModel):
+    """Accepted deploy (F12, §8.1).
+
+    ``status`` is ``starting``. The session row's phase is a different
+    field, and the STS controller writes it. ``progress`` is the
+    ingress's hook report. It is null at accept: ``on_start`` has not
+    run. ``td`` and ``md`` stay empty here — those lists used to be the
+    attach results, and the accept does not wait for them.
+    """
+
     session_id: str
     type: str
     config: dict[str, Any] = Field(default_factory=dict)
     td: list[TdAttachOut] = Field(default_factory=list)
     md: list[str] = Field(default_factory=list)
-    status: str = "live"
+    status: str = "starting"
+    progress: StsStatusProgress | None = None
 
 
 class StrategyOut(BaseModel):

@@ -18,7 +18,9 @@ from mftik.protocol import (
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
     STS_SESSION_STATUS,
+    StrategySpec,
     StrategyTemplate,
+    StrategyYamlError,
     StsEventLogChunk,
     StsEventLogInfo,
     StsEventLogInfoRequest,
@@ -34,6 +36,7 @@ from mftik.protocol import (
     default_template,
     get_template,
     md_feeds_of,
+    parse_strategy_yml,
 )
 from mftik.registry import AddedStrategy, RegistryStore, qualify
 from mftik_db.models.session import SessionDomain, SessionStatus, StsSessionRow
@@ -47,6 +50,7 @@ from mftik_api.audit_util import record_audit
 from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
+from mftik_api.orchestrate import start
 from mftik_api.paging import ListOffset
 from mftik_api.schemas import (
     DeployResponse,
@@ -685,7 +689,11 @@ def _safe_name(value: str) -> str:
     return cleaned or "session"
 
 
-@router.post("/deploy/{strategy_type}", response_model=DeployResponse)
+@router.post(
+    "/deploy/{strategy_type}",
+    response_model=DeployResponse,
+    status_code=202,
+)
 async def deploy(
     strategy_type: str,
     body: StrategyDeployBody,
@@ -694,15 +702,78 @@ async def deploy(
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
 ) -> DeployResponse:
-    """Placeholder until IF-13 (#191) puts the asynchronous start here.
+    """Accept a deploy before the session is running (F12, §8.1).
 
-    The synchronous deploy — create, then MD attach, then TD attach, rolled
-    back on failure — was deleted with RM-08 (#171). Nothing validates the
-    document any more, because nothing downstream of the validation exists
-    yet; 501 rather than a partial success is the honest answer.
+    Progress is null. The STS controller writes status and conditions;
+    the ingress writes hook progress. ``body.timeout`` is not the accept
+    budget — the old synchronous create timeout is gone.
     """
-    del strategy_type, body, broker, store, owner, principal
-    raise HTTPException(
-        status_code=501,
-        detail="deploy is not implemented — waiting for IF-13 (#191)",
+    if _deployable_template(strategy_type, store) is None:
+        known = ", ".join(t.type for t in _deployable_templates(store))
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"unknown strategy type: {strategy_type}; known: {known}"
+            ),
+        )
+    try:
+        spec = parse_strategy_yml(body.yaml)
+    except StrategyYamlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _refuse_sts_accounts_missing_from_td(spec)
+    created_by = body.created_by if body.created_by is not None else owner
+    try:
+        result = await start(
+            spec,
+            broker=broker,
+            strategy_type=strategy_type,
+            yaml_text=body.yaml,
+            created_by=created_by,
+            instance=body.instance,
+        )
+    except DomainRpcError as exc:
+        raise HTTPException(
+            status_code=_deploy_status(exc), detail=exc.message
+        ) from exc
+    await record_audit(
+        user_id=created_by,
+        operation="sts.deploy",
+        result=(
+            f"session_id={result.session_id} type={strategy_type} "
+            f"td_names={list(spec.td)}"
+        ),
+        principal=principal,
     )
+    return result
+
+
+def _deploy_status(exc: DomainRpcError) -> int:
+    """HTTP status for a domain refusal during accept.
+
+    The same mapping the synchronous deploy used. A miss is 504. An
+    unknown account or strategy is 404. Everything else, including a
+    protocol mismatch, is 502 — the plane answered, and the answer was
+    not an accept.
+    """
+    if exc.code in {"unknown_strategy", "not_found", "unknown_api"}:
+        return 404
+    if exc.code == "timeout":
+        return 504
+    if exc.code == "incompatible_environment":
+        return 409
+    if exc.code == "strategy_refused":
+        return 400
+    return 502
+
+
+def _refuse_sts_accounts_missing_from_td(spec: StrategySpec) -> None:
+    """``quote_account`` / ``hedge_account`` must be keys under ``td``."""
+    for field in ("quote_account", "hedge_account"):
+        name = spec.sts.get(field)
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if name.strip() not in spec.td:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} {name!r} is not a key under td",
+            )

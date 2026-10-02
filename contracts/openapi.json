@@ -1822,7 +1822,7 @@
           "sts"
         ],
         "summary": "Deploy",
-        "description": "Placeholder until IF-13 (#191) puts the asynchronous start here.\n\nThe synchronous deploy \u2014 create, then MD attach, then TD attach, rolled\nback on failure \u2014 was deleted with RM-08 (#171). Nothing validates the\ndocument any more, because nothing downstream of the validation exists\nyet; 501 rather than a partial success is the honest answer.",
+        "description": "Accept a deploy before the session is running (F12, \u00a78.1).\n\nProgress is null. The STS controller writes status and conditions;\nthe ingress writes hook progress. ``body.timeout`` is not the accept\nbudget \u2014 the old synchronous create timeout is gone.",
         "operationId": "deploy_sts_deploy__strategy_type__post",
         "parameters": [
           {
@@ -1846,7 +1846,7 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -4914,7 +4914,17 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "default": "live"
+            "default": "starting"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StsStatusProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -4922,7 +4932,8 @@
           "session_id",
           "type"
         ],
-        "title": "DeployResponse"
+        "title": "DeployResponse",
+        "description": "Accepted deploy (F12, \u00a78.1).\n\n``status`` is ``starting``. The session row's phase is a different\nfield, and the STS controller writes it. ``progress`` is the\ningress's hook report. It is null at accept: ``on_start`` has not\nrun. ``td`` and ``md`` stay empty here \u2014 those lists used to be the\nattach results, and the accept does not wait for them."
       },
       "DomainStats": {
         "properties": {
@@ -7161,6 +7172,40 @@
           "status"
         ],
         "title": "StsControlResponse"
+      },
+      "StsStatusProgress": {
+        "properties": {
+          "hook": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hook"
+          },
+          "elapsed_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed S"
+          },
+          "dropped": {
+            "type": "integer",
+            "title": "Dropped",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "StsStatusProgress",
+        "description": "What the ingress puts on a status snapshot while a hook runs (\u00a75.2).\n\nAuthority for the numbers is the session worker's ingress (\u00a73.3,\n\"hook \u9032\u5ea6\u3001offload \u9032\u5ea6\u3001\u4ea4\u4ed8\u7684\u4e1f\u68c4\u8a08\u6578\"). ``hook`` is the hook it is\ninside, ``elapsed_s`` how long that hook has been on the clock, and\n``dropped`` how many delivered events the ingress has discarded."
       },
       "SymSymbolListResponse": {
         "properties": {
