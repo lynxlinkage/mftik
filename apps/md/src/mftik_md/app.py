@@ -27,6 +27,7 @@ from mftik.intent_gc import watch_sts_reports
 from mftik.procman import (
     ProcmanError,
     Supervisor,
+    admission_budget_from_environ,
     current_release,
     pinned_releases_path,
     publish_reports,
@@ -185,6 +186,7 @@ async def amain() -> bool:
             plane="md",
             instance=INSTANCE,
             clock=clock,
+            budget=admission_budget_from_environ("md"),
             pin_path=pinned_releases_path(),
         )
         report_task: asyncio.Task[None] | None = None

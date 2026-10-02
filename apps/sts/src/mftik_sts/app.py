@@ -81,12 +81,17 @@ def _open_supervisor() -> Any:
     file when Strategon named a release, and ``None`` while it did not
     (B3-07). The path is not this instance's work directory.
     """
-    from mftik.procman import Supervisor, pinned_releases_path
+    from mftik.procman import (
+        Supervisor,
+        admission_budget_from_environ,
+        pinned_releases_path,
+    )
 
     return Supervisor(
         _supervisor_work_dir(SOURCE, INSTANCE),
         plane="sts",
         instance=INSTANCE,
+        budget=admission_budget_from_environ("sts"),
         pin_path=pinned_releases_path(),
     )
 

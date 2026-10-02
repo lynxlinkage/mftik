@@ -484,9 +484,24 @@ shim fork 出 worker 之後、`exec` 之前，由子進程寫自己的 `/proc/se
 | TD `account` | +100 | 持有 ledger 和在途的單，最不該被殺 |
 | controller、shim | 0（不調） | 被殺會失去管理能力；而且調低需要 `CAP_SYS_RESOURCE` |
 
-初始值在 B4 依實測的 RSS 調整。
+B4-09 實測之後，這張分數表沒有改。犧牲順序仍是 session、然後 MD、然後 TD。
 
-MD 連線 worker 是一條 websocket 一個進程（F17），worker 數等於使用中的連線數。以每個 60–90 MB 估計（B4 實測），10 條連線就是 0.6–0.9 GB，已經超過現行整個 MD 平面的 768 MB，MD 的 `memory_budget_mb` 要依此設定。
+實測的是 worker 行程樹的 Pss，也就是 `procman.report` 的 `rss_bytes`：不含 shim，也不是 `/proc/<pid>/status` 的 `VmRSS`。機器是 Linux 6.12.94+，Python 3.12.3（GCC 13.3.0），Intel Xeon 4 核、2400 MHz、BogoMIPS 4800，uvloop 0.22.1，nats-py 2.15.0，nats-server v2.11.17。各取三次樣本的中位數，session 取 idle 與已載入策略的較高者，account 取交易層關與開的較高者，再向上取整成 MiB，寫進 `KIND_RSS_ESTIMATE_MIB`（provisional，#286）。
+
+| kind | 狀態 | Pss（MiB） | worker `VmRSS`（KiB） | shim `VmRSS`（KiB） | 估計（MiB） |
+|---|---|---|---|---|---|
+| STS `session` | idle，策略已 `on_ready`、沒有 td／md | 68.61 | 89720 | 14596 | 69 |
+| STS `session` | 策略已載入，td 帳號已接上 | 68.62 | 89752 | 14600 | 69 |
+| MD `conn` | paper orderbook | 60.81 | 75920 | 14592 | 61 |
+| MD `fetch` | 生產入口，broker 已連上 | 59.89 | 74892 | 14596 | 60 |
+| TD `account` | paper，交易層關 | 78.40 | 98944 | 14588 | 79 |
+| TD `account` | paper，交易層開 | 78.49 | 99076 | 14588 | 79 |
+
+大小順序是 account、session、MD，和上面的犧牲順序不同。`oom_score_adj` 的差距仍大於這幾 MiB，所以 kernel 還是會先挑 session。若把分數改成跟著 RSS 走，先被殺的會變成持有 ledger 的 account worker，和這一節的理由相反，所以分數維持 800／300／100。
+
+同一輪 shim 的 `VmRSS` 是 14564–14600 kB（worker 為 `time.sleep` 時是 14564 kB）。B3-01 的 14576 kB 仍在這個範圍裡，`SHIM_VMRSS_BYTES` 不改。准入把這個常數加在每個被計入的 worker 上，不放進上表。
+
+MD 連線 worker 是一條 websocket 一個進程（F17），worker 數等於使用中的連線數。上表的 paper conn 是 60.81 MiB Pss，落在原本 60–90 MB 的估計裡。10 條連線就是 0.6–0.9 GB，已經超過現行整個 MD 平面的 768 MB，MD 的 `memory_budget_mb` 要依此設定。
 
 每個 worker 另外有一個 Python shim（F29），也要算進各平面的預算。B3-01 實測（Python 3.12.3，worker 執行 `time.sleep`、shim 阻塞在 `poll`，讀 `/proc/<pid>/status` 的 `VmRSS`）：shim 自己是 14576 kB（約 14.2 MiB）。Prototype 的約 10–15 MB 由這個實測取代。
 
@@ -505,6 +520,7 @@ TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定�
 
 - 預估值來自 Supervisor 回報的實際 RSS：開了 `oci_host_pid` 之後，controller 可以直接讀 worker 的 `/proc/<pid>/status`。
 - 超過預算時，start 直接以 `capacity_exceeded` 拒絕，不會先把 worker 開起來、再讓 OOM 收拾。
+- B4-09 起，三個平面在建立 Supervisor 時讀 `PROCMAN_MAX_WORKERS` 和 `PROCMAN_MEMORY_BUDGET_MB`。兩個都沒設、或是空白，就是沒有預算，行為和今天一樣。有設記憶體上限時，kind 的估計用上面那張表，shim 另加 B3-01 的常數。
 
 **觀測：** `procman.report.*` 帶上每個 worker 的 RSS。#61 上線後，Strategon 另外回報每個 slot 的 `memory.current` 和 `oom_kill`。shim 看到 worker 被 SIGKILL 時，Supervisor 會比對這個計數，判斷是不是 OOM。
 
