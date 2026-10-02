@@ -18,12 +18,14 @@ what is actually resting.
   hook. The pool object returned by :attr:`pool` is stable from
   :meth:`start` until :meth:`close`.
 * **R3.** At most one backfill runs for this account at a time, and it
-  does not fill the pool. Other requests keep using it. The one-at-a-time
-  run is B6-05; this layer only leaves more than one connection in the
-  pool. :meth:`handle_backfill` still raises.
+  holds at most :data:`BACKFILL_MAX_CONNECTIONS` HTTP requests on the
+  pool. Other requests keep using it. A second request is refused
+  with the same sentence :func:`mftik_td.backfill.session.in_flight_reason`
+  already uses, not a new one.
 * **R4.** Recon, leverage lookups, backfill and HTTP order entry share
   this pool. A venue REST client takes the client from
-  :meth:`RestPool.client_for` as its ``client=``.
+  :meth:`RestPool.client_for` as its ``client=``. Backfill's client
+  delegates to that and does not close it.
 * **R5.** The keepalive is the adapter's lightweight public read
   (:mod:`mftik.exchange.keepalive`). The interval is the adapter's
   constant. It is not chosen here.
@@ -31,7 +33,9 @@ what is actually resting.
 Paper has no HTTP pool. :meth:`start` and :meth:`close` for ``Paper``
 are the connector's ``connect`` and ``close``. :attr:`pool` stays
 ``None``. :meth:`keepalive_once` still raises for paper.
-:meth:`handle_backfill` raises for every venue (B6-05).
+:meth:`handle_backfill` still runs: paper has no history reader, and
+the executor records that. Deribit and Bitget have a pool and no
+reader; this layer does not add one.
 
 A keepalive failure is logged and retried on the next tick. It does
 not stop the worker and it does not touch the trading layer.
@@ -42,15 +46,22 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 from mftik.broker.handler import Reply
 from mftik.clock import Clock, SystemClock
 from mftik.exchange.keepalive import RestKeepalive, for_venue
-from mftik.protocol import UntypedEnvelope
+from mftik.protocol import (
+    TD_BACKFILL_RESULT,
+    Envelope,
+    TdBackfill,
+    TdBackfillResult,
+    UntypedEnvelope,
+)
 
 from mftik_td.account._ticket import TICKET
+from mftik_td.backfill.session import in_flight_reason
 
 if TYPE_CHECKING:
     from mftik_td.account.session import TradingConnector
@@ -60,6 +71,13 @@ logger = logging.getLogger(__name__)
 #: Request timeout on a warm client. The same bound the venue REST
 #: clients use when they build their own. Not a new setting.
 _CLIENT_TIMEOUT_S = 10.0
+
+# provisional, pending Yi Te (#286)
+#: HTTP requests one account's backfill may hold on the resident pool
+#: at once. Every adapter's ``POOL_LIMITS.max_connections`` is larger
+#: (100), so an order still has a free connection. One run per account
+#: is a separate guard.
+BACKFILL_MAX_CONNECTIONS = 2
 
 
 class Keepalive(Protocol):
@@ -108,6 +126,33 @@ class RestPool:
         return tuple(self._clients.values())
 
 
+class _PooledBackfillClient:
+    """The pool client, with a cap on how many requests backfill holds.
+
+    Venue REST clients call ``get`` and ``post`` and, when they were
+    handed a client, do not close it. :meth:`aclose` is a no-op so a
+    reader that does close still leaves the pool up. Orders use
+    :meth:`RestPool.client_for` directly and do not take this cap.
+    """
+
+    def __init__(
+        self, inner: httpx.AsyncClient, limit: asyncio.Semaphore
+    ) -> None:
+        self._pool_client = inner
+        self._limit = limit
+
+    async def get(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        async with self._limit:
+            return await self._pool_client.get(*args, **kwargs)
+
+    async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        async with self._limit:
+            return await self._pool_client.post(*args, **kwargs)
+
+    async def aclose(self) -> None:
+        return None
+
+
 class ResidentLayer:
     """The half of an account worker that does not follow intent (F35).
 
@@ -122,6 +167,7 @@ class ResidentLayer:
         keepalive: Keepalive | None = None,
         connector: TradingConnector | None = None,
         clock: Clock | None = None,
+        backfill: Any = None,
     ) -> None:
         self.api_id = api_id
         self.venue = venue
@@ -130,9 +176,14 @@ class ResidentLayer:
         #: pool. Paper's :attr:`pool` stays ``None``.
         self._connector = connector
         self._clock: Clock = clock if clock is not None else SystemClock()
+        #: The existing executor. ``None`` until the process hands one
+        #: in. Credentials stay that executor's ``load_api``.
+        self._backfill = backfill
         self._started = False
         self._pool: RestPool | None = None
         self._task: asyncio.Task[None] | None = None
+        self._run: asyncio.Task[None] | None = None
+        self._http_slots = asyncio.Semaphore(BACKFILL_MAX_CONNECTIONS)
 
     @property
     def started(self) -> bool:
@@ -232,6 +283,11 @@ class ResidentLayer:
         """
         if not self._started:
             raise NotImplementedError(TICKET)
+        run = self._run
+        self._run = None
+        if run is not None and not run.done():
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
         task = self._task
         self._task = None
         if task is not None:
@@ -287,19 +343,107 @@ class ResidentLayer:
                     self.venue,
                 )
 
+    def backfill_client(self) -> _PooledBackfillClient | None:
+        """The HTTP client a backfill reader should use, or ``None``.
+
+        ``None`` when this layer has no pool (paper, or not started).
+        Otherwise the pool's first host, which is the venue's only REST
+        host, or the ``base_urls`` override tests pass to :meth:`start`.
+        Requests take :data:`BACKFILL_MAX_CONNECTIONS`. Closing the
+        returned object does not close the pool.
+        """
+        pool = self._pool
+        if pool is None:
+            return None
+        hosts = pool.hosts()
+        if not hosts:
+            return None
+        return _PooledBackfillClient(
+            pool.client_for(hosts[0]), self._http_slots
+        )
+
     async def handle_backfill(self, message: UntypedEnvelope) -> Reply | None:
-        """Serve one ``TdBackfill`` on this pool (F35, R3). B6-05.
+        """Serve one ``TdBackfill`` on this pool (F35, R3).
 
         A :class:`~mftik.broker.handler.Handler`. The account does not
-        need a session. At most one run at a time, and it must leave
-        room in the pool for orders. The reply is a ``TdBackfillResult``.
+        need a session, and the trading layer does not need to be on.
+        The reply is acceptance, or the refusal
+        :func:`~mftik_td.backfill.session.in_flight_reason` when this
+        account already has a run. The walk then runs out of band: the
+        subject also serves ledger and OMS reads, and a walk is minutes
+        of venue round trips.
 
-        This does not call :mod:`mftik_td.backfill`. That package still
-        serves ``td.backfill.{instance}`` on the TD process; B6-05 moves
-        the work onto this method. The TD process does not mount this
-        handler.
+        The reader's REST client is :meth:`backfill_client`. Credentials
+        are the executor's existing ``apis`` load.
         """
-        raise NotImplementedError(TICKET)
+        try:
+            payload = TdBackfill.model_validate(message.payload or {})
+        except Exception as exc:
+            return self._backfill_reply(
+                api_id=0, ok=False, reason=f"invalid: {exc}"
+            )
+        if payload.api_id != self.api_id:
+            return self._backfill_reply(
+                api_id=payload.api_id,
+                ok=False,
+                reason=f"api_id {payload.api_id} is not this account",
+            )
+        if self._backfill is None:
+            return self._backfill_reply(
+                api_id=payload.api_id,
+                ok=False,
+                reason="no backfill executor",
+            )
+        if self.venue != "Paper" and self._pool is None:
+            return self._backfill_reply(
+                api_id=payload.api_id,
+                ok=False,
+                reason="resident pool is not up",
+            )
+        if self._run is not None and not self._run.done():
+            logger.info(
+                "TD backfill skipped api_id=%s: already running", self.api_id
+            )
+            return self._backfill_reply(
+                api_id=payload.api_id,
+                ok=False,
+                reason=in_flight_reason(1),
+            )
+        client = self.backfill_client()
+        self._run = asyncio.create_task(
+            self._run_backfill(payload, client),
+            name=f"td-backfill-{self.api_id}",
+        )
+        self._run.add_done_callback(self._clear_run)
+        return self._backfill_reply(
+            api_id=payload.api_id, ok=True, reason="accepted"
+        )
+
+    async def _run_backfill(self, payload: TdBackfill, client: Any) -> None:
+        try:
+            await self._backfill.run(
+                payload.api_id,
+                tickers=payload.tickers,
+                reason=payload.reason,
+                client=client,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "TD backfill failed api_id=%s", payload.api_id
+            )
+
+    def _clear_run(self, task: asyncio.Task[None]) -> None:
+        if self._run is task:
+            self._run = None
+
+    def _backfill_reply(self, *, api_id: int, ok: bool, reason: str) -> Reply:
+        return Envelope[TdBackfillResult].wrap(
+            TdBackfillResult(api_id=api_id, ok=ok, reason=reason),
+            type=TD_BACKFILL_RESULT,
+            source="td",
+        )
 
 
 def _limits(spec: RestKeepalive, expiry_s: float) -> httpx.Limits:

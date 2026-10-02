@@ -9,7 +9,8 @@ message in, one reply or ``None`` out. It does not see the broker
 * ``td.order.{api_id}`` (:meth:`~mftik.protocol.Topics.td_order`):
   submit, cancel, and ``td.order.cancel_session``.
 * ``td.account.{api_id}`` (:meth:`~mftik.protocol.Topics.td_account`):
-  ``oms.view`` (including ``settled``), ``oms.order``, ``ledger.view``.
+  ``oms.view`` (including ``settled``), ``oms.order``, ``ledger.view``,
+  and ``td.backfill`` (the resident layer, B6-05).
 
 ``td.oms.{api_id}`` and ``td.ledger.{api_id}`` stay fan-out subjects
 (:meth:`~mftik.protocol.Topics.td_oms`,
@@ -110,6 +111,7 @@ from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_BACKFILL,
     TD_ERROR,
     TD_LEDGER_VIEW,
     TD_OMS_ORDER,
@@ -1082,6 +1084,8 @@ def account_subject_handler(worker: AccountWorker) -> Handler:
     """``td.account.{api_id}``: OMS reads and the ledger, one subject."""
 
     async def handle(message: UntypedEnvelope) -> Reply | None:
+        if message.type == TD_BACKFILL:
+            return await worker.resident.handle_backfill(message)
         if message.type in worker.oms.TYPES:
             return await worker.oms(message)
         if message.type in worker.ledger.TYPES:

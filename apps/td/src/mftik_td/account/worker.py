@@ -29,6 +29,7 @@ from mftik_td.account.trading import TradingLayer
 
 if TYPE_CHECKING:
     from mftik_td.account.session import Session, TradingConnector
+    from mftik_td.backfill.executor import BackfillExecutor
     from mftik_td.oms import Ledger, Oms
 
 
@@ -68,6 +69,7 @@ class AccountWorker:
         ledger: Ledger | None = None,
         private: TradingConnector | None = None,
         session: Session | None = None,
+        backfill: BackfillExecutor | None = None,
     ) -> None:
         self.api_id = _positive_id(api_id, "api_id")
         self.incarnation = _incarnation(incarnation)
@@ -82,6 +84,7 @@ class AccountWorker:
             keepalive=keepalive,
             connector=connector,
             clock=clock,
+            backfill=backfill,
         )
         self.trading = TradingLayer(
             self.resident,

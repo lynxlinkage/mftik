@@ -5,9 +5,9 @@ the clock is a :class:`~mftik.clock.FakeClock`. Paper still has no pool:
 the contract test that asks a paper worker for one stays ``xfail``
 until B6-02, because that test also switches the trading layer.
 
-``handle_backfill`` still raises. The one-at-a-time backfill is B6-05.
-What R3 can say here is that the pool has more than one connection, so
-a later backfill is not the whole pool.
+A backfill that is not a ``TdBackfill`` is refused and does not replace
+the pool. The pool still has more than one connection, which is what
+leaves room beside :data:`BACKFILL_MAX_CONNECTIONS`.
 """
 
 from __future__ import annotations
@@ -21,7 +21,12 @@ from mftik.clock import FakeClock
 from mftik.exchange.bybit.protocol import BYBIT_REST_URL
 from mftik.exchange.bybit.rest import BybitPublicRest, BybitRest
 from mftik.exchange.keepalive import for_venue
-from mftik.protocol import TD_ORDER_CANCEL_SESSION, Envelope
+from mftik.protocol import (
+    TD_BACKFILL_RESULT,
+    TD_ORDER_CANCEL_SESSION,
+    Envelope,
+    TdBackfillResult,
+)
 from mftik_td.account import AccountWorker
 from mftik_td.account._ticket import TICKET
 from mftik_td.oms import Ledger, Oms
@@ -154,10 +159,12 @@ async def test_r2_the_trading_switch_keeps_the_pool_and_the_hook() -> None:
         await worker.resident.close()
 
 
-async def test_r3_backfill_is_not_this_ticket_and_the_pool_has_room() -> None:
+async def test_r3_a_refused_backfill_leaves_the_pool_with_room() -> None:
     spec = for_venue("Bybit")
     assert spec.limits.max_keepalive_connections is not None
     assert spec.limits.max_keepalive_connections > 1
+    assert spec.limits.max_connections is not None
+    assert spec.limits.max_connections > 2
     clock = FakeClock()
     script = _Script()
     worker = _worker(clock)
@@ -166,8 +173,10 @@ async def test_r3_backfill_is_not_this_ticket_and_the_pool_has_room() -> None:
         message = Envelope[dict[str, object]].wrap(
             {}, type=TD_ORDER_CANCEL_SESSION, source="test"
         )
-        with pytest.raises(NotImplementedError, match=TICKET):
-            await worker.resident.handle_backfill(message)
+        reply = await worker.resident.handle_backfill(message)
+        assert reply is not None
+        assert reply.type == TD_BACKFILL_RESULT
+        assert TdBackfillResult.model_validate(reply.payload).ok is False
         pool = worker.resident.pool
         assert pool is not None
         client = pool.client_for(BYBIT_REST_URL)

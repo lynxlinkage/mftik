@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 
+from mftik.broker import Broker
 from mftik.broker.handler import Reply
 from mftik.protocol import (
     TD_ERROR,
@@ -25,10 +26,22 @@ from mftik_td.rpc.health import handle_health
 logger = logging.getLogger(__name__)
 
 
-async def dispatch(message: UntypedEnvelope) -> Reply | None:
-    """Route one control-plane message, or answer ``td.error``."""
+async def dispatch(
+    message: UntypedEnvelope,
+    *,
+    broker: Broker | None = None,
+    instance: str | None = None,
+) -> Reply | None:
+    """Route one control-plane message, or answer ``td.error``.
+
+    ``broker`` and ``instance`` are how a delete that drops the last
+    intent asks for a detach backfill. Callers that only want the book
+    updated leave them out.
+    """
     if message.type in INTENT_TYPES:
-        return await intent_handler(intent_book())(message)
+        return await intent_handler(
+            intent_book(), broker=broker, instance=instance
+        )(message)
     if message.type == TD_HEALTH:
         return await handle_health(message)
     logger.warning("unknown td rpc type=%s id=%s", message.type, message.id)

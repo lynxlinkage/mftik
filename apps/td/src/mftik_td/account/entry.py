@@ -33,7 +33,9 @@ from mftik_td.account.handlers import account_subject_handler
 from mftik_td.account.heartbeat import beat_until, write_heartbeat
 from mftik_td.account.session import Session
 from mftik_td.account.worker import AccountWorker
-from mftik_td.db import account_credential
+from mftik_td.backfill.executor import BackfillExecutor
+from mftik_td.backfill.reader import HistoryReaderFactory
+from mftik_td.db import account_credential, get_api
 
 logger = logging.getLogger("mftik_td.account")
 
@@ -106,11 +108,12 @@ async def run(argv: list[str] | None = None) -> int:
                 api_secret=row.api_secret,
                 passphrase=row.passphrase,
             )
+            symbols = SymbolClient(broker)
             session = Session(
                 api_id=row.api_id,
                 broker=broker,
                 private=private,
-                symbols=SymbolClient(broker),
+                symbols=symbols,
             )
             worker = AccountWorker(
                 row.api_id,
@@ -120,6 +123,11 @@ async def run(argv: list[str] | None = None) -> int:
                 private=private,
                 session=session,
                 clock=SystemClock(),
+                backfill=BackfillExecutor(
+                    broker=broker,
+                    factory=HistoryReaderFactory(symbols),
+                    load_api=get_api,
+                ),
             )
             try:
                 await worker.resident.start()

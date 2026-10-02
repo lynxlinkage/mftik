@@ -22,8 +22,11 @@ the reports are the samples, and the next one still counts.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+import asyncio
+import logging
+from collections.abc import Collection, Sequence
 
+from mftik.broker import Broker
 from mftik.broker.handler import Handler, Reply
 from mftik.instance import validate_instance_name
 from mftik.intent_gc import InstanceGcState
@@ -44,7 +47,14 @@ from mftik.protocol import (
 )
 from pydantic import ValidationError
 
+from mftik_td.backfill.trigger import request_backfill
 from mftik_td.controller.decisions import apply_delete, apply_put
+
+logger = logging.getLogger(__name__)
+
+#: Detach asks already handed to the loop. A task with no reference is
+#: free to disappear before the request is sent.
+_DETACH_TASKS: set[asyncio.Task[bool]] = set()
 
 #: The two types this subject carries (§8.1, §8.3). A put replaces the
 #: owner's whole account set. A delete releases accounts. Both feed the
@@ -119,7 +129,12 @@ def intent_book() -> TdIntentBook:
     return _BOOK
 
 
-def intent_handler(book: TdIntentBook) -> Handler:
+def intent_handler(
+    book: TdIntentBook,
+    *,
+    broker: Broker | None = None,
+    instance: str | None = None,
+) -> Handler:
     """``td.intent.put`` and ``td.intent.delete`` for ``book``.
 
     Served on :func:`control_subject`. The subject is not bound here.
@@ -136,6 +151,13 @@ def intent_handler(book: TdIntentBook) -> Handler:
     The order path does not come through here (P1). ``td.order.{api_id}``
     is the account worker's. This handler does not publish the trading
     bit: the running process does not deliver it (P5).
+
+    A delete that leaves an account with no held intent asks for a
+    backfill (``reason="detach"``) on ``broker``. The ask is a task.
+    It does not delay the reply and it does not fail it. ``broker``
+    or ``instance`` omitted means the ask is not sent; the book still
+    changes. Report GC goes through :meth:`TdIntentBook.release_owners`,
+    not through this handler.
     """
 
     async def handle(message: UntypedEnvelope) -> Reply | None:
@@ -144,7 +166,7 @@ def intent_handler(book: TdIntentBook) -> Handler:
         try:
             if message.type == TD_INTENT_PUT:
                 return _put(book, message)
-            return _delete(book, message)
+            return _delete(book, message, broker=broker, instance=instance)
         except (ValidationError, ValueError) as exc:
             return _error(message, "invalid_payload", str(exc))
 
@@ -165,18 +187,65 @@ def _put(book: TdIntentBook, message: UntypedEnvelope) -> Reply:
     )
 
 
-def _delete(book: TdIntentBook, message: UntypedEnvelope) -> Reply:
+def _delete(
+    book: TdIntentBook,
+    message: UntypedEnvelope,
+    *,
+    broker: Broker | None,
+    instance: str | None,
+) -> Reply:
     delete = TdIntentDelete.model_validate(message.payload or {})
     refused = _mismatch(message, delete.session_id, delete.owner.session_id)
     if refused is not None:
         return refused
+    before = book.rows()
     book.delete(delete)
+    _schedule_detach(broker, instance, before, book.rows())
     return Envelope[TdIntentDeleteResult].wrap(
         TdIntentDeleteResult(session_id=delete.session_id),
         type=TD_INTENT_DELETE,
         source="td",
         session_id=delete.session_id,
     )
+
+
+def _held_ids(rows: Sequence[TdIntentPut]) -> set[int]:
+    found: set[int] = set()
+    for row in rows:
+        found.update(row.api_ids)
+    return found
+
+
+def _schedule_detach(
+    broker: Broker | None,
+    instance: str | None,
+    before: Sequence[TdIntentPut],
+    after: Sequence[TdIntentPut],
+) -> None:
+    """Ask for a backfill of every account this delete left idle.
+
+    Best-effort. A failure is the task's, and
+    :func:`mftik_td.backfill.trigger.request_backfill` already swallows
+    it. The reply has been built by the time this returns.
+    """
+    if broker is None or instance is None:
+        return
+    released = sorted(_held_ids(before) - _held_ids(after))
+    for api_id in released:
+        try:
+            task = asyncio.create_task(
+                request_backfill(
+                    broker, api_id, instance=instance, reason="detach"
+                ),
+                name=f"td-backfill-detach-{api_id}",
+            )
+        except Exception:
+            logger.exception(
+                "TD detach backfill was not scheduled api_id=%s", api_id
+            )
+            continue
+        _DETACH_TASKS.add(task)
+        task.add_done_callback(_DETACH_TASKS.discard)
 
 
 def _mismatch(
