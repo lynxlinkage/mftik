@@ -496,6 +496,28 @@ class Session:
             status.value,
         )
 
+    async def confirm_absent(self, order: Order, *, status: OrderStatus) -> bool:
+        """Record that the venue's open orders do not list ``order``.
+
+        Paper ``cancel_session`` has no per-cid lookup, so one
+        :meth:`reconcile` is how a ``PENDING_NEW`` order is settled.
+        ``reconcile`` already announces an ``UNKNOWN`` order it drops.
+        A ``PENDING_NEW`` order is only removed. This writes ``status``
+        — a terminal state — and the pre-lock drops with that, the same
+        way :meth:`_announce_recon_settled` does. Returns False when the
+        cid is on the book again: it is still resting, and this does
+        not release its pre-lock.
+        """
+        if not status.is_terminal():
+            raise ValueError(
+                f"confirm_absent needs a terminal status, got {status}"
+            )
+        cid = order.client_order_id
+        if not cid or self.oms.get_order(cid) is not None:
+            return False
+        await self._announce_recon_settled(cid, order, status)
+        return True
+
     async def clear_state(self) -> None:
         """Delete this account's shared state. Call when the session dies.
 

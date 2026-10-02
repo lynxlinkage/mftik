@@ -24,20 +24,54 @@ the controller (§7.1).
 **cancel_session (F10, C1–C4).**
 
 * **C1.** Every OMS order whose ``client_order_id`` session field equals
-  the request's ``session_id`` is in scope. Other sessions are not.
+  the request's ``session_id`` is in scope, and so is every order the
+  venue still lists as open for that session. A recon can drop a
+  ``PENDING_NEW`` while ``place_order`` is in flight; the ack is then
+  ignored and the order rests at the venue with nothing in the book.
+  After this session's in-flight submits return, one
+  ``fetch_open_orders`` puts those listed orders back on the book.
+  That is not a second :meth:`~mftik_td.account.session.Session.reconcile`:
+  reconcile replaces the book, which is what drops the order.
+  Other sessions are not in scope.
   The field is :func:`mftik.strategy.client_order_id.session_id_of`.
 * **C2.** ``PENDING_NEW`` and ``UNKNOWN`` stay in scope. They are
-  handled after chase converges them, the same chase
-  :meth:`~mftik_td.account.session.Session.chase_unknown` already runs:
-  ``trading.private.fetch_order_by_client_order_id`` when the connector
-  has it. An order chase finds already terminal is confirmed, not
-  cancelled again. One chase finds still resting is cancelled.
+  resolved first, then treated like any other order: resting is
+  cancelled, terminal is confirmed. Where the connector has
+  ``fetch_order_by_client_order_id``, that is
+  :meth:`~mftik_td.account.session.Session.resolve_unknown` /
+  :meth:`~mftik_td.account.session.Session.mark_unknown_and_resolve`.
+  Where it does not (paper's remote client, on purpose), one
+  :meth:`~mftik_td.account.session.Session.reconcile` inside the
+  timeout is the venue answer: an in-scope cid absent from the open
+  orders is not resting, one still listed is cancelled.
 * **C3.** The reply is :class:`~mftik.protocol.TdCancelSessionResult`.
   ``ok`` is true only when every in-scope order is confirmed. On
   timeout ``ok`` is false and ``unconfirmed`` lists the
-  ``client_order_id`` values still outstanding.
+  ``client_order_id`` values still outstanding, sorted.
 * **C4.** Positions are not cancelled. There is nothing to cancel them
   with.
+
+Confirmed means the OMS status is ``CANCELED``, ``FILLED`` or
+``REJECTED`` and that status came from a venue answer: the cancel
+reply, the stream, ``fetch_order_by_client_order_id``, or a recon.
+``FILLED`` is confirmed — it is not resting. ``PENDING_CANCEL``,
+``PENDING_NEW``, ``UNKNOWN``, ``NEW`` and ``PARTIALLY_FILLED`` are not.
+When the answer is missing, the cid is ``unconfirmed``.
+
+A submit can be inside ``place_order`` when this runs. The handler
+remembers those in-flight submits per session and waits for them,
+inside the same timeout, before it takes the scope. One that has not
+returned when the timeout ends is ``unconfirmed``. After the cancels
+it scans again, so a submit that landed during the call is cancelled
+or listed too. ``ok`` is true only on a pass that finds nothing open.
+
+One ``cancel_session`` per session runs at a time on this worker. A
+second request for the same session waits, then runs its own pass; it
+does not reuse the first reply and it does not interleave cancels for
+the same cids. Two sessions run concurrently. The wait is not
+:attr:`~mftik_td.account.session.Session._recon_lock`: that lock is
+held across ``reconcile``'s venue calls, and this path must not take
+it.
 
 **oms.view settled (F13, V1–V3).**
 
@@ -52,17 +86,22 @@ the controller (§7.1).
   points at this handler. A late answer is the book including whatever
   ``UNKNOWN`` is left, not an error.
 
-Paper submit, cancel, unsettled ``oms.view`` and ``ledger.view`` are
-B4-05. ``cancel_session`` (B6-03), ``oms.order`` (B6-02) and
+Paper submit, cancel, unsettled ``oms.view``, ``ledger.view`` and
+``cancel_session`` (B6-03) answer. ``oms.order`` (B6-02) and
 ``settled=True`` (B6-08) still raise ``NotImplementedError("IF-11")``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+from collections.abc import Awaitable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mftik.broker.handler import Handler, Reply
+from mftik.clock import Clock, SystemClock
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.models import Order, OrderStatus, PlaceOrderRequest
 from mftik.exchange.oms import LedgerView, OmsView
@@ -93,6 +132,7 @@ from mftik.protocol import (
     UntypedEnvelope,
 )
 from mftik.protocol.reject_codes import is_td_internal
+from mftik.strategy.client_order_id import session_id_of
 from pydantic import ValidationError
 
 from mftik_td.account._ticket import TICKET
@@ -140,13 +180,54 @@ def _ack(message: UntypedEnvelope, ack: OrderAck) -> Reply:
     )
 
 
+_RESTING = frozenset({OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED})
+_AMBIGUOUS = frozenset({OrderStatus.PENDING_NEW, OrderStatus.UNKNOWN})
+
+
+@dataclass(frozen=True, slots=True)
+class _CancelSent:
+    """What one shared cancel attempt did to the book.
+
+    ``exchange_error`` means the venue refused the cancel and the
+    pending cancel was reverted. ``settled`` is the order the attempt
+    left behind when it already asked the venue (the cancel ack, or the
+    resolve after a transport failure).
+    """
+
+    ack: OrderAck
+    exchange_error: bool = False
+    settled: Order | None = None
+
+
+@dataclass
+class _CancelRun:
+    """Bookkeeping for one ``cancel_session`` call. Not the book."""
+
+    session_id: str
+    confirmed: set[str] = field(default_factory=set)
+    seen: set[str] = field(default_factory=set)
+    skipped: set[str] = field(default_factory=set)
+    chased: set[str] = field(default_factory=set)
+    cancel_tried: set[str] = field(default_factory=set)
+    recon_done: bool = False
+    listed: bool = False
+
+
 class OrderHandler:
     """``td.order.{api_id}``: submit, cancel, cancel_session."""
 
     TYPES = frozenset({STS_ORDER_SUBMIT, STS_ORDER_CANCEL, TD_ORDER_CANCEL_SESSION})
 
-    def __init__(self, worker: AccountWorker) -> None:
+    def __init__(self, worker: AccountWorker, *, clock: Clock | None = None) -> None:
         self._worker = worker
+        self._clock: Clock = clock if clock is not None else SystemClock()
+        #: session_id → cid → future that completes when ``place_order``
+        #: has returned and the book update for that submit has finished.
+        #: The future's result is a resting order the book did not keep
+        #: (recon dropped it while the call was in flight), else ``None``.
+        self._inflight: dict[str, dict[str, asyncio.Future[Order | None]]] = {}
+        #: One ``cancel_session`` body per session. Not ``_recon_lock``.
+        self._gates: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def subject(api_id: int) -> str:
@@ -156,12 +237,25 @@ class OrderHandler:
     async def __call__(self, message: UntypedEnvelope) -> Reply | None:
         """Dispatch one order-subject message.
 
-        ``cancel_session`` is B6-03 and still raises. A payload that
-        does not parse is an error envelope: :func:`mftik.broker.handler.serve`
-        logs a raised exception and sends nothing (H5).
+        A payload that does not parse is an error envelope:
+        :func:`mftik.broker.handler.serve` logs a raised exception and
+        sends nothing (H5). ``cancel_session`` answers with
+        :class:`~mftik.protocol.TdCancelSessionResult` on the same type.
+        The wire request has no timeout; the wait is
+        :data:`WAIT_TIMEOUT_S`.
         """
         if message.type == TD_ORDER_CANCEL_SESSION:
-            raise NotImplementedError(TICKET)
+            try:
+                request = TdCancelSessionRequest.model_validate(message.payload or {})
+            except ValidationError as exc:
+                return _error(message, "invalid_payload", str(exc))
+            result = await self.cancel_session(request)
+            return Envelope[TdCancelSessionResult].wrap(
+                result,
+                type=TD_ORDER_CANCEL_SESSION,
+                source="td",
+                session_id=message.session_id,
+            )
         if message.type == STS_ORDER_SUBMIT:
             try:
                 request = OrderSubmit.model_validate(message.payload or {})
@@ -222,9 +316,7 @@ class OrderHandler:
                 code = RejectCode.TD_UNSUPPORTED_ORDER_SHAPE
             else:
                 code = RejectCode.TD_INVALID_REQUEST
-            return self._refused(
-                request.api_id, request.client_order_id, code, reason
-            )
+            return self._refused(request.api_id, request.client_order_id, code, reason)
         session = self._session()
         reason = await session.reserve(order)
         if reason is not None:
@@ -234,19 +326,36 @@ class OrderHandler:
                 RejectCode.TD_INSUFFICIENT_BALANCE,
                 reason,
             )
-        await session.record_pending_new(order, session_id=request.session_id)
+        # Registered before the book write. ``record_pending_new``
+        # awaits, and a ``cancel_session`` that runs in that gap would
+        # otherwise reconcile a PENDING_NEW the venue has not listed yet.
+        key = self._inflight_key(request.session_id, request.client_order_id)
+        done: asyncio.Future[Order | None] = asyncio.get_running_loop().create_future()
+        self._inflight.setdefault(key, {})[request.client_order_id] = done
+        placed: Order | None = None
         try:
-            placed = await session.private.place_order(order)
-        except ExchangeError as exc:
-            return await self._submit_failed(session, request, exc)
-        except Exception as exc:
-            return await self._submit_ambiguous(session, request, exc)
-        await session.accept_venue_order(placed)
-        return OrderAck(
-            api_id=request.api_id,
-            client_order_id=request.client_order_id,
-            accepted=True,
-        )
+            await session.record_pending_new(order, session_id=request.session_id)
+            try:
+                placed = await session.private.place_order(order)
+            except ExchangeError as exc:
+                return await self._submit_failed(session, request, exc)
+            except Exception as exc:
+                return await self._submit_ambiguous(session, request, exc)
+            await session.accept_venue_order(placed)
+            return OrderAck(
+                api_id=request.api_id,
+                client_order_id=request.client_order_id,
+                accepted=True,
+            )
+        finally:
+            unbooked: Order | None = None
+            if (
+                placed is not None
+                and not placed.status.is_terminal()
+                and session.oms.get_order(request.client_order_id) is None
+            ):
+                unbooked = placed
+            self._finish_submit(key, request.client_order_id, done, unbooked)
 
     async def cancel(self, request: OrderCancel) -> OrderAck:
         """Accept or refuse one cancel."""
@@ -255,14 +364,27 @@ class OrderHandler:
         refused = self._offline(request.api_id, request.client_order_id)
         if refused is not None:
             return refused
-        session = self._session()
+        return (await self._cancel_sent(self._session(), request)).ack
+
+    async def _cancel_sent(self, session: Session, request: OrderCancel) -> _CancelSent:
+        """The cancel ``cancel`` and ``cancel_session`` share.
+
+        ``record_pending_cancel``, then the venue cancel, then
+        ``accept_venue_order``. An :class:`~mftik.exchange.errors.ExchangeError`
+        reverts the pending cancel. Any other exception takes the
+        UNKNOWN path and does not revert. This does not resolve an
+        exchange refusal; ``cancel_session`` does that itself, and only
+        confirms a terminal answer.
+        """
         reason = await session.record_pending_cancel(request.client_order_id)
         if reason is not None:
-            return self._refused(
-                request.api_id,
-                request.client_order_id,
-                RejectCode.TD_NOT_CANCELABLE,
-                reason,
+            return _CancelSent(
+                self._refused(
+                    request.api_id,
+                    request.client_order_id,
+                    RejectCode.TD_NOT_CANCELABLE,
+                    reason,
+                )
             )
         try:
             cancelled = await session.private.cancel_by_client_order_id(
@@ -270,14 +392,21 @@ class OrderHandler:
             )
         except ExchangeError as exc:
             await session.revert_pending_cancel(request.client_order_id)
-            return await self._cancel_failed(session, request, exc)
+            return _CancelSent(
+                await self._cancel_failed(session, request, exc),
+                exchange_error=True,
+            )
         except Exception as exc:
-            return await self._cancel_ambiguous(session, request, exc)
+            ack, settled = await self._cancel_ambiguous(session, request, exc)
+            return _CancelSent(ack, settled=settled)
         await session.accept_venue_order(cancelled)
-        return OrderAck(
-            api_id=request.api_id,
-            client_order_id=request.client_order_id,
-            accepted=True,
+        return _CancelSent(
+            OrderAck(
+                api_id=request.api_id,
+                client_order_id=request.client_order_id,
+                accepted=True,
+            ),
+            settled=cancelled,
         )
 
     async def cancel_session(
@@ -286,17 +415,376 @@ class OrderHandler:
         *,
         timeout: float = WAIT_TIMEOUT_S,
     ) -> TdCancelSessionResult:
-        """Cancel one session's resting orders and wait (C1–C4). B6-03.
+        """Cancel one session's resting orders and wait (C1–C4).
 
-        Chase and cancel go through ``trading.private``:
-        ``fetch_order_by_client_order_id`` for ``PENDING_NEW`` and
-        ``UNKNOWN``, then ``cancel_by_client_order_id`` for whatever is
-        still resting. The book they read and update is ``trading.oms``.
+        ``ok`` is true only when every in-scope order is confirmed not
+        resting by a venue answer. ``timeout`` bounds the whole call,
+        including venue round trips and the wait for this session's
+        in-flight submits. A second call for the same session waits for
+        this one to finish, then runs its own pass.
         """
         if not isinstance(request, TdCancelSessionRequest):
             raise TypeError("cancel_session expects TdCancelSessionRequest")
-        _timeout(timeout)
-        raise NotImplementedError(TICKET)
+        timeout = _timeout(timeout)
+        run = _CancelRun(request.session_id)
+        try:
+            await self._bound(self._cancel_locked(run), timeout)
+        except TimeoutError:
+            logger.warning(
+                "cancel_session timed out api_id=%s session_id=%s",
+                self._worker.api_id,
+                request.session_id,
+            )
+        unconfirmed = self._unconfirmed(run)
+        if unconfirmed:
+            logger.warning(
+                "cancel_session incomplete api_id=%s session_id=%s unconfirmed=%s",
+                self._worker.api_id,
+                request.session_id,
+                unconfirmed,
+            )
+        else:
+            logger.info(
+                "cancel_session confirmed api_id=%s session_id=%s",
+                self._worker.api_id,
+                request.session_id,
+            )
+        return TdCancelSessionResult(
+            session_id=request.session_id,
+            ok=not unconfirmed,
+            unconfirmed=unconfirmed,
+        )
+
+    async def _bound(self, work: Awaitable[None], timeout: float) -> None:
+        """Stop ``work`` when ``timeout`` elapses. Do not undo it.
+
+        The system clock uses :func:`asyncio.wait_for`, which is the
+        event-loop clock the wire path already runs on. A
+        :class:`~mftik.clock.FakeClock` is what component tests advance;
+        its sleep does not call :func:`asyncio.sleep`.
+        """
+        if timeout == 0 or isinstance(self._clock, SystemClock):
+            await asyncio.wait_for(work, timeout)
+            return
+        task = asyncio.ensure_future(work)
+        sleeper = asyncio.ensure_future(self._clock.sleep(timeout))
+        try:
+            done, _pending = await asyncio.wait(
+                {task, sleeper}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            task.cancel()
+            sleeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            with contextlib.suppress(asyncio.CancelledError):
+                await sleeper
+            raise
+        if task in done:
+            sleeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sleeper
+            task.result()
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise TimeoutError
+
+    def _gate(self, session_id: str) -> asyncio.Lock:
+        lock = self._gates.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._gates[session_id] = lock
+        return lock
+
+    async def _cancel_locked(self, run: _CancelRun) -> None:
+        async with self._gate(run.session_id):
+            await self._cancel_body(run)
+
+    async def _cancel_body(self, run: _CancelRun) -> None:
+        session = self._session()
+        while True:
+            # No recon and no cancel while a submit for this session is
+            # inside place_order. A new one that starts during the wait
+            # is waited on too.
+            for order in await self._wait_inflight(run.session_id):
+                cid = order.client_order_id
+                if cid:
+                    run.seen.add(cid)
+                    await self._cancel_one(session, run, cid)
+            # The book is not the whole scope. A recon (this account's
+            # other session, startup, reconnect) can drop a PENDING_NEW
+            # while place_order is out, and the ack is then ignored.
+            # The venue listing is what still has the live order.
+            await self._adopt_listed(session, run)
+            self._scope(session, run)
+            if self._settled(session, run):
+                return
+            ambiguous = self._ambiguous_todo(session, run)
+            if ambiguous:
+                # True: the book may have changed; look again before
+                # cancelling. False: these cids cannot be resolved in
+                # this call. Resting orders are still cancelled.
+                if await self._resolve_ambiguous(session, run, ambiguous):
+                    continue
+            resting = self._resting_todo(session, run)
+            if resting:
+                for order in resting:
+                    cid = order.client_order_id
+                    if cid:
+                        await self._cancel_one(session, run, cid)
+                continue
+            return
+
+    async def _adopt_listed(self, session: Session, run: _CancelRun) -> None:
+        """Book this session's venue open orders that the book has lost.
+
+        Once per call, after this session's in-flight submits have
+        returned. ``fetch_open_orders`` is the listing; it does not
+        replace the book the way :meth:`Session.reconcile` does.
+        A connector with no such method keeps the book as its scope
+        (the contract fakes). An order already on the book is left
+        alone. One that does not decode, or belongs to another
+        session, is not booked.
+        """
+        if run.listed:
+            return
+        run.listed = True
+        fetch = getattr(session.private, "fetch_open_orders", None)
+        if fetch is None:
+            return
+        listed = await fetch()
+        for order in listed:
+            cid = order.client_order_id
+            if not cid or self._session_of(cid) != run.session_id:
+                continue
+            if order.status.is_terminal():
+                continue
+            if cid in run.confirmed or cid in run.cancel_tried:
+                continue
+            if session.oms.get_order(cid) is not None:
+                continue
+            session.oms.handle_order(order)
+            run.seen.add(cid)
+
+    async def _wait_inflight(self, session_id: str) -> list[Order]:
+        """Wait until this session has no submit inside ``place_order``.
+
+        ``asyncio.wait`` does not cancel those futures when this wait
+        is cancelled, so a timeout does not abort the submit.
+        """
+        unbooked: list[Order] = []
+        while True:
+            pending = dict(self._inflight.get(session_id, {}))
+            if not pending:
+                return unbooked
+            done, _pending = await asyncio.wait(list(pending.values()))
+            for fut in done:
+                if fut.cancelled():
+                    continue
+                order = fut.result()
+                if order is not None:
+                    unbooked.append(order)
+
+    async def _resolve_ambiguous(
+        self, session: Session, run: _CancelRun, orders: list[Order]
+    ) -> bool:
+        """Resolve ``PENDING_NEW`` / ``UNKNOWN``. True if the book may have moved.
+
+        A connector with ``fetch_order_by_client_order_id`` uses the
+        chase path. One without (paper) gets a single ``reconcile``
+        for the whole call. False means nothing further can be done
+        for these cids inside this call.
+        """
+        fetch = getattr(session.private, "fetch_order_by_client_order_id", None)
+        if fetch is None:
+            if run.recon_done:
+                for order in orders:
+                    if order.client_order_id:
+                        run.chased.add(order.client_order_id)
+                return False
+            prior = {
+                order.client_order_id: order
+                for order in orders
+                if order.client_order_id
+            }
+            inflight = set(self._inflight.get(run.session_id, {}))
+            await session.reconcile()
+            run.recon_done = True
+            for cid, order in prior.items():
+                run.chased.add(cid)
+                run.seen.add(cid)
+                if cid in inflight:
+                    continue
+                if session.oms.get_order(cid) is not None:
+                    continue
+                # UNKNOWN was already given a terminal update inside
+                # reconcile. PENDING_NEW was only dropped; record the
+                # same "not resting" answer so its pre-lock can drop.
+                # A cid that is back on the book is still resting.
+                if order.status is OrderStatus.PENDING_NEW:
+                    absent = await session.confirm_absent(
+                        order, status=OrderStatus.REJECTED
+                    )
+                    if not absent:
+                        continue
+                run.confirmed.add(cid)
+            return True
+        for order in orders:
+            cid = order.client_order_id
+            if not cid:
+                continue
+            run.chased.add(cid)
+            if order.status is OrderStatus.UNKNOWN:
+                settled = await session.resolve_unknown(order)
+            else:
+                settled = await session.mark_unknown_and_resolve(
+                    cid, if_missing=OrderStatus.REJECTED
+                )
+            self._confirm_if_terminal(session, run, cid, settled)
+        return True
+
+    async def _cancel_one(self, session: Session, run: _CancelRun, cid: str) -> None:
+        if cid in run.cancel_tried:
+            return
+        run.cancel_tried.add(cid)
+        run.seen.add(cid)
+        sent = await self._cancel_sent(
+            session,
+            OrderCancel(
+                session_id=run.session_id,
+                api_id=self._worker.api_id,
+                client_order_id=cid,
+            ),
+        )
+        if sent.exchange_error:
+            # The venue refused, or does not know the order. The pending
+            # cancel is already reverted. Confirm only a terminal answer.
+            settled = await session.mark_unknown_and_resolve(
+                cid, if_missing=OrderStatus.CANCELED
+            )
+            self._confirm_if_terminal(session, run, cid, settled)
+            return
+        self._confirm_if_terminal(session, run, cid, sent.settled)
+
+    def _scope(self, session: Session, run: _CancelRun) -> None:
+        for cid in session.oms.view().orders:
+            owner = self._session_of(cid)
+            if owner is None:
+                if cid not in run.skipped:
+                    run.skipped.add(cid)
+                    logger.warning(
+                        "cancel_session skipping cid that does not decode "
+                        "api_id=%s cid=%s",
+                        self._worker.api_id,
+                        cid,
+                    )
+                continue
+            if owner == run.session_id:
+                run.seen.add(cid)
+
+    def _ambiguous_todo(self, session: Session, run: _CancelRun) -> list[Order]:
+        return self._todo(session, run, _AMBIGUOUS, run.chased)
+
+    def _resting_todo(self, session: Session, run: _CancelRun) -> list[Order]:
+        return self._todo(session, run, _RESTING, run.cancel_tried)
+
+    def _todo(
+        self,
+        session: Session,
+        run: _CancelRun,
+        statuses: frozenset[OrderStatus],
+        skip: set[str],
+    ) -> list[Order]:
+        inflight = self._inflight.get(run.session_id, {})
+        found: list[Order] = []
+        for cid, order in session.oms.view().orders.items():
+            if self._session_of(cid) != run.session_id:
+                continue
+            if cid in inflight or cid in skip or cid in run.confirmed:
+                continue
+            if order.status in statuses:
+                found.append(order)
+        return found
+
+    def _settled(self, session: Session, run: _CancelRun) -> bool:
+        """True when a pass finds nothing in scope still open."""
+        if self._inflight.get(run.session_id):
+            return False
+        for cid, order in session.oms.view().orders.items():
+            if self._session_of(cid) != run.session_id:
+                continue
+            if cid in run.confirmed or order.status.is_terminal():
+                continue
+            return False
+        for cid in run.seen:
+            if cid in run.confirmed:
+                continue
+            current = session.oms.get_order(cid)
+            if current is None or not current.status.is_terminal():
+                return False
+        return True
+
+    def _confirm_if_terminal(
+        self,
+        session: Session,
+        run: _CancelRun,
+        cid: str,
+        settled: Order | None,
+    ) -> None:
+        if settled is None or not settled.status.is_terminal():
+            return
+        current = session.oms.get_order(cid)
+        if current is not None and not current.status.is_terminal():
+            return
+        run.confirmed.add(cid)
+
+    def _unconfirmed(self, run: _CancelRun) -> list[str]:
+        session = self._worker.trading.session
+        found: set[str] = set()
+        if session is not None:
+            for cid, order in session.oms.view().orders.items():
+                if self._session_of(cid) != run.session_id:
+                    continue
+                if cid in run.confirmed or order.status.is_terminal():
+                    continue
+                found.add(cid)
+            for cid in run.seen:
+                if cid in run.confirmed:
+                    continue
+                current = session.oms.get_order(cid)
+                if current is None or not current.status.is_terminal():
+                    found.add(cid)
+        for cid in self._inflight.get(run.session_id, {}):
+            if cid not in run.confirmed:
+                found.add(cid)
+        return sorted(found)
+
+    def _session_of(self, client_order_id: str) -> str | None:
+        try:
+            return session_id_of(client_order_id)
+        except (ValueError, TypeError):
+            return None
+
+    def _inflight_key(self, session_id: str, client_order_id: str) -> str:
+        owner = self._session_of(client_order_id)
+        return owner if owner is not None else session_id
+
+    def _finish_submit(
+        self,
+        session_id: str,
+        client_order_id: str,
+        done: asyncio.Future[Order | None],
+        unbooked: Order | None,
+    ) -> None:
+        book = self._inflight.get(session_id)
+        if book is not None:
+            book.pop(client_order_id, None)
+            if not book:
+                self._inflight.pop(session_id, None)
+        if not done.done():
+            done.set_result(unbooked)
 
     def _offline(self, api_id: int, client_order_id: str) -> OrderAck | None:
         if api_id != self._worker.api_id:
@@ -436,8 +924,7 @@ class OrderHandler:
             )
         elif settled is None:
             logger.warning(
-                "order UNKNOWN api_id=%s cid=%s "
-                "(send failed, resolve deferred): %s",
+                "order UNKNOWN api_id=%s cid=%s (send failed, resolve deferred): %s",
                 request.api_id,
                 request.client_order_id,
                 exc,
@@ -450,12 +937,14 @@ class OrderHandler:
 
     async def _cancel_ambiguous(
         self, session: Session, request: OrderCancel, exc: BaseException
-    ) -> OrderAck:
+    ) -> tuple[OrderAck, Order | None]:
         """The cancel send failed. Do not put the order back to working.
 
         The cancel may already have landed. Tell STS the attempt is
         ambiguous, then mark ``UNKNOWN``. ``if_missing=CANCELED`` is
-        used only when the venue can say the order is gone.
+        used only when the venue can say the order is gone. The second
+        value is whatever that resolve settled, or ``None`` when the
+        order is still ``UNKNOWN``.
         """
         logger.exception(
             "TD order cancel failed api_id=%s cid=%s",
@@ -467,14 +956,17 @@ class OrderHandler:
             client_order_id=request.client_order_id,
             error_code=RejectCode.TD_SEND_FAILED,
         )
-        await session.mark_unknown_and_resolve(
+        settled = await session.mark_unknown_and_resolve(
             request.client_order_id,
             if_missing=OrderStatus.CANCELED,
         )
-        return OrderAck(
-            api_id=request.api_id,
-            client_order_id=request.client_order_id,
-            accepted=True,
+        return (
+            OrderAck(
+                api_id=request.api_id,
+                client_order_id=request.client_order_id,
+                accepted=True,
+            ),
+            settled,
         )
 
 

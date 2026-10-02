@@ -4,9 +4,11 @@ The shape is real: two layers, the handlers, the broadcast subjects, one
 dead-man's-switch slot per venue. Paper submit, cancel, unsettled
 ``oms.view`` and ``ledger.view`` answer. An unwired worker refuses an
 order with ``TD_VENUE_NOT_CONNECTED`` and returns an empty book.
-Starting without a connector, ``cancel_session``, settled ``oms.view``,
-``oms.order``, keepalive, backfill, the broadcast and the dead-man's
-switch still raise ``NotImplementedError("IF-11")``.
+Starting without a connector, settled ``oms.view``, ``oms.order``,
+keepalive, backfill, the broadcast and the dead-man's switch still
+raise ``NotImplementedError("IF-11")``. ``cancel_session`` is B6-03:
+an empty payload is ``invalid_payload``, and a worker with no session
+refuses the call because the order path has no book.
 
 What B6 has to make true is in ``test_account_contract.py``, as xfail.
 """
@@ -24,6 +26,7 @@ from mftik.procman.spec import validate_worker_id
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_ERROR,
     TD_LEDGER_VIEW,
     TD_OMS_ORDER,
     TD_OMS_VIEW,
@@ -221,6 +224,13 @@ async def test_actions_raise_the_ticket_number() -> None:
     ledger = await worker.ledger.view(TdLedgerViewRequest(api_id=API))
     assert ledger.api_id == API
     assert ledger.balances == {}
+    reply = await worker.orders(message)
+    assert reply is not None
+    assert reply.type == TD_ERROR
+    assert reply.payload is not None
+    assert reply.payload.code == "invalid_payload"
+    with pytest.raises(RuntimeError, match="session"):
+        await worker.orders.cancel_session(TdCancelSessionRequest(session_id=SESSION))
     calls = [
         worker.resident.start(),
         worker.resident.close(),
@@ -228,8 +238,6 @@ async def test_actions_raise_the_ticket_number() -> None:
         worker.resident.handle_backfill(message),
         worker.trading.activate(),
         worker.trading.deactivate(),
-        worker.orders(message),
-        worker.orders.cancel_session(TdCancelSessionRequest(session_id=SESSION)),
         worker.oms(message),
         worker.oms.view(TdOmsViewRequest(api_id=API, settled=True)),
         worker.oms.order(TdOmsOrderRequest(api_id=API, client_order_id="1")),

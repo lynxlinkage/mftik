@@ -4,10 +4,10 @@ This is the layer §3.4 names ``mftik_td.account``. It replaces the lease
 and refcount in the old session manager, and the lifecycle half of
 ``session/session.py``. The connector, the OMS and the ledger stay
 where they are; this package is how an account worker holds them.
-Paper order entry is B4-05. The TD process spawns
-``python -m mftik_td.account`` and does not import this package.
-The warm HTTP pool and its keepalive are the resident layer (B6-01).
-``cancel_session``, settled ``oms.view``, ``oms.order``, backfill,
+Paper order entry is B4-05. ``cancel_session`` is B6-03. The TD
+process spawns ``python -m mftik_td.account`` and does not import
+this package. The warm HTTP pool and its keepalive are the resident
+layer (B6-01). Settled ``oms.view``, ``oms.order``, backfill,
 the broadcast and the dead-man's switch stay later B6 tickets.
 
 **State authority (§3.3).** One writer each.
@@ -29,8 +29,10 @@ the broadcast and the dead-man's switch stay later B6 tickets.
   ``apis`` (IF-14 adds the column). This worker holds the flag it was
   given and defaults it to off. It is not the authority.
 * Code identity (``code_ref``, ``strategy_digest``, ``env_generation``):
-  not this layer (F39, F40). This package does not carry those fields
-  and does not import strategy code.
+  not this layer (F39, F40). This package does not carry those fields.
+  ``cancel_session`` decodes a cid with
+  :func:`mftik.strategy.client_order_id.session_id_of` and does not
+  import a strategy.
 
 **Invariants.** The letters are what the contract tests and B6 cite.
 
