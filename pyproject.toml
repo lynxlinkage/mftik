@@ -46,8 +46,9 @@ testpaths = ["packages", "apps"]
 # ``real_sleep`` is the narrow opt-out from the sleep ban.
 # pytest-timeout is the per-tier hang backstop (§9.2 rule 8). It times the
 # call only — fixture setup is not the call phase F30 measures. The §9.1
-# caps themselves are the call-phase gate in ``tier_budget``, which is what
-# fails a unit test whose call ran past 50 ms.
+# caps themselves are the call-phase gate in ``tier_budget``. Locally that
+# fails a unit test whose call ran past 50 ms. On CI the unit and component
+# caps warn instead; the numbers stay the same.
 markers = [
     "component: component tier (§9.1). Shared NATS, sqlite, FakeClock, in-proc fakes. Wall-clock asyncio.sleep is forbidden, same as an unmarked unit test.",
     "integration: real subprocesses; outside the unit budget once tiers land (§9.1). Wall-clock asyncio.sleep is allowed.",

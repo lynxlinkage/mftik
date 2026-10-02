@@ -13,7 +13,8 @@ sync:
 # `just test-int`. Postgres is not in this set. Needs the broker up:
 # `just up nats`. There is no fake to fall back on. On CI the recipe
 # fails when this step's wall time exceeds 120s — that clock does not
-# include `uv sync` or service startup.
+# include `uv sync` or service startup. A unit or component call over
+# its cap warns on CI (the hook sees `CI`) and still fails locally.
 test:
     #!/usr/bin/env bash
     set -euo pipefail

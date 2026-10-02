@@ -17,11 +17,23 @@ import pytest
 from broker_harness import server_address, server_is_up
 from db_harness import POSTGRES_URL_ENV, dialect_urls
 from sleep_guard import arm, disarm, install
-from tier_budget import apply_timeouts, database_params, enforce_call_budget
+from tier_budget import (
+    annotation_lines,
+    apply_timeouts,
+    budget_summary_lines,
+    budget_warnings,
+    database_params,
+    enforce_call_budget,
+)
 
 # Before any test, including ones collected from a path that does not import
 # this module's helpers again. Idempotent if a plugin imports it twice.
 install()
+
+#: Over-budget call phases seen by the process that prints the summary.
+#: xdist workers record the warning on the report; the controller collects
+#: it from the serialized report and is the only process that prints.
+_budget_offenders: list[tuple[str, str]] = []
 
 #: Which event loop the suite runs on: ``uvloop`` or ``asyncio``.
 #:
@@ -80,6 +92,8 @@ def pytest_asyncio_loop_factories(
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Fail on a missing service rather than testing something weaker.
 
+    Also drop call-phase warnings from a previous in-process session.
+
     Postgres is the integration job's dialect (§9.1 rule 6). That job sets
     ``MFTIK_REQUIRE_POSTGRES``; if the service did not come up, the postgres
     parameter would simply be absent and the job would go green without it.
@@ -88,6 +102,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     server is not a degradation but sixty modules of confusing connection
     errors; saying so once, here, is worth more than each of them saying it.
     """
+    _budget_offenders.clear()
     # The unit+component job is sqlite on purpose (§9.1 rule 6). The
     # integration job sets this and fails here if its Postgres never came
     # up — otherwise that dialect would quietly not be parametrized.
@@ -126,6 +141,37 @@ def pytest_runtest_makereport(item: pytest.Item, call: object) -> object:
     report = yield
     enforce_call_budget(item, report)
     return report
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Collect CI call-phase warnings on the process that owns the summary.
+
+    Workers see the report too. Their copy is not the one GitHub prints,
+    and xdist already forwards ``user_properties`` to the controller.
+    """
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+    if getattr(report, "when", None) != "call":
+        return
+    nodeid = getattr(report, "nodeid", "")
+    for message in budget_warnings(report):
+        _budget_offenders.append((str(nodeid), message))
+
+
+def pytest_terminal_summary(
+    terminalreporter, exitstatus: int, config: pytest.Config
+) -> None:
+    """Print every CI over-budget test, and cap the GitHub annotations."""
+    del exitstatus, config
+    if os.environ.get("PYTEST_XDIST_WORKER") or not _budget_offenders:
+        return
+    terminalreporter.write_sep("=", "call-phase budget warnings")
+    for line in budget_summary_lines(_budget_offenders):
+        terminalreporter.write_line(line)
+    # Workflow commands must be a raw line. The terminal reporter wraps
+    # and colors, which would keep GitHub from seeing ``::warning::``.
+    for line in annotation_lines(_budget_offenders):
+        print(line, flush=True)
 
 
 @pytest.hookimpl(wrapper=True)

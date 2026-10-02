@@ -3,16 +3,25 @@
 Nothing in this module is itself slow. The durations are handed to the
 gate, which is the mechanism CI runs. A red test left in the suite would
 be the gate firing on the suite, not a proof that the gate can fire.
+
+These tests describe the local gate unless they set ``CI`` themselves.
+The suite runs on CI, where unit and component overages only warn, so
+the fixture clears that for the assertions that expect a failure.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from tier_budget import (
+    ANNOTATION_CAP,
     CALL_LIMIT_S,
     WALL_LIMIT_S,
+    annotation_lines,
     apply_timeouts,
+    budget_summary_lines,
+    budget_warnings,
     call_budget_failure,
     database_params,
     enforce_call_budget,
@@ -39,7 +48,20 @@ class _Item:
 
 
 def _report(when: str, outcome: str, duration: float) -> SimpleNamespace:
-    return SimpleNamespace(when=when, outcome=outcome, duration=duration, longrepr=None)
+    return SimpleNamespace(
+        when=when,
+        outcome=outcome,
+        duration=duration,
+        longrepr=None,
+        user_properties=[],
+    )
+
+
+@pytest.fixture(autouse=True)
+def _local_call_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default these tests to the strict local gate."""
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
 
 
 def test_an_unmarked_test_is_unit() -> None:
@@ -118,6 +140,76 @@ def test_a_component_call_over_the_cap_fails_in_the_hook() -> None:
     enforce_call_budget(_Item("component"), report)
     assert report.outcome == "failed"
     assert "500 ms" in report.longrepr
+
+
+def test_on_ci_an_over_budget_call_passes_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CI warns for unit and component. The same call fails when CI is unset.
+
+    ``GITHUB_ACTIONS`` alone is enough. The caps stay 50 ms and 500 ms.
+    Exactly on the cap still passes. Integration still fails on CI.
+    """
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    warned = _report("call", "passed", 0.08)
+    enforce_call_budget(_Item(), warned)
+    assert warned.outcome == "passed"
+    assert warned.longrepr is None
+    warnings = budget_warnings(warned)
+    assert len(warnings) == 1
+    assert "50 ms" in warnings[0]
+    assert "unit" in warnings[0]
+
+    exact = _report("call", "passed", 0.05)
+    enforce_call_budget(_Item(), exact)
+    assert exact.outcome == "passed"
+    assert budget_warnings(exact) == []
+
+    component = _report("call", "passed", 0.8)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    enforce_call_budget(_Item("component"), component)
+    assert component.outcome == "passed"
+    component_warnings = budget_warnings(component)
+    assert len(component_warnings) == 1
+    assert "500 ms" in component_warnings[0]
+
+    integration = _report("call", "passed", 11.0)
+    enforce_call_budget(_Item("integration"), integration)
+    assert integration.outcome == "failed"
+    assert "10 s" in integration.longrepr
+
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    local = _report("call", "passed", 0.08)
+    enforce_call_budget(_Item(), local)
+    assert local.outcome == "failed"
+    assert local.longrepr is not None
+    assert "50 ms" in local.longrepr
+    assert budget_warnings(local) == []
+
+
+def test_github_annotations_are_capped_and_the_summary_is_not() -> None:
+    offenders = [
+        (f"pkg/test.py::test_{i}", f"unit call phase {i} ms exceeds 50 ms")
+        for i in range(ANNOTATION_CAP + 5)
+    ]
+    lines = annotation_lines(offenders)
+    assert len(lines) == ANNOTATION_CAP
+    assert lines[0].startswith("::warning::")
+    assert "test_0" in lines[0]
+    assert "exceeds 50 ms" in lines[0]
+    joined = "\n".join(lines)
+    assert "test_20" not in joined
+    summary = "\n".join(budget_summary_lines(offenders))
+    assert "test_0" in summary
+    assert f"test_{ANNOTATION_CAP + 4}" in summary
+    assert "::warning::" not in summary
+    assert f"cap {ANNOTATION_CAP}" in summary
+    flat = annotation_lines([("node", "line one\nline two")])
+    assert flat == ["::warning::line one line two (node)"]
 
 
 def test_a_deliberately_slow_wall_clock_fails_the_gate() -> None:
