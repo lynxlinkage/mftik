@@ -22,6 +22,7 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_ERROR,
     TD_OMS_ORDER,
     TD_OMS_VIEW,
     Envelope,
@@ -47,6 +48,16 @@ logger = logging.getLogger(__name__)
 #: about one broker round-trip. Generous enough to ride out a GC pause without
 #: leaving a strategy blocked for long.
 ORDER_ACK_TIMEOUT_S = 2.0
+
+#: How long :meth:`StrategyOms.view` waits when ``settled=True``.
+#:
+#: TD waits 30 seconds for an UNKNOWN order to converge
+#: (``WAIT_TIMEOUT_S`` in the account handler, the same number as
+#: ``SETTLED_WAIT_TIMEOUT_S``). This is that wait plus five seconds, so
+#: a book that answers on the deadline still reaches the strategy. The
+#: SDK does not import the TD package; 30 and 5 are literals, and a TD
+#: test locks the sum to TD's wait.
+SETTLED_VIEW_TIMEOUT_S = 35.0
 
 #: ``order_phase`` values on the session worker before ``on_ready`` has
 #: been called. A session that does not carry the attribute — the older
@@ -218,36 +229,58 @@ class StrategyOms:
         holds asks for (F13) — it replaces the ``send_recon`` /
         ``on_recon_done`` round trip, which is gone. A clean book answers
         immediately, so the wait costs nothing when there is nothing to wait
-        for.
+        for. The request timeout is :data:`SETTLED_VIEW_TIMEOUT_S`, TD's wait
+        plus a margin. A timeout raises
+        :class:`~mftik.broker.errors.RequestTimeoutError`, the same way an
+        unsettled read's timeout does.
 
         The default is the book as it stands, UNKNOWN included, which is the
-        right read for anything on a hot path.
+        right read for anything on a hot path. Its timeout stays
+        :attr:`_ack_timeout`.
 
-        ``settled=True`` still raises :class:`NotImplementedError`. IF-11
-        defines the account-worker handler
-        (``mftik_td.account.OmsHandler.view``) and the ``settled`` field
-        on the request; that handler returns null data, and this client
-        does not send until B6-08 makes the wait real. The wait TD
-        already has is :func:`mftik_td.session.settled.view_when_settled`.
+        A ``td.error`` reply is a refusal, not an empty book. The trading
+        layer being down is that reply (``TD_VENUE_NOT_CONNECTED``). It
+        raises :class:`RuntimeError` so a strategy cannot treat "the
+        account is closed" as "I hold nothing".
         """
-        if settled:
-            raise NotImplementedError("IF-06")
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
         if resolved is None:
-            log.record("read", "oms.view", dir="out", resolved=False, count=0)
+            log.record(
+                "read",
+                "oms.view",
+                dir="out",
+                resolved=False,
+                count=0,
+                settled=settled or None,
+            )
             return OmsView()
         session = self._require_session()
+        timeout = SETTLED_VIEW_TIMEOUT_S if settled else self._ack_timeout
         reply = await session.broker.request(
             Topics.td_account(resolved),
             Envelope[TdOmsViewRequest].wrap(
-                TdOmsViewRequest(api_id=resolved),
+                TdOmsViewRequest(api_id=resolved, settled=settled),
                 type=TD_OMS_VIEW,
                 source=_source_name(session),
                 session_id=getattr(session, "session_id", None),
             ),
-            timeout=self._ack_timeout,
+            timeout=timeout,
         )
+        if reply.type == TD_ERROR:
+            payload = reply.payload or {}
+            code = str(payload.get("code", "td.error"))
+            message = str(payload.get("message", "td refused the read"))
+            log.record(
+                "read",
+                "oms.view",
+                dir="out",
+                api_id=resolved,
+                settled=settled or None,
+                code=code,
+                reason=message,
+            )
+            raise RuntimeError(f"{code}: {message}")
         view = OmsView.model_validate(reply.payload or {})
         log.record(
             "read",
@@ -255,6 +288,7 @@ class StrategyOms:
             dir="out",
             api_id=resolved,
             count=len(view.orders),
+            settled=settled or None,
             payload=view.model_dump(mode="json"),
         )
         return view
