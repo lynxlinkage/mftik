@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.31（2026-10-02）**。§12 的待決事項已全部定案（F1 到 F41）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.32（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F41）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.32（#288，per-atom `seq`）：** F25 的「重新起算」寫精確成以 (atom, 連線 epoch) 起算：重連、單一 atom 的 resync、換 incarnation 之後都從 1 開始；策略端只用 `seq != last + 1` 判斷不連續。`seq` 留在共用 envelope（optional），`owner` 不上線。§3.3、§5.3、§6.3 隨之更新；實作併入 B8-03（#240）。
 >
 > **v0.31（#282，`pv` 在哪一層擋）：** 新增 F41：`pv` 從 envelope 搬到 NATS header `Mftik-Pv`，由 transport 在解碼之前檢查，不符就丟棄並計數，不回錯誤；另在 deploy 時先比對 session 會用到的 controller 與 worker。§3.3、§3.4、§4.6、§8.3、§11 的 B4 列隨之更新；新票 B4-10（#363）。
 >
@@ -44,7 +46,7 @@
 | F22 | MD 不做連線遷移：atom 放上某條連線後就留在那裡，直到沒有 demand。controller 滾動不影響連線 | 刪除 make-before-break、I-MD1、連線整併；每個 atom 任何時刻只有一個發佈者（§4.6、§6.2、§6.3） |
 | F23 | 不提供 `on_feed_gap`：漏收由策略自己記錄，平台不替策略記 | MD 斷線、連線 worker 重啟、STS ingress 重連一律只以 `on_md_update` 的 down → live 通知（§5.3、§5.6）；`all` 類 feed 佇列溢出時，策略以 `event.seq` 自己偵測（F25） |
 | F24 | 既有 MD 連線 worker 換版只靠人工逐條 `restart`；平台不自動重啟舊版連線，也不為了換版打斷運行中的策略 | 升版時才知道需不需要換，而且換版本身可能有相容問題（§4.6）。另提供列出「仍在跑舊版代碼的 worker」的指令 |
-| F25 | MD 事件帶 per-atom 的 `event.seq`，漏收由策略自己偵測 | `seq` 在同一個連線 worker incarnation 內連續，`on_md_update` 收到 `live` 之後重新起算；`all` 類跳號代表漏收，`latest` 類跳號是設計上的覆蓋（§5.3） |
+| F25 | MD 事件帶 per-atom 的 `event.seq`，漏收由策略自己偵測 | `seq` 以 (atom, 連線 epoch) 起算：同一條連線上連續；重連、單一 atom 的 resync、換 incarnation 之後，該 atom 從 1 重新起算，對應 `on_md_update` 的 `live`。策略只用一條規則：`seq != last + 1` 就是不連續。`seq` 不是排序鍵也不是去重鍵，`(atom_id, seq)` 不保證唯一。`seq` 是共用 envelope 的 optional 欄位，`owner` 不上線（#288）。`all` 類跳號代表漏收，`latest` 類跳號是設計上的覆蓋（§5.3） |
 | F26 | 跨版本只靠版號：每則 NATS 訊息帶 `pv`，格式一改就升版，不同 `pv` 一律拒絕；不做版內相容，也不做 schema 比對 | 停止不依賴協定（SIGTERM），任何版本組合都停得掉。升版順序見 §4.6；在哪一層擋、怎麼擋見 F41 |
 | F27 | TD 帳號 worker 換版後由人工逐帳號觸發 drain-replace，平台不自動換版 | 理由同 F24（§4.6） |
 | F28 | `docs/Deployment.md` 不封存，依現況重寫；venue 實測表（`Deribit`、`BitgetUta`）封存到 `docs/archive/` | B1 依現況重寫 Deployment，B10 依新架構更新（§10） |
@@ -228,7 +230,7 @@
 | 連線上實際訂閱成功的 atom（observed） | 連線 worker 的 reconciler，以交易所 ack 為準 | 記憶體 | 連線 worker、狀態廣播 | 重連後歸零，下一輪 diff 補齊 |
 | 行情內容，包括 fold 後的 book（F21） | 連線 worker | 記憶體 → `md.a.*` | STS session | 重連後由交易所的 snapshot 重建 |
 | feed 狀態 live / down | 連線 worker | `md.w.*` 廣播 | session ingress | 廣播靜默 10 秒視為 down，只通知（§5.6） |
-| per-atom `seq` | 連線 worker | envelope | 策略自行偵測跳號（F25） | 換 incarnation 後重新起算 |
+| per-atom `seq` | 連線 worker | envelope（optional 欄位） | 策略自行偵測不連續（F25） | 以 (atom, 連線 epoch) 起算：重連、單一 atom 的 resync、換 incarnation 之後從 1 重新起算 |
 | tape 與 coverage | 持有該 atom 的連線 worker | Redis（每個 region 一台） | MD 的讀取 RPC → 策略 | 空洞記在 coverage |
 
 **TD**
@@ -710,7 +712,7 @@ TD 訂閱延後到 `on_start` 之後的原因：帳號事件是整個帳號的�
 | trade、aggtrade、liquidation | `all`：有界佇列，溢出時丟最舊的，寫 warning log 並累加 status 上的丟棄計數；策略以 `event.seq` 自己偵測跳號（F25） |
 | TD 事件、`feed_end`、RPC 回覆 | `all`，不丟；溢出時視為異常並 fail session |
 
-每個事件帶 `recv_ts`，策略可以用 `event.age` 判斷資料延遲了多久。MD 的事件另外帶 `seq`（F25）：per-atom，在同一個連線 worker incarnation 內連續，`on_md_update` 收到 `live` 之後重新起算。`all` 類 feed 跳號代表漏收（佇列溢出或 NATS 層的遺失），由策略自己記錄；`latest` 類的跳號是設計上的覆蓋，不代表漏收。
+每個事件帶 `recv_ts`，策略可以用 `event.age` 判斷資料延遲了多久。MD 的事件另外帶 `seq`（F25）：per-atom，以 (atom, 連線 epoch) 起算，在同一條連線上連續；重連、單一 atom 的 resync 或換 incarnation 之後，該 atom 從 1 重新起算。重新起算和 `on_md_update` 的 `live` 是同一件事，但 `seq` 走在資料流裡：`live` 經 `md.w.*` 送達，和 `md.a.*` 的資料在收件端沒有先後保證，`seq` 則不受影響。策略只需要一條規則：`seq != last + 1` 就是不連續。往前跳代表佇列溢出或 NATS 層的遺失，跳回起點代表上游中斷過。`seq` 不是排序鍵，也不能拿來去重，`(atom_id, seq)` 不保證唯一。`all` 類 feed 的不連續代表漏收，由策略自己記錄；`latest` 類的跳號是設計上的覆蓋，不代表漏收。
 
 **event log 併入 ingress：**
 
@@ -971,8 +973,8 @@ self.td.state(api_id)
   - controller 重啟時訂閱不會抖動。
 - **reconciler：** 比對 `desired(gen)` 和 `observed`。observed 以交易所 ack 為準，並以連線 epoch 為鍵，舊 epoch 晚到的 ack 一律丟棄。差異合併成批次，經 token bucket 限速後送出。重連後 observed 歸零，下一輪 diff 會自動補齊。每個 atom 回報 `pending`、`subscribed`、`first_msg_at`、`last_msg_at`、`error`。現行的 `WireLedger` 就是這個 observed set，可以搬過來繼續用。
 - **狀態廣播（F14）：** 連線 worker 單向廣播自己的狀態（incarnation、連線狀態、狀態版本號），狀態變化時立即發一次，平時每 2 秒一次；atom 的狀態變化另外以事件發出（§5.6）。
-- **解碼與發佈：** 每個 frame 只解碼一次，發佈到 atom subject，附上 per-atom 序號和 `owner=(worker_id, incarnation)`。需要錄的 atom（`trade`、`aggtrade`、`liquidation`，F20）append 到該區域的 Redis tape，key 改成 `atom_id`。
-- **不做連線遷移（F22）：** 每個 atom 任何時刻只在一條連線上，所以只有一個發佈者，訂閱端不需要去重。連線 worker 原地重啟時，Supervisor 確認舊進程結束後才啟動新的（delete-before-create）。envelope 上的 `owner` 只用於診斷。
+- **解碼與發佈：** 每個 frame 只解碼一次，發佈到 atom subject，envelope 帶 per-atom 的 `seq`，以 (atom, 連線 epoch) 起算（F25）。`owner` 不上線：envelope 的 `source` 就是 worker_id，incarnation 在 `md.w.*` 的狀態廣播裡。需要錄的 atom（`trade`、`aggtrade`、`liquidation`，F20）append 到該區域的 Redis tape，key 改成 `atom_id`。
+- **不做連線遷移（F22）：** 每個 atom 任何時刻只在一條連線上，所以只有一個發佈者，訂閱端不需要去重。連線 worker 原地重啟時，Supervisor 確認舊進程結束後才啟動新的（delete-before-create）。診斷時從 `md.w.*` 的狀態廣播查 incarnation。
 - tape 只由持有該 atom 的連線 worker append。重連或原地重啟造成的空洞會被量測，記錄在 coverage。
 - **tape 的範圍（F20）：**
   - 以 atom 為單位錄製，只錄歷史無法回補的 trade 類：`trade`、`aggtrade`、`liquidation`。book 和報價類不錄：單筆約 1500 bytes 對 200 bytes，而且下一則推送就是完整狀態。

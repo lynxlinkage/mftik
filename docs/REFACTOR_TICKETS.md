@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.31。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.32。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
@@ -867,9 +867,12 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B8-03 reconciler 完整版（#240）
 
-- **驗收：** generation 規則（F18）、連線 epoch、token bucket 限速、單一 atom 的 resync；重連後自動補齊。
+- **範圍（`seq`，#288）：** `SeqClock` 改以 (atom, 連線 epoch) 起算：重連（epoch 推進）時每個 atom 歸零，單一 atom 的 resync 只歸零那個 atom。`conn.py` 的 C6、`conn_worker.py` 的模組 docstring 改成這個定義；paper 連線 worker 重連後也重新起算。
+- **驗收：**
+  - generation 規則（F18）、連線 epoch、token bucket 限速、單一 atom 的 resync；重連後自動補齊。
+  - 重連後該連線上每個 atom 的第一則 publication 是 `SEQ_ORIGIN`；resync 只讓那個 atom 重新起算，同一條連線上的其他 atom 照常連續；同一條連線上 `seq` 連續。三者都有契約測試。
 - **依賴：** B8-02、B7-02a 到 B7-02g
-- **決策：** F18
+- **決策：** F18、F25
 
 ### B8-04 以 listing 驅動到期（#241）
 
