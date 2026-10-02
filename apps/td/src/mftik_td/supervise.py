@@ -79,8 +79,10 @@ logger = logging.getLogger(__name__)
 #: How long one worker drain waits on the wire.
 #:
 #: Longer than :data:`DRAIN_TIMEOUT_S`, so a worker that gives up can
-#: reply ``drained`` false before this request times out. A timeout
-#: here is treated as not drained, and the worker is not stopped.
+#: reply ``drained`` false before this request times out. A timeout,
+#: a lost reply, or a refusal is not drained, and the worker is not
+#: stopped. The replace then sends ``abort``, which queues behind the
+#: drain on the same subject and clears a quiesce that lands late.
 DRAIN_RPC_TIMEOUT_S = DRAIN_TIMEOUT_S + 5.0
 
 #: How long one ``td.account.trading`` request waits.
@@ -427,7 +429,14 @@ async def _request_trading_drain(broker, api_id: int) -> bool:
 
 
 async def _abort_trading_drain(broker, api_id: int) -> None:
-    """Ask the worker to accept again. Best-effort after a failed stop."""
+    """Ask the worker to accept again.
+
+    Best-effort. Used when the drain did not come back drained, and
+    when the stop after a drained reply did not release the slot. The
+    account subject is one message at a time, so this request sits
+    behind a drain that is still queued or still waiting, and clears
+    the quiesce when that drain finishes.
+    """
     if broker is None:
         return
     subject = Topics.td_account(api_id)
@@ -474,10 +483,12 @@ async def run_drain_replace(
     does not hold :attr:`~mftik_td.controller.TdOrchestrator.gate`, so
     other accounts' reconcile can proceed.
 
-    A drain that does not finish does not stop the worker. After a
-    finished drain, stop, then spawn ``incarnation + 1``, then push the
-    trading bit from the held intents. The new worker is not left
-    waiting for the next reconcile pass.
+    A drain that does not finish does not stop the worker. The replace
+    sends an abort instead, so a quiesce that happens after the wait
+    gave up is cleared. After a finished drain, stop, then spawn
+    ``incarnation + 1``, then push the trading bit from the held
+    intents. The new worker is not left waiting for the next reconcile
+    pass.
     """
     api_id = account.api_id
     async with orchestrator.gate:
@@ -528,6 +539,10 @@ async def _replace_held(
         respect_held=False,
     )
     if not drained.get(api_id, False):
+        # Timeout, a broker error, ``td.error``, or a reply with no
+        # ``drained`` bit. The worker may quiesce after this wait
+        # ended. Abort undoes that. It does not stop the process.
+        await _abort_trading_drain(broker, api_id)
         return _result(api_id, ok=False, reason="not_drained")
     after = await supervisor.status(worker_id)
     if after is not None:

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+from mftik.broker.errors import RequestTimeoutError
 from mftik.procman import (
     ObservedWorker,
     ProcmanError,
@@ -15,6 +18,7 @@ from mftik.procman import (
 )
 from mftik.protocol import (
     TD_ACCOUNT_TRADING,
+    TD_ERROR,
     TD_TRADING_DRAIN,
     Envelope,
     IntentOwner,
@@ -302,6 +306,54 @@ async def test_not_running_does_not_hang(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.reason == "not_running"
     assert broker.types == []
+
+
+class _DrainFailure:
+    """The first drain request fails. The abort that follows is recorded."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.aborts: list[bool] = []
+
+    async def request(self, subject: str, envelope, *, timeout: float | None = None):
+        del subject
+        if envelope.type == TD_TRADING_DRAIN and envelope.payload.abort:
+            self.aborts.append(True)
+            return Envelope[TdTradingDrainResult].wrap(
+                TdTradingDrainResult(api_id=envelope.payload.api_id, drained=False),
+                type=TD_TRADING_DRAIN,
+                source="td",
+            )
+        if self.mode == "timeout":
+            raise RequestTimeoutError("td.account.7", "late", float(timeout or 0))
+        if self.mode == "exception":
+            raise RuntimeError("broker down")
+        if self.mode == "td.error":
+            return SimpleNamespace(type=TD_ERROR, payload={"code": "nope"})
+        if self.mode == "missing":
+            return SimpleNamespace(type=TD_TRADING_DRAIN, payload={})
+        raise AssertionError(self.mode)
+
+
+@pytest.mark.parametrize("mode", ["timeout", "exception", "td.error", "missing"])
+async def test_a_drain_that_does_not_come_back_aborts(
+    tmp_path: Path, mode: str
+) -> None:
+    account = _account()
+    supervisor = _Supervisor(_status(account, 2))
+    broker = _DrainFailure(mode)
+    result = await run_drain_replace(
+        supervisor,
+        _orch(tmp_path),
+        broker,
+        account,
+        cancel_on_disconnect={},
+    )
+    assert result.ok is False
+    assert result.reason == "not_drained"
+    assert supervisor.stopped == []
+    assert supervisor.spawned == []
+    assert broker.aborts == [True]
 
 
 async def test_a_failed_stop_resumes_the_worker(tmp_path: Path) -> None:

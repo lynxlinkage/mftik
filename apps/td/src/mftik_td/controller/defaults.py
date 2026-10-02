@@ -29,3 +29,12 @@ ACCOUNT_MIN_BACKOFF_S = 1.0
 #: A shorter wait would stop the worker under an order that is still
 #: being booked.
 DRAIN_TIMEOUT_S = 30.0
+# provisional, pending Yi Te (#286)
+#: How long a quiesced worker waits for the process to be stopped.
+#:
+#: The controller's reply-to-``STOP`` gap is the stop grace (2 s) plus
+#: the time to deliver the reply. This sits well above that. If nothing
+#: stops the process, the worker resumes so resting orders can still
+#: be cancelled. A lost drain reply and a controller restart both land
+#: here: nobody else clears the quiesce.
+QUIESCE_LEASE_S = 10.0
