@@ -234,7 +234,6 @@ async def test_sessions_survive_a_row_the_owner_created(db) -> None:
                 td={},
                 md_ids=[],
                 st_paras={},
-                st_facts={},
             )
         )
 

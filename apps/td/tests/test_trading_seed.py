@@ -160,7 +160,6 @@ async def _rows(
                 td={},
                 md_ids={},
                 st_paras={},
-                st_facts={},
             )
         )
         session.add(
@@ -171,7 +170,6 @@ async def _rows(
                 td={},
                 md_ids={},
                 st_paras={},
-                st_facts={},
             )
         )
         released = None if hold else datetime.now(UTC)

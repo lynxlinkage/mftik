@@ -139,10 +139,6 @@ class StsSessionRow(Base):
     #: ``on_failure`` does not fit in the original 8. A row from before F11
     #: may still say ``always``, which is no longer a policy.
     restart: Mapped[str] = mapped_column(String(16), default="never")
-    #: Dead since RM-01 removed rebuild. The column waits for B10-01's
-    #: migration to drop it. Not copied into :attr:`restart_count`: that
-    #: counter is F11's, and this one counted a mechanism that is gone.
-    rebuild_count: Mapped[int] = mapped_column(Integer, default=0)
     #: Spec generation (P2, §8.1). The API writes ``1`` at start and bumps
     #: it when the spec changes. The controller does not. Existing rows are
     #: backfilled to ``1``: the stored spec is generation 1 of itself.
@@ -177,9 +173,10 @@ class StsSessionRow(Base):
         JSON, default=dict, server_default="{}", nullable=False
     )
     #: Status. How many F11 restarts this session has used. The Supervisor
-    #: writes it (§5.2). Starts at ``0``. This is not :attr:`rebuild_count`
-    #: renamed: B10-01 drops that column, and the two counts are different
-    #: events.
+    #: writes it (§5.2). Starts at ``0``. ``0037_drop_rebuild_facts`` dropped
+    #: the old ``rebuild_count`` column without copying it: that counter
+    #: belonged to a mechanism RM-01 already removed, and this one counts a
+    #: different event.
     restart_count: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )
@@ -199,9 +196,6 @@ class StsSessionRow(Base):
         JSON, default=dict
     )
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    #: Dead since RM-01 removed rebuild: nothing writes a fact here any more.
-    #: The column waits for B10-01's migration to drop it.
-    st_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     creator = relationship("User", back_populates="sts_sessions")
 
@@ -219,7 +213,12 @@ class StsSessionRow(Base):
 
 
 class TdSessionRow(Base):
-    """TD trading attach record — one row per (session_id, api_id)."""
+    """TD trading attach record — one row per (session_id, api_id).
+
+    Read-only history from B10-01 (F38, §8.4). The table stays so a cutover
+    can still list what was attached before intents existed. Nothing in the
+    application inserts or updates a row; ``TdSessionRepository`` only reads.
+    """
 
     __tablename__ = "td_sessions"
     __table_args__ = (
@@ -251,7 +250,11 @@ class TdSessionRow(Base):
 
 
 class MdSessionRow(Base):
-    """MD attach record — one row per (venue, STS session_id)."""
+    """MD attach record — one row per (venue, STS session_id).
+
+    Read-only history from B10-01 (F38, §8.4), same as :class:`TdSessionRow`.
+    ``MdSessionRepository`` only reads.
+    """
 
     __tablename__ = "md_sessions"
     __table_args__ = (

@@ -55,11 +55,9 @@ _PRE = sa.Table(
     sa.Column("type", sa.String(128)),
     sa.Column("status", sa.String(16)),
     sa.Column("restart", sa.String(8)),
-    sa.Column("rebuild_count", sa.Integer),
     sa.Column("td_api_ids", sa.JSON),
     sa.Column("md_ids", sa.JSON),
     sa.Column("st_paras", sa.JSON),
-    sa.Column("st_facts", sa.JSON),
 )
 
 _POST = sa.Table(
@@ -87,11 +85,9 @@ def _row(session_id: str, **over: Any) -> dict[str, Any]:
         "type": "NoopStrategy",
         "status": "live",
         "restart": "always",
-        "rebuild_count": 0,
         "td_api_ids": [],
         "md_ids": [],
         "st_paras": {},
-        "st_facts": {},
         **over,
     }
 

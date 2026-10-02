@@ -118,9 +118,9 @@ def test_session_row_columns() -> None:
         "worker_incarnation",
         "conditions",
         "restart_count",
-        "rebuild_count",
-        "st_facts",
     } <= sts_cols
+    assert "rebuild_count" not in sts_cols
+    assert "st_facts" not in sts_cols
     assert "strategy_digest" in sts_cols
     assert "env_generation" in sts_cols
     assert StsSessionRow.__table__.c.strategy_digest.nullable

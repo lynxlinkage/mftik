@@ -19,6 +19,10 @@ It adds ``strategy_digest`` and ``env_generation``, which this ORM selects.
 ``0035_plane_schema`` added the Spec/Status columns underneath those.
 A database still at 0034 has already dropped ``strategy`` and is still too
 old; a database at 0035 is one revision short of the pins.
+
+``0037_drop_rebuild_facts`` drops ``rebuild_count`` and ``st_facts``. This
+ORM no longer selects either column, so a database at 0036 and a database
+at 0037 both serve. The floor stays at 0036 for that reason.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from db_harness import a_database, an_instance, an_owner
 from mftik_db.models.api import Api, ApiType
-from mftik_db.models.session import SessionStatus
+from mftik_db.models.session import MdSessionRow, SessionStatus, TdSessionRow
 from mftik_db.repositories import (
     MdSessionRepository,
     StsSessionRepository,
@@ -140,39 +140,6 @@ async def test_mark_live_undoes_the_ending(db) -> None:
     # A session that is running again has no end and no reason for one.
     assert row.finished_at is None
     assert row.reason is None
-
-
-async def test_td_attach_survives_a_detach_and_reattach(db) -> None:
-    """A re-attach reuses the same (session_id, api_id) pair.
-
-    The pair is unique and a detach only marks the row done, so the second
-    attach has to revive that row rather than insert beside it.
-    """
-    repo = TdSessionRepository(db)
-    first = await repo.attach_live(session_id="s-td", created_by=1, api_id=9)
-    await repo.mark_done(session_id="s-td", api_id=9)
-
-    again = await repo.attach_live(session_id="s-td", created_by=1, api_id=9)
-
-    assert again.id == first.id
-    assert again.status == SessionStatus.LIVE.value
-    assert again.finished_at is None
-
-
-async def test_md_attach_survives_a_detach_and_reattach(db) -> None:
-    repo = MdSessionRepository(db)
-    first = await repo.attach_live(
-        instance="md", venue="Paper", session_id="s-md", created_by=1
-    )
-    await repo.mark_done(instance="md", venue="Paper", session_id="s-md")
-
-    again = await repo.attach_live(
-        instance="md", venue="Paper", session_id="s-md", created_by=1
-    )
-
-    assert again.id == first.id
-    assert again.status == SessionStatus.LIVE.value
-    assert again.finished_at is None
 
 
 async def test_mark_ack_keeps_the_reason_and_the_end(db) -> None:
@@ -311,15 +278,28 @@ async def test_sts_count_by_instance_omits_unpinned_and_splits(db) -> None:
 
 
 async def test_md_count_by_instance_splits(db) -> None:
-    repo = MdSessionRepository(db)
-    await repo.create_live(
-        instance="md-jp-1", venue="Bybit", session_id="s1", created_by=1
+    db.add(
+        MdSessionRow(
+            instance="md-jp-1",
+            venue="Bybit",
+            session_id="s1",
+            created_by=1,
+            status=SessionStatus.DONE.value,
+            finished_at=datetime.now(UTC),
+        )
     )
-    await repo.create_live(
-        instance="md-jp-2", venue="Bybit", session_id="s2", created_by=1
+    db.add(
+        MdSessionRow(
+            instance="md-jp-2",
+            venue="Bybit",
+            session_id="s2",
+            created_by=1,
+            status=SessionStatus.LIVE.value,
+        )
     )
-    await repo.mark_done(instance="md-jp-1", venue="Bybit", session_id="s1")
+    await db.flush()
 
+    repo = MdSessionRepository(db)
     assert await repo.count_by_instance() == {
         "md-jp-1": {SessionStatus.DONE.value: 1},
         "md-jp-2": {SessionStatus.LIVE.value: 1},
@@ -349,11 +329,26 @@ async def test_td_count_by_instance_follows_the_credential(db) -> None:
     db.add(api_jp)
     await db.flush()
 
-    repo = TdSessionRepository(db)
-    await repo.create_live(session_id="s-tw", created_by=1, api_id=api_tw.id)
-    await repo.create_live(session_id="s-jp", created_by=1, api_id=api_jp.id)
-    await repo.mark_done(session_id="s-jp", api_id=api_jp.id)
+    db.add(
+        TdSessionRow(
+            session_id="s-tw",
+            created_by=1,
+            api_id=api_tw.id,
+            status=SessionStatus.LIVE.value,
+        )
+    )
+    db.add(
+        TdSessionRow(
+            session_id="s-jp",
+            created_by=1,
+            api_id=api_jp.id,
+            status=SessionStatus.DONE.value,
+            finished_at=datetime.now(UTC),
+        )
+    )
+    await db.flush()
 
+    repo = TdSessionRepository(db)
     assert await repo.count_by_instance() == {
         "td-tw": {SessionStatus.LIVE.value: 1},
         "td-jp": {SessionStatus.DONE.value: 1},

@@ -37,9 +37,6 @@ def _fold_instance_counts(rows: Sequence[Any]) -> dict[str, dict[str, int]]:
 
 
 class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
-    async def mark_done(self, *args: Any, **kwargs: Any) -> RowT | None:
-        raise NotImplementedError
-
     async def list_sessions(
         self,
         *,
@@ -378,71 +375,15 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
 
 
 class TdSessionRepository(_SessionListMixin[TdSessionRow]):
+    """Reads of ``td_sessions``.
+
+    B10-01 stopped writing this table (F38). The rows are history from
+    before intents. ``list_sessions``, ``count``, ``count_by_instance``
+    and ``count_live_for_api`` stay; nothing here inserts or updates.
+    """
+
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, TdSessionRow)
-
-    async def get_live(
-        self, *, session_id: str, api_id: int
-    ) -> TdSessionRow | None:
-        result = await self.session.execute(
-            select(TdSessionRow).where(
-                TdSessionRow.session_id == session_id,
-                TdSessionRow.api_id == api_id,
-                TdSessionRow.status == SessionStatus.LIVE.value,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def create_live(
-        self,
-        *,
-        session_id: str,
-        created_by: int,
-        api_id: int,
-    ) -> TdSessionRow:
-        row = TdSessionRow(
-            session_id=session_id,
-            created_by=created_by,
-            api_id=api_id,
-            status=SessionStatus.LIVE.value,
-        )
-        return await self.add(row)
-
-    async def attach_live(
-        self, *, session_id: str, created_by: int, api_id: int
-    ) -> TdSessionRow:
-        """Record this attach as live, reusing the row if the pair had one.
-
-        ``(session_id, api_id)`` is unique and detaching only marks the row
-        done, so a pair that attaches, detaches and attaches again cannot
-        insert a second row. That sequence never came up while every deploy
-        minted a fresh session id; rebuilding one reuses it, and the insert
-        fails on the unique constraint.
-        """
-        result = await self.session.execute(
-            select(TdSessionRow).where(
-                TdSessionRow.session_id == session_id,
-                TdSessionRow.api_id == api_id,
-            )
-        )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return await self.create_live(
-                session_id=session_id, created_by=created_by, api_id=api_id
-            )
-        row.status = SessionStatus.LIVE.value
-        row.finished_at = None
-        await self.session.flush()
-        return row
-
-    async def mark_done(self, *, session_id: str, api_id: int) -> TdSessionRow | None:
-        row = await self.get_live(session_id=session_id, api_id=api_id)
-        if row is None:
-            return None
-        row.status = SessionStatus.DONE.value
-        row.finished_at = datetime.now(UTC)
-        await self.session.flush()
-        return row
 
     async def count_live_for_api(self, api_id: int) -> int:
         result = await self.session.execute(
@@ -473,6 +414,13 @@ class TdSessionRepository(_SessionListMixin[TdSessionRow]):
 
 
 class MdSessionRepository(_SessionListMixin[MdSessionRow]):
+    """Reads of ``md_sessions``.
+
+    B10-01 stopped writing this table (F38), same as
+    :class:`TdSessionRepository`. ``list_sessions``, ``count`` and
+    ``count_by_instance`` stay.
+    """
+
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, MdSessionRow)
 
@@ -483,105 +431,3 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         ).group_by(MdSessionRow.instance, MdSessionRow.status)
         result = await self.session.execute(stmt)
         return _fold_instance_counts(result.all())
-
-    async def get_live(
-        self, *, instance: str, venue: str, session_id: str
-    ) -> MdSessionRow | None:
-        result = await self.session.execute(
-            select(MdSessionRow).where(
-                MdSessionRow.instance == instance,
-                MdSessionRow.venue == venue,
-                MdSessionRow.session_id == session_id,
-                MdSessionRow.status == SessionStatus.LIVE.value,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def create_live(
-        self,
-        *,
-        instance: str,
-        venue: str,
-        session_id: str,
-        created_by: int,
-    ) -> MdSessionRow:
-        row = MdSessionRow(
-            instance=instance,
-            venue=venue,
-            session_id=session_id,
-            created_by=created_by,
-            status=SessionStatus.LIVE.value,
-        )
-        return await self.add(row)
-
-    async def attach_live(
-        self, *, instance: str, venue: str, session_id: str, created_by: int
-    ) -> MdSessionRow:
-        """Record this attach as live, reusing the row if the triple had one.
-
-        Same reason as :meth:`TdSessionRepository.attach_live` — the triple is
-        unique and a detach only marks the row done.
-
-        ``instance`` leads the key because a session's feeds may be split
-        across MDs, and two of them holding one venue for one session is the
-        arrangement this exists to allow rather than a collision to fold.
-        """
-        result = await self.session.execute(
-            select(MdSessionRow).where(
-                MdSessionRow.instance == instance,
-                MdSessionRow.venue == venue,
-                MdSessionRow.session_id == session_id,
-            )
-        )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return await self.create_live(
-                instance=instance,
-                venue=venue,
-                session_id=session_id,
-                created_by=created_by,
-            )
-        row.status = SessionStatus.LIVE.value
-        row.finished_at = None
-        await self.session.flush()
-        return row
-
-    async def mark_done(
-        self, *, instance: str, venue: str, session_id: str
-    ) -> MdSessionRow | None:
-        row = await self.get_live(
-            instance=instance, venue=venue, session_id=session_id
-        )
-        if row is None:
-            return None
-        row.status = SessionStatus.DONE.value
-        row.finished_at = datetime.now(UTC)
-        await self.session.flush()
-        return row
-
-    async def mark_done_session(
-        self, session_id: str, *, instance: str
-    ) -> list[MdSessionRow]:
-        """Close this instance's live rows for ``session_id``.
-
-        ``instance`` is not optional and the predicate is not a convenience.
-        Without it one MD detaching closes every row the session has, including
-        the ones a peer wrote for feeds it is still pumping — the row goes
-        ``done`` while the feed runs, and the next reap scan finds nothing to
-        correct because the row no longer says it is live.
-        """
-        result = await self.session.execute(
-            select(MdSessionRow).where(
-                MdSessionRow.instance == instance,
-                MdSessionRow.session_id == session_id,
-                MdSessionRow.status == SessionStatus.LIVE.value,
-            )
-        )
-        rows = list(result.scalars().all())
-        now = datetime.now(UTC)
-        for row in rows:
-            row.status = SessionStatus.DONE.value
-            row.finished_at = now
-        if rows:
-            await self.session.flush()
-        return rows

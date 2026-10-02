@@ -65,7 +65,6 @@ async def a_session(
                 },
                 md_ids=[],
                 st_paras={},
-                st_facts={},
             )
         )
 
