@@ -57,7 +57,6 @@ from mftik.protocol import (
 )
 from mftik.protocol.query_codes import describe
 
-from mftik_md.errors import normalize as normalize_query_error
 from mftik_md.fetch.readers import NoReaderError, ReaderFactory, VenueReader
 
 logger = logging.getLogger(__name__)
@@ -346,6 +345,11 @@ class FetchHandler:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # Imported here: ``errors`` imports ``NoReaderError`` from this
+            # package, and this package imports the handler. A top-level
+            # import cycles when a test loads ``errors`` first.
+            from mftik_md.errors import normalize as normalize_query_error
+
             error_code = normalize_query_error(exc, venue=venue)
             logger.warning(
                 "MD fetch failed query_id=%s ticker=%s %s: %s",
