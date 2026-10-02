@@ -563,13 +563,7 @@ def test_the_three_planes_answer_through_this_layer() -> None:
 @pytest.mark.parametrize(
     "plane",
     [
-        pytest.param(
-            "sts",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="B4-02 rewrites the STS router onto this layer",
-            ),
-        ),
+        "sts",
         "md",
         pytest.param(
             "td",

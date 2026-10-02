@@ -14,6 +14,7 @@ floor: that floor is R2, not a document field.
 from __future__ import annotations
 
 from mftik.procman import RestartIntensity
+from mftik.protocol import ON_STOP_TIMEOUT_S
 
 #: Restarts allowed inside :data:`STS_RESTART_WINDOW_S` before the session
 #: is failed instead of hung up again (F11). The same number as
@@ -36,6 +37,20 @@ STS_MIN_BACKOFF_S = 1.0
 #: the previous incarnation plus one (§5.2). ``0`` on a status means no
 #: worker has been spawned yet.
 FIRST_INCARNATION = 1
+
+#: Procman's ready timer for a session worker, in seconds.
+#: Provisional, pending Yi Te (#286). Not F12's ``on_start`` budget.
+#: Ten seconds covers a cold interpreter start; a stand-in is ready at once.
+SESSION_START_TIMEOUT_S = 10.0
+
+#: Heartbeat silence, in seconds, after which a running session worker
+#: is no longer ``RUNNING``. Provisional, pending Yi Te (#286). The same
+#: number the procman supervisor tests use for this timer.
+SESSION_HB_TIMEOUT_S = 3.0
+
+#: How long a stop waits before the worker is killed, in seconds.
+#: Provisional, pending Yi Te (#286). The existing ``on_stop`` wall clock.
+SESSION_STOP_GRACE_S = ON_STOP_TIMEOUT_S
 
 
 def sts_restart_intensity(

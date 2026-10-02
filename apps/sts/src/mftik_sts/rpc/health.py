@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from mftik.broker import IncomingRequest
-from mftik.protocol import STS_HEALTH, HealthStatus, HealthStatusEnvelope
+from mftik.protocol import (
+    STS_HEALTH,
+    Envelope,
+    HealthStatus,
+    UntypedEnvelope,
+)
 
 
-async def handle_health(
-    req: IncomingRequest,
-    *,
-    instance: str | None = None,
-) -> None:
-    del instance
-    await req.reply(
-        HealthStatusEnvelope.wrap(
-            HealthStatus(status="ok", service="sts"),
-            type=STS_HEALTH,
-            source="sts",
-            session_id=req.envelope.session_id,
-        )
+async def handle_health(message: UntypedEnvelope) -> Envelope[HealthStatus]:
+    """``sts.health`` on the control subject: one message in, one reply out."""
+    return Envelope[HealthStatus].wrap(
+        HealthStatus(status="ok", service="sts"),
+        type=STS_HEALTH,
+        source="sts",
+        session_id=message.session_id,
     )

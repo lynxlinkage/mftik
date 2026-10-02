@@ -1,8 +1,10 @@
-"""STS process bootstrap — RPC, registry, heartbeat.
+"""STS process bootstrap — RPC, registry, heartbeat, session supervisor.
 
-No sessions. RM-04 deleted the per-session subprocess and the manager that
-owned it, so this process serves health, registry, env and artifacts, and
-answers the session types with ``NotImplementedError("IF-04")``.
+B4-02 runs one :class:`~mftik.procman.Supervisor` for this instance.
+``start`` applies reattach before the control subject is served.
+``SIGTERM`` closes with ``detach``, so the session workers keep running
+(§4.6). Reports are :func:`mftik.procman.publish_reports` with no phase
+filter and no ``extra_workers`` (restarting sessions are B5-06).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import asyncio
 import logging
 import os
 import signal
+from pathlib import Path
 from typing import Any
 
 import uvloop
@@ -30,7 +33,6 @@ from mftik.strategy.artifacts import get_store
 from mftik_db.schema import SchemaTooOld, require_sts_schema
 
 from mftik_sts.registry_catchup import catch_up_until_matched
-from mftik_sts.rpc import dispatch
 from mftik_sts.runtime_env import extras_names, refresh
 
 SOURCE = "sts"
@@ -48,20 +50,43 @@ ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
-#: did not expect. ``Broker.serve`` already survives what it knows how to
-#: survive, so this only paces the failures nothing has a name for yet.
+#: did not expect. :func:`mftik.broker.handler.serve` already survives what
+#: it knows how to survive, so this only paces the failures nothing has a
+#: name for yet. ``run_rpc`` passes it through so a test can set it to zero.
 RPC_RESTART_DELAY_SECONDS = 1.0
 
+#: The process's orchestrator. ``run_rpc`` reads it. Health still answers
+#: when it is ``None`` (a probe, or a test that never booted a supervisor).
+_orchestrator: Any = None
 
-async def _dispatch_request(req: Any, *, instance: str | None = None) -> None:
-    try:
-        await dispatch(req, instance=instance)
-    except Exception:
-        logger.exception(
-            "STS RPC handler failed type=%s id=%s",
-            req.envelope.type,
-            req.envelope.id,
-        )
+
+def bind_orchestrator(orchestrator: Any) -> None:
+    """Install the orchestrator ``run_rpc`` serves. ``None`` clears it."""
+    global _orchestrator
+    _orchestrator = orchestrator
+
+
+def _supervisor_work_dir(plane: str, instance: str) -> Path:
+    """``${WORK_DIR}/<plane>/<instance>``, or the cwd when ``WORK_DIR`` is unset."""
+    root = Path(os.environ.get("WORK_DIR") or os.getcwd())
+    return root / plane / instance
+
+
+def _open_supervisor() -> Any:
+    """This process's supervisor.
+
+    ``pin_path`` is :func:`mftik.procman.pinned_releases_path`: the S-2
+    file when Strategon named a release, and ``None`` while it did not
+    (B3-07). The path is not this instance's work directory.
+    """
+    from mftik.procman import Supervisor, pinned_releases_path
+
+    return Supervisor(
+        _supervisor_work_dir(SOURCE, INSTANCE),
+        plane="sts",
+        instance=INSTANCE,
+        pin_path=pinned_releases_path(),
+    )
 
 
 async def run_rpc(
@@ -75,30 +100,25 @@ async def run_rpc(
 
     One task per subject the role grants, rather than one loop over several:
     each is the same loop with a different name, and a failure in one is not a
-    reason to stop answering on the other.
+    reason to stop answering on the other. ``instance`` is unused: the bound
+    orchestrator already knows which STS this process is. Health answers
+    even when that orchestrator is not bound.
     """
+    del instance
+    # Imported here so a health probe, which imports this package, does not
+    # pay for the supervisor on the way to ``handle_health``.
+    from mftik.broker.handler import serve as serve_subject
+
+    from mftik_sts.rpc.router import control_handler
+
     logger.info("STS RPC listening on subject=%s", subject)
-    while not stop.is_set():
-        try:
-            async for req in broker.serve(subject, stop=stop):
-                await _dispatch_request(req, instance=instance)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Reaching here means something ``serve`` does not already handle,
-            # and the answer is still to serve. This coroutine returning is how
-            # STS ends up running sessions that nobody can list, pause or stop
-            # — the process alive, the subject silent, and no line anywhere
-            # saying so.
-            logger.exception(
-                "STS RPC serve loop failed subject=%s — restarting", subject
-            )
-            try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
-                )
-            except TimeoutError:
-                continue
+    await serve_subject(
+        broker,
+        subject,
+        control_handler(broker, _orchestrator),
+        stop=stop,
+        restart_delay=RPC_RESTART_DELAY_SECONDS,
+    )
 
 
 #: How often to clear abandoned artifact uploads. Slow on purpose: a part
@@ -240,6 +260,27 @@ async def amain() -> bool:
                 ", ".join(sorted(extras_names())) or "(none)",
             )
         logger.info("STS started instance=%s", INSTANCE)
+        from mftik.clock import SystemClock
+        from mftik.procman import CloseMode, publish_reports
+        from mftik_db.session import session_scope
+
+        from mftik_sts.controller import StsOrchestrator
+        from mftik_sts.controller.status import DbStatusStore
+
+        supervisor = _open_supervisor()
+        orchestrator = StsOrchestrator(
+            supervisor,
+            clock=SystemClock(),
+            store=DbStatusStore(session_scope),
+        )
+        bind_orchestrator(orchestrator)
+        try:
+            await orchestrator.boot()
+        except Exception:
+            logger.exception("STS supervisor failed to start")
+            bind_orchestrator(None)
+            await supervisor.close(CloseMode.DETACH)
+            return False
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
         if not subjects:
             logger.warning(
@@ -272,6 +313,23 @@ async def amain() -> bool:
             ),
             name="sts-health",
         )
+
+        async def _publish(subject: str, envelope: Any) -> None:
+            await broker.publish(subject, envelope)
+
+        report_task = asyncio.create_task(
+            publish_reports(
+                supervisor,
+                plane="sts",
+                instance=INSTANCE,
+                publish=_publish,
+                clock=SystemClock(),
+            ),
+            name="sts-procman-report",
+        )
+        watch_task = asyncio.create_task(
+            orchestrator.watch(stop), name="sts-session-watch"
+        )
         # Not one of the tasks run_until_stopped watches: this is meant
         # to finish, once the API has pushed the store. A process that
         # does not serve its own subject cannot receive that push.
@@ -288,16 +346,28 @@ async def amain() -> bool:
                 hb_task,
                 sweep_task,
                 health_task,
+                report_task,
+                watch_task,
                 logger=logger,
             )
         finally:
+            # Stop accepting, then detach. Workers keep running (§4.6).
             stop.set()
-            tasks = [*rpc_tasks, hb_task, sweep_task, health_task]
+            tasks = [
+                *rpc_tasks,
+                hb_task,
+                sweep_task,
+                health_task,
+                report_task,
+                watch_task,
+            ]
             if catchup_task is not None:
                 tasks.append(catchup_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await supervisor.close(CloseMode.DETACH)
+            bind_orchestrator(None)
     logger.info("STS stopped")
     return clean
 

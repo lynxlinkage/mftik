@@ -1,12 +1,14 @@
-"""The STS controller interface IF-04 defines, and that deciding raises.
+"""The STS controller interface IF-04 defines.
 
 The shape is real: F11's defaults, a session spec, and the worker spec
-procman is allowed to see (``restart`` is ``never``). Classifying a crash,
-choosing a rehang, reconciling, and answering start / end / list raise
-``NotImplementedError("IF-04")``.
+procman is allowed to see (``restart`` is ``never``). Classifying a crash
+and choosing a rehang still raise ``NotImplementedError("IF-04")``.
+Reconcile creates or stops a worker, and start / end / list answer.
+A crash-shaped reconcile still raises, so B5-06 stays the owner of that
+path.
 
-What B4-02 and B5-06 have to make true is in ``test_controller_contract.py``,
-as xfail.
+What B4-02 and B5-06 have to make true is in ``test_controller_contract.py``.
+B5 stays xfail.
 """
 
 from __future__ import annotations
@@ -18,10 +20,14 @@ from pathlib import Path
 import pytest
 from mftik.procman import OOM_SCORE_ADJ, Supervisor
 from mftik.protocol import (
+    STS_ERROR,
     STS_SESSION_END,
+    STS_SESSION_FAIL,
+    STS_SESSION_FORCE_STOP,
     STS_SESSION_LIST,
     STS_SESSION_START,
     Envelope,
+    RpcError,
 )
 from mftik.protocol.strategy_yml import (
     DEFAULT_MAX_RESTARTS,
@@ -53,7 +59,6 @@ from mftik_sts.controller import (
     control_subject,
     decide_restart,
     end_handler,
-    list_handler,
     reported_session_ids,
     retains_intents,
     session_worker_id,
@@ -62,11 +67,10 @@ from mftik_sts.controller import (
     start_handler,
     sts_restart_intensity,
 )
-from mftik_sts.rpc.router import _HANDLERS
+from mftik_sts.rpc.router import _HANDLERS, CONTROLLER_TYPES
 from mftik_sts.rpc.sessions import (
-    handle_session_create,
-    handle_session_list,
-    handle_session_stop,
+    handle_session_fail,
+    handle_session_force_stop,
 )
 
 _ROOT = Path(__file__).resolve().parents[1] / "src" / "mftik_sts" / "controller"
@@ -252,24 +256,40 @@ def test_decisions_raise_if_04() -> None:
         reported_session_ids(())
 
 
-def test_reconcile_raises_if_04_and_checks_its_inputs(tmp_path: Path) -> None:
+def test_reconcile_checks_its_inputs_and_leaves_a_crash_to_b5(
+    tmp_path: Path,
+) -> None:
+    """An empty status spawns. A crash-shaped one still raises (B5-06)."""
     orch = _orch(tmp_path)
-    with pytest.raises(NotImplementedError, match="^IF-04$"):
-        orch.reconcile(_spec(), SessionStatus())
+    actions = orch.reconcile(_spec(), SessionStatus())
+    assert any(action.kind is ActionKind.SPAWN for action in actions)
     with pytest.raises(ValueError, match="does not match"):
         orch.reconcile(_spec(instance="other"), SessionStatus())
     with pytest.raises(TypeError):
         orch.reconcile(object(), SessionStatus())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="sts supervisor"):
         StsOrchestrator(Supervisor(tmp_path, plane="md", instance="md"))
+    crashed = SessionStatus(
+        phase=SessionPhase.RUNNING,
+        worker_incarnation=1,
+        exit_recorded=True,
+        pid_gone=True,
+        crash_class=CrashClass.A,
+    )
+    with pytest.raises(NotImplementedError, match="^IF-04$"):
+        orch.reconcile(_spec(restart="on_failure"), crashed)
 
 
-async def test_handlers_raise_if_04(tmp_path: Path) -> None:
+async def test_handlers_reject_a_bad_payload_instead_of_raising(
+    tmp_path: Path,
+) -> None:
     orch = _orch(tmp_path)
     message = Envelope[dict].wrap({}, type=STS_SESSION_START, source="api")
-    for handler in (start_handler(orch), end_handler(orch), list_handler(orch)):
-        with pytest.raises(NotImplementedError, match="^IF-04$"):
-            await handler(message)
+    for handler in (start_handler(orch), end_handler(orch)):
+        reply = await handler(message)
+        assert reply is not None
+        assert reply.type == STS_ERROR
+        assert RpcError.model_validate(reply.payload).code == "invalid_request"
 
 
 def test_start_and_list_are_named_on_the_instance_subject() -> None:
@@ -282,11 +302,16 @@ def test_an_action_carries_no_strategy_state() -> None:
     assert ActionKind.SPAWN.value == "spawn"
 
 
-def test_the_running_process_still_uses_the_placeholders() -> None:
-    """IF-04 does not wire the controller in. B4-02 removes this."""
-    assert _HANDLERS[STS_SESSION_START] is handle_session_create
-    assert _HANDLERS[STS_SESSION_END] is handle_session_stop
-    assert _HANDLERS[STS_SESSION_LIST] is handle_session_list
+def test_start_end_and_list_are_not_the_placeholders() -> None:
+    """B4-02 serves these from the controller. Fail and force-stop stay."""
+    assert STS_SESSION_START in CONTROLLER_TYPES
+    assert STS_SESSION_END in CONTROLLER_TYPES
+    assert STS_SESSION_LIST in CONTROLLER_TYPES
+    assert STS_SESSION_START not in _HANDLERS
+    assert STS_SESSION_END not in _HANDLERS
+    assert STS_SESSION_LIST not in _HANDLERS
+    assert _HANDLERS[STS_SESSION_FAIL] is handle_session_fail
+    assert _HANDLERS[STS_SESSION_FORCE_STOP] is handle_session_force_stop
 
 
 def test_the_controller_does_not_import_strategy_code_or_the_process() -> None:

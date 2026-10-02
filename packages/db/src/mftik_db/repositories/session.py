@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
 
@@ -277,6 +277,42 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
     _ACKABLE = frozenset(
         {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
     )
+
+    async def record_status(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        reason: str | None,
+        finished_at: float | None,
+        observed_generation: int | None,
+        worker_incarnation: int | None,
+        conditions: Mapping[str, str],
+        restart_count: int,
+    ) -> StsSessionRow | None:
+        """Write the Status columns. A missing row is left alone.
+
+        The API inserts the row. This method does not. ``finished_at`` of
+        ``0`` is a real timestamp. Live writes do not clear ``reason`` or
+        ``finished_at``: a session that is still running has not ended,
+        and a later terminal write is what sets them.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.status = status
+        row.observed_generation = observed_generation
+        row.worker_incarnation = worker_incarnation
+        row.conditions = dict(conditions)
+        row.restart_count = restart_count
+        if status in (SessionStatus.DONE.value, SessionStatus.FAILED.value):
+            row.reason = reason[:256] if reason else None
+            if finished_at is None:
+                row.finished_at = datetime.now(UTC)
+            else:
+                row.finished_at = datetime.fromtimestamp(finished_at, UTC)
+        await self.session.flush()
+        return row
 
     async def mark_ack(self, session_id: str) -> StsSessionRow | None:
         """Operator acknowledgement of a failed or interrupted session.
