@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from decimal import Decimal
 
@@ -156,40 +157,70 @@ async def test_activate_and_deactivate_without_a_book_still_name_the_ticket() ->
         await worker.trading.deactivate()
 
 
-async def test_cancel_session_while_inactive_does_not_reach_the_book() -> None:
-    book = _Book()
-    reached: list[str] = []
-
-    class _Orders:
-        async def submit(self, request: object) -> None:
-            return None
-
-        async def cancel(self, request: object) -> None:
-            return None
-
-        async def cancel_session(self, request: object) -> str:
-            reached.append(request.session_id)  # type: ignore[attr-defined]
-            return "ran"
-
-    layer = TradingLayer(_Resident(), session=book)  # type: ignore[arg-type]
-    orders = _Orders()
-    layer.arm(orders)  # type: ignore[arg-type]
-    refused = await orders.cancel_session(_Cancel("sess-off"))
-    assert reached == []
-    assert refused.ok is False
-    assert refused.session_id == "sess-off"
-    assert refused.unconfirmed == []
-    assert book.destroys == 0
-
-    await layer.activate()
-    ran = await orders.cancel_session(_Cancel("sess-on"))
-    assert ran == "ran"
-    assert reached == ["sess-on"]
-
-
 class _Cancel:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
+
+
+class _Orders:
+    def __init__(self) -> None:
+        self.reached: list[str] = []
+        self.started = asyncio.Event()
+        self.release: asyncio.Event | None = None
+
+    async def submit(self, request: object) -> None:
+        return None
+
+    async def cancel(self, request: object) -> None:
+        return None
+
+    async def cancel_session(self, request: object) -> str:
+        self.reached.append(request.session_id)  # type: ignore[attr-defined]
+        self.started.set()
+        if self.release is not None:
+            await self.release.wait()
+        return "ran"
+
+
+async def test_cancel_session_runs_while_off_and_stops_once_destroyed() -> None:
+    book = _Book()
+    layer = TradingLayer(_Resident(), session=book)  # type: ignore[arg-type]
+    orders = _Orders()
+    layer.arm(orders)  # type: ignore[arg-type]
+    # The handler tests call this with a live book before activate.
+    ran = await orders.cancel_session(_Cancel("sess-off"))
+    assert ran == "ran"
+    assert orders.reached == ["sess-off"]
+
+    await layer.activate()
+    await layer.deactivate()
+    assert book.destroyed is True
+    refused = await orders.cancel_session(_Cancel("sess-gone"))
+    assert orders.reached == ["sess-off"]
+    assert refused.ok is False
+    assert refused.session_id == "sess-gone"
+    assert refused.unconfirmed == []
+
+
+async def test_an_in_flight_cancel_session_keeps_deactivate_from_destroying() -> None:
+    book = _Book()
+    layer = TradingLayer(_Resident(), session=book)  # type: ignore[arg-type]
+    orders = _Orders()
+    orders.release = asyncio.Event()
+    layer.arm(orders)  # type: ignore[arg-type]
+    await layer.activate()
+    task = asyncio.create_task(orders.cancel_session(_Cancel("sess-busy")))
+    await orders.started.wait()
+    layer.drain_timeout_s = 0
+    await layer.deactivate()
+    assert layer.active is True
+    assert book.destroys == 0
+    assert orders.release is not None
+    orders.release.set()
+    assert await task == "ran"
+    await layer.deactivate()
+    assert layer.active is False
+    assert book.destroys == 1
 
 
 async def test_paper_deactivate_does_not_close_the_resident_connector() -> None:

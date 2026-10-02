@@ -138,6 +138,10 @@ class TradingLayer:
         self._idle.set()
         self._gate = asyncio.Lock()
         self._armed = False
+        #: True from the moment destroy is decided until it returns.
+        #: A new ``cancel_session`` in that window is not started: the
+        #: book is about to go away, and the call would race it.
+        self._closing = False
 
     @property
     def session(self) -> Session | None:
@@ -187,13 +191,16 @@ class TradingLayer:
         does not finish. Wrapping the three methods is the counter.
         A submit or cancel that arrives after the layer has stopped
         accepting is not counted. :meth:`OrderHandler._offline` refuses
-        it with ``TD_VENUE_NOT_CONNECTED``. ``cancel_session`` has no
-        such check. Running one that was not counted would cancel
-        resting orders and could overlap :meth:`Session.destroy`. That
-        call is not made. The result is ``ok=False`` and names no
-        order: this layer did not cancel, and it does not invent a
-        list. The result type has no reject code; that shape is the
-        one this ticket can return without editing the dispatcher.
+        it with ``TD_VENUE_NOT_CONNECTED``. ``cancel_session`` does not
+        use that check, and the book can be live while this layer is
+        still off (the handler tests call it that way). Every
+        ``cancel_session`` is counted, including one that arrives
+        during the drain, so :meth:`deactivate` does not destroy under
+        it. Once destroy has been decided, or the book is already
+        destroyed, the call is not made. The result is ``ok=False``
+        and names no order. The result type has no reject code; that
+        shape is what this ticket can return without editing the
+        dispatcher.
         """
         if self._armed:
             return
@@ -219,25 +226,26 @@ class TradingLayer:
                     await self._leave()
 
         async def tracked_cancel_session(request, *args, **kwargs):  # type: ignore[no-untyped-def]
-            tracked = await self._enter()
+            # Always counted. ``_offline`` does not cover this call, so
+            # an uncounted one can overlap destroy. No book still falls
+            # through: the handler raises, which the surface test locks.
+            tracked = await self._enter(force=True)
+            if not tracked:
+                session_id = getattr(request, "session_id", "")
+                logger.warning(
+                    "trading layer off api_id=%s refusing cancel_session session_id=%s",
+                    self.resident.api_id,
+                    session_id,
+                )
+                return TdCancelSessionResult(
+                    session_id=str(session_id),
+                    ok=False,
+                    unconfirmed=[],
+                )
             try:
-                if not tracked:
-                    session_id = getattr(request, "session_id", "")
-                    logger.warning(
-                        "trading layer off api_id=%s refusing cancel_session "
-                        "session_id=%s",
-                        self.resident.api_id,
-                        session_id,
-                    )
-                    return TdCancelSessionResult(
-                        session_id=str(session_id),
-                        ok=False,
-                        unconfirmed=[],
-                    )
                 return await cancel_session(request, *args, **kwargs)
             finally:
-                if tracked:
-                    await self._leave()
+                await self._leave()
 
         handler.submit = tracked_submit  # type: ignore[method-assign]
         handler.cancel = tracked_cancel  # type: ignore[method-assign]
@@ -358,12 +366,19 @@ class TradingLayer:
                     self.drain_timeout_s,
                 )
                 return
-        session = self._session
-        if session is None:
-            return
-        self._warn_resting()
-        await session.destroy()
-        self.leverage = {}
+            # Held across destroy. ``_enter`` sees it and does not start
+            # a ``cancel_session`` between this check and the close.
+            self._closing = True
+        try:
+            session = self._session
+            if session is None:
+                return
+            self._warn_resting()
+            await session.destroy()
+            self.leverage = {}
+        finally:
+            async with self._gate:
+                self._closing = False
 
     def _bind(self, session: Session) -> None:
         self._session = session
@@ -390,9 +405,14 @@ class TradingLayer:
             self._session = None
         self._active = False
 
-    async def _enter(self) -> bool:
+    async def _enter(self, *, force: bool = False) -> bool:
         async with self._gate:
-            if not self._active:
+            if self._closing:
+                return False
+            session = self._session
+            if session is not None and bool(getattr(session, "destroyed", False)):
+                return False
+            if not self._active and not force:
                 return False
             self._busy += 1
             self._idle.clear()
