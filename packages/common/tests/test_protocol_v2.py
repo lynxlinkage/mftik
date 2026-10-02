@@ -1,10 +1,10 @@
-"""Protocol v2 types (IF-01) and the ``pv`` refusal they will grow into.
+"""Protocol v2 types (IF-01) and the ``pv`` refusal (B4-01).
 
-What is real now is the wire shape: envelope ``pv``, the renamed type
-strings from the B0-03 inventory, the new subjects, and the atom hash.
-What B4-01 will make true is the receiver's refusal, and those tests are
-``xfail(strict=True)`` so the implementation cannot land while the marker
-is still on them.
+The wire shape is the envelope ``pv``, the renamed type strings from the
+B0-03 inventory, the new subjects, and the atom hash.
+:func:`mftik.protocol.reject_if_pv_mismatch` reads ``pv`` off the raw
+frame and does not validate the payload. Where a receiver calls it is
+issue #282; these tests do not put the check on the broker.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from mftik.protocol import (
     MdUniverseEvent,
     ProcmanReport,
     ProcmanWorker,
+    RpcError,
     StsCreateSessionRequest,
     StsCreateSessionRequestEnvelope,
     StsCreateSessionResult,
@@ -227,11 +228,6 @@ def test_cancel_session_reports_what_it_could_not_confirm() -> None:
     assert result.unconfirmed == ["cid-1"]
 
 
-def test_the_pv_check_is_not_implemented_yet() -> None:
-    with pytest.raises(NotImplementedError, match="IF-01"):
-        reject_if_pv_mismatch(b"{}")
-
-
 # --- what B4-01 makes true -------------------------------------------------
 
 
@@ -248,7 +244,6 @@ def _frame(*, pv: object | None, payload: object) -> str:
     return json.dumps(body)
 
 
-@pytest.mark.xfail(strict=True, reason="B4-01 refuses a different pv")
 def test_a_different_pv_is_protocol_mismatch_and_the_payload_is_not_parsed() -> None:
     """F26: a different version is refused, and the payload is not read.
 
@@ -270,7 +265,6 @@ def test_a_different_pv_is_protocol_mismatch_and_the_payload_is_not_parsed() -> 
     assert wrong_type.code == PROTOCOL_MISMATCH
 
 
-@pytest.mark.xfail(strict=True, reason="B4-01 refuses a frame that has no pv")
 def test_a_missing_pv_is_protocol_mismatch() -> None:
     """The unversioned envelope is not this version.
 
@@ -283,7 +277,6 @@ def test_a_missing_pv_is_protocol_mismatch() -> None:
     assert error.code == PROTOCOL_MISMATCH
 
 
-@pytest.mark.xfail(strict=True, reason="B4-01 lets a matching pv through unparsed")
 def test_a_matching_pv_is_not_a_mismatch_even_when_the_payload_is_garbage() -> None:
     """Matching ``pv`` is not a refusal. Parsing the payload is the next step.
 
@@ -295,5 +288,51 @@ def test_a_matching_pv_is_not_a_mismatch_even_when_the_payload_is_garbage() -> N
         reject_if_pv_mismatch(
             _frame(pv=PROTOCOL_VERSION, payload={"not": "a start request"})
         )
+        is None
+    )
+
+
+def test_a_body_that_is_not_a_json_object_is_not_protocol_mismatch() -> None:
+    """A malformed frame raises ``ValueError``, not ``protocol_mismatch``.
+
+    The refusal code is only for a JSON object. An array, a scalar,
+    invalid JSON, or bytes that are not UTF-8 are a broken frame, and
+    the caller does not turn them into an ``RpcError``.
+    """
+    for raw in (
+        b"[]",
+        b"null",
+        b"1",
+        b'"pv"',
+        b"",
+        b"{",
+        b"not-json",
+        "  ",
+        b"\xff",
+    ):
+        with pytest.raises(ValueError, match="JSON object"):
+            reject_if_pv_mismatch(raw)
+
+
+def test_only_an_integer_pv_matches_and_a_byte_frame_is_read_as_json() -> None:
+    """JSON ``true`` and ``2.0`` are not the integer protocol version.
+
+    ``bool`` is a subclass of ``int``, and ``2.0`` compares equal to
+    ``2``. The check uses the JSON type. Bytes are the frame a
+    transport hands over: ``b"{}"`` has no ``pv``, and an object whose
+    only field is the current ``pv`` is not validated any further.
+    """
+    for pv in (True, False, float(PROTOCOL_VERSION)):
+        error = reject_if_pv_mismatch(_frame(pv=pv, payload={}))
+        assert error is not None
+        assert type(error) is RpcError
+        assert error.code == PROTOCOL_MISMATCH
+
+    missing = reject_if_pv_mismatch(b"{}")
+    assert missing is not None
+    assert missing.code == PROTOCOL_MISMATCH
+
+    assert (
+        reject_if_pv_mismatch(json.dumps({"pv": PROTOCOL_VERSION}).encode())
         is None
     )

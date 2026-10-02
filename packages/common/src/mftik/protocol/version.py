@@ -10,13 +10,15 @@ Stopping a worker does not use this. A Supervisor signals the process,
 so a peer that speaks another version can still be stopped (§4.6).
 
 IF-01 defines the constant, the envelope field, and the refusal code.
-:func:`reject_if_pv_mismatch` is the check a receiver will call. It
-raises ``NotImplementedError("IF-01")`` until B4-01 wires it; the
-contract tests describe what it returns then.
+:func:`reject_if_pv_mismatch` is that check (B4-01). A receiver calls
+it on the raw frame, before ``from_json``. This module does not choose
+which layer does the calling: ``serve``, ``subscribe`` and ``request``
+do not read ``pv`` (issue #282).
 """
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,8 +56,40 @@ def reject_if_pv_mismatch(raw: str | bytes) -> RpcError | None:
     envelope. This function does not choose that type.
 
     Raises:
-        NotImplementedError: always, with ``IF-01``. B4-01 is the
-            implementation.
+        ValueError: ``raw`` is not a JSON object. Invalid JSON, a JSON
+            array or scalar, and bytes that are not UTF-8 text are
+            malformed frames, not a version mismatch.
     """
-    del raw
-    raise NotImplementedError("IF-01")
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("message body is not a JSON object") from exc
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        raise ValueError("message body is not a JSON object")
+
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("message body is not a JSON object") from exc
+    if not isinstance(body, dict):
+        raise ValueError("message body is not a JSON object")
+
+    missing = object()
+    pv = body.get("pv", missing)
+    # ``bool`` is a subclass of ``int``. JSON ``true`` / ``false`` are not
+    # protocol versions, so the JSON type has to be an integer exactly.
+    if type(pv) is int and pv == PROTOCOL_VERSION:
+        return None
+
+    # messages imports Envelope, which imports this module. Importing
+    # RpcError at module level cycles while Envelope is still loading.
+    from mftik.protocol.messages import RpcError
+
+    if pv is missing:
+        message = "pv is missing"
+    else:
+        message = f"pv {pv!r} is not protocol version {PROTOCOL_VERSION}"
+    return RpcError(code=PROTOCOL_MISMATCH, message=message)
