@@ -48,10 +48,14 @@ causes and no others:
   the connection is back, and each account gets ``on_resync``. Account
   availability is not changed: the send connection is not this one.
 
-The view is ``oms.view()`` unsettled. ``settled=True`` is B6-08 and has
-not landed. The read runs on the ingress loop, off the strategy thread,
-bounded by the broker's request timeout. A failed read is logged and
-that ``on_resync`` is skipped. The session stays up.
+The view is a settled ``oms.view`` (``settled=True``). The read waits up
+to :data:`~mftik.strategy.oms.SETTLED_VIEW_TIMEOUT_S` for UNKNOWN orders
+to converge. It runs on the ingress loop, off the strategy thread, and
+:func:`schedule_effects` starts it as a task so the notices beside it
+are not held for that wait. A ``td.error`` reply — the trading layer is
+closed, or the payload is invalid — is logged and the read returns
+``None``. That ``on_resync`` is skipped. An error payload is never
+parsed as an empty book. The session stays up.
 
 Same-incarnation recovery from silence restores the broadcast's state
 and does not call ``on_resync``. F13 names only the two causes above.
@@ -61,9 +65,10 @@ disagreement is left for Yi Te.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
-from collections.abc import Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from mftik.exchange.oms import OmsView
@@ -72,6 +77,7 @@ from mftik.protocol import (
     MD_WORKER_STATE,
     TD_ACCOUNT_RESET,
     TD_ACCOUNT_STATE,
+    TD_ERROR,
     TD_OMS_VIEW,
     Envelope,
     MdAtomState,
@@ -82,6 +88,7 @@ from mftik.protocol import (
     Topics,
     UntypedEnvelope,
 )
+from mftik.strategy.oms import SETTLED_VIEW_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -642,35 +649,76 @@ def _parse(raw: str) -> UntypedEnvelope | None:
         return None
 
 
+def schedule_effects(
+    effects: Sequence[Effect],
+    *,
+    offer: Callable[[MdUpdate | TdUpdate], None],
+    deliver: Callable[[Resync], Awaitable[None]],
+    log: Callable[[MdUpdate | TdUpdate], Awaitable[None]],
+) -> None:
+    """Offer notices now. Start each settled view read as a task.
+
+    ``deliver`` waits up to :data:`SETTLED_VIEW_TIMEOUT_S` on the loop
+    that calls this, which is the ingress, not the strategy thread.
+    Awaiting the read here would hold the other notices in this batch.
+    """
+    loop = asyncio.get_running_loop()
+    for effect in effects:
+        if isinstance(effect, Resync):
+            loop.create_task(deliver(effect))
+            continue
+        offer(effect)
+        loop.create_task(log(effect))
+
+
 async def read_oms_view(
     broker: object,
     *,
     api_id: int,
     session_id: str,
-    timeout: float,
 ) -> OmsView | None:
-    """Unsettled ``oms.view`` for one ``on_resync``.
+    """Settled ``oms.view`` for one ``on_resync``.
 
-    ``settled=True`` waits on UNKNOWN orders and is B6-08; that wait is
-    not what this read does. ``None`` means the read failed. The caller
-    logs and skips that ``on_resync``. It does not fail the session.
-    The broker is the ingress's, so this await is not on the strategy thread.
+    The request is ``settled=True`` and the timeout is
+    :data:`SETTLED_VIEW_TIMEOUT_S`. ``None`` means the read failed or TD
+    answered ``td.error`` (the trading layer is closed, or the payload
+    was refused). The caller logs and skips that ``on_resync``. It does
+    not fail the session, and it does not hand the strategy an empty
+    book. The broker is the ingress's, so this await is not on the
+    strategy thread.
     """
     request = getattr(broker, "request", None)
     if request is None:
         logger.warning("oms.view for on_resync has no broker api_id=%s", api_id)
         return None
     envelope = Envelope.wrap(
-        TdOmsViewRequest(api_id=api_id, settled=False),
+        TdOmsViewRequest(api_id=api_id, settled=True),
         type=TD_OMS_VIEW,
         source=_SOURCE,
         session_id=session_id,
     )
     try:
-        reply = await request(Topics.td_account(api_id), envelope, timeout=timeout)
+        reply = await request(
+            Topics.td_account(api_id),
+            envelope,
+            timeout=SETTLED_VIEW_TIMEOUT_S,
+        )
     except Exception:
         logger.warning(
             "oms.view for on_resync failed api_id=%s", api_id, exc_info=True
+        )
+        return None
+    if getattr(reply, "type", None) == TD_ERROR:
+        payload = getattr(reply, "payload", None) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        code = str(payload.get("code", "td.error"))
+        message = str(payload.get("message", "td refused the read"))
+        logger.warning(
+            "oms.view for on_resync refused api_id=%s code=%s message=%s",
+            api_id,
+            code,
+            message,
         )
         return None
     try:
@@ -696,4 +744,5 @@ __all__ = [
     "TdUpdate",
     "notice_text",
     "read_oms_view",
+    "schedule_effects",
 ]

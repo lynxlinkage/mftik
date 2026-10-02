@@ -72,8 +72,13 @@ class _Watch(Strategy):
             return list(self.updates), list(self.resyncs)
 
 
+_settled: list[bool] = []
+
+
 async def _views(message: UntypedEnvelope) -> Envelope[object] | None:
     if message.type == TD_OMS_VIEW:
+        payload = message.payload if isinstance(message.payload, dict) else {}
+        _settled.append(bool(payload.get("settled")))
         return Envelope[OmsView].wrap(OmsView(), type=TD_OMS_VIEW, source="td")
     if message.type == TD_LEDGER_VIEW:
         return Envelope[LedgerView].wrap(
@@ -95,6 +100,7 @@ async def _until(check, *, seconds: float) -> None:
 async def test_ingress_nats_reconnect_notifies_and_resyncs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _settled.clear()
     prefix = unique_key_prefix("b505")
     monkeypatch.setenv("BROKER_KEY_PREFIX", prefix)
     watch = _Watch()
@@ -187,6 +193,8 @@ async def test_ingress_nats_reconnect_notifies_and_resyncs(
         )
         assert down_at < live_at
         assert watch.td.state(_API_ID) is None
+        assert False in _settled
+        assert _settled[-1] is True
         watch.exit()
         assert await asyncio.wait_for(task, timeout=4) == 0
     finally:

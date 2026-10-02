@@ -8,8 +8,10 @@ publish them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -23,6 +25,8 @@ from mftik.protocol import (
     MD_WORKER_STATE,
     TD_ACCOUNT_RESET,
     TD_ACCOUNT_STATE,
+    TD_ERROR,
+    TD_OMS_VIEW,
     TD_ORDER_ACK,
     Envelope,
     MdAtomState,
@@ -36,6 +40,7 @@ from mftik.protocol import (
 )
 from mftik.strategy import Strategy
 from mftik.strategy.eventlog import EventLog
+from mftik.strategy.oms import SETTLED_VIEW_TIMEOUT_S
 from mftik_sts.session_worker.availability import (
     REASON_INGRESS,
     REASON_SILENCE,
@@ -45,6 +50,7 @@ from mftik_sts.session_worker.availability import (
     Resync,
     TdUpdate,
     read_oms_view,
+    schedule_effects,
 )
 from mftik_sts.session_worker.delivery import MUST_DELIVER
 from mftik_sts.session_worker.dispatch import dispatch_md, dispatch_notice
@@ -563,20 +569,31 @@ def test_md_and_td_state_read_the_session() -> None:
 
 
 class _Broker:
-    def __init__(self, *, fail: bool = False, view: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        view: bool = False,
+        error: dict[str, str] | None = None,
+    ) -> None:
         self.calls: list[str] = []
+        self.sent: list[tuple[object, float | None]] = []
         self.fail = fail
         self.view = view
+        self.error = error
 
     async def request(
         self, subject: str, envelope: object, timeout: float | None = None
     ):
-        del envelope, timeout
         self.calls.append(subject)
+        self.sent.append((envelope, timeout))
         if self.fail:
             raise RuntimeError("td is gone")
+        if self.error is not None:
+            raw = Envelope.wrap(self.error, type=TD_ERROR, source="td").to_json()
+            return UntypedEnvelope.from_json(raw)
         if self.view:
-            raw = Envelope.wrap(OmsView(), type="td.oms.view", source="td").to_json()
+            raw = Envelope.wrap(OmsView(), type=TD_OMS_VIEW, source="td").to_json()
             return UntypedEnvelope.from_json(raw)
         ack = OrderAck(api_id=7, client_order_id="ignored", accepted=True)
         raw = Envelope.wrap(ack, type=TD_ORDER_ACK, source="td").to_json()
@@ -697,19 +714,114 @@ async def test_read_oms_view_failure_returns_none(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING, logger=_LOG):
-        missing = await read_oms_view(
-            object(), api_id=7, session_id="abc123", timeout=1.0
-        )
+        missing = await read_oms_view(object(), api_id=7, session_id="abc123")
         failed = await read_oms_view(
-            _Broker(fail=True), api_id=7, session_id="abc123", timeout=1.0
+            _Broker(fail=True), api_id=7, session_id="abc123"
         )
     assert missing is None
     assert failed is None
     assert any("on_resync" in record.message for record in caplog.records)
-    got = await read_oms_view(
-        _Broker(view=True), api_id=7, session_id="abc123", timeout=1.0
-    )
+    broker = _Broker(view=True)
+    got = await read_oms_view(broker, api_id=7, session_id="abc123")
     assert got == OmsView()
+    envelope, timeout = broker.sent[0]
+    assert getattr(envelope.payload, "settled", None) is True
+    assert timeout == SETTLED_VIEW_TIMEOUT_S
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("107", "venue is not connected"),
+        ("invalid_payload", "settled read refused"),
+    ],
+)
+async def test_td_error_is_not_an_empty_oms_view(
+    caplog: pytest.LogCaptureFixture, code: str, message: str
+) -> None:
+    broker = _Broker(error={"code": code, "message": message})
+    with caplog.at_level(logging.WARNING, logger=_LOG):
+        got = await read_oms_view(broker, api_id=7, session_id="abc123")
+    assert got is None
+    assert code in caplog.text
+    assert message in caplog.text
+    envelope, timeout = broker.sent[0]
+    assert getattr(envelope.payload, "settled", None) is True
+    assert timeout == SETTLED_VIEW_TIMEOUT_S
+
+
+async def test_the_settled_wait_does_not_block_other_notices() -> None:
+    """The 35s settled read is a task on the ingress loop.
+
+    Notices queued with it, and a notice offered while it is still
+    parked, reach a strategy thread before that read returns.
+    """
+    release = asyncio.Event()
+    started = asyncio.Event()
+    request_ident: list[int] = []
+
+    class _Slow:
+        async def request(
+            self, subject: str, envelope: object, timeout: float | None = None
+        ):
+            del subject
+            request_ident.append(threading.get_ident())
+            assert timeout == SETTLED_VIEW_TIMEOUT_S
+            payload = getattr(envelope, "payload", None)
+            assert getattr(payload, "settled", None) is True
+            started.set()
+            await release.wait()
+            raw = Envelope.wrap(OmsView(), type=TD_OMS_VIEW, source="td").to_json()
+            return UntypedEnvelope.from_json(raw)
+
+    queued: list[str] = []
+
+    async def deliver(effect: Resync) -> None:
+        await read_oms_view(_Slow(), api_id=effect.api_id, session_id="abc123")
+
+    async def warn(effect: MdUpdate | TdUpdate) -> None:
+        del effect
+
+    schedule_effects(
+        [
+            Resync(7, "account_reset", None),
+            MdUpdate(_FEED, "down", REASON_SILENCE, 1),
+        ],
+        offer=lambda effect: queued.append(effect.state),
+        deliver=deliver,
+        log=warn,
+    )
+    assert queued == ["down"]
+    assert not started.is_set()
+
+    await asyncio.sleep(0)
+    assert started.is_set()
+    schedule_effects(
+        [MdUpdate(_FEED, "live", REASON_INGRESS, 2)],
+        offer=lambda effect: queued.append(effect.state),
+        deliver=deliver,
+        log=warn,
+    )
+    assert queued == ["down", "live"]
+
+    pulled: list[str] = []
+    strategy_ident: list[int] = []
+
+    def _strategy() -> None:
+        strategy_ident.append(threading.get_ident())
+        pulled.extend(queued)
+
+    worker = threading.Thread(target=_strategy)
+    worker.start()
+    worker.join()
+    assert pulled == ["down", "live"]
+    assert strategy_ident[0] != request_ident[0]
+    assert request_ident[0] == threading.get_ident()
+
+    release.set()
+    current = asyncio.current_task()
+    pending = [task for task in asyncio.all_tasks() if task is not current]
+    await asyncio.gather(*pending)
 
 
 def test_running_conditions_follow_live_availability() -> None:

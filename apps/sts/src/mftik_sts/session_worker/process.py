@@ -71,6 +71,7 @@ from mftik_sts.session_worker.availability import (
     TdUpdate,
     notice_text,
     read_oms_view,
+    schedule_effects,
 )
 from mftik_sts.session_worker.budget import ON_READY_LIMIT_S, ON_STOP_LIMIT_S
 from mftik_sts.session_worker.delivery import kind_of_topic
@@ -690,14 +691,20 @@ async def amain(
         )
 
     def _emit(effects: list[Any]) -> None:
-        """Queue notices. A resync reads ``oms.view`` before its event."""
-        running = asyncio.get_running_loop()
-        for effect in effects:
-            if isinstance(effect, Resync):
-                running.create_task(_deliver_resync(effect))
-                continue
+        """Queue notices. A settled resync read is a task, not this call."""
+
+        def _offer(effect: MdUpdate | TdUpdate) -> None:
             ingress.offer(_notice_event(effect))
-            running.create_task(_log(notice_text(effect), level="warning"))
+
+        async def _warn(effect: MdUpdate | TdUpdate) -> None:
+            await _log(notice_text(effect), level="warning")
+
+        schedule_effects(
+            effects,
+            offer=_offer,
+            deliver=_deliver_resync,
+            log=_warn,
+        )
 
     async def _deliver_resync(effect: Resync) -> None:
         assert clock is not None
@@ -705,7 +712,6 @@ async def amain(
             ingress_broker,
             api_id=effect.api_id,
             session_id=request.session_id,
-            timeout=ingress_broker.config.request_timeout,
         )
         if view is None:
             logger.warning(

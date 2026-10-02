@@ -111,8 +111,11 @@ class Strategy:
         on_resync(api_id, cause, view) — the platform reconciled because the
         stream may have a hole in it (the session's own NATS connection
         reconnected, or the account worker rebuilt its book from the venue).
-        ``view`` is that worker's ``oms.view``. Correct whatever was
-        accumulated from events against it. ``settled=True`` is a later read.
+        ``view`` is that worker's settled ``oms.view``: UNKNOWN orders were
+        chased before the hook ran. Correct whatever was accumulated from
+        events against it. A ``td.error`` (the trading layer is closed, or
+        the payload was refused) or a timeout skips the hook. That skip is
+        not an empty book.
         await self.oms.view(settled=True) — the same convergence on demand,
         for a strategy that needs UNKNOWN orders resolved before it acts.
         Strategies do not reconcile themselves: there is no send_recon.
@@ -426,10 +429,13 @@ class Strategy:
             The TD account worker changed incarnation and rebuilt its book from
             the venue.
 
-        ``view`` is the account worker's ``oms.view``, read off the strategy
-        thread. Anything the strategy accumulated from events should be
-        corrected against it rather than trusted: a chase that missed a fill
-        will otherwise re-send an order for size it already has.
+        ``view`` is the account worker's settled ``oms.view``, read on the
+        ingress, off this thread. UNKNOWN orders were chased first. Anything
+        the strategy accumulated from events should be corrected against it
+        rather than trusted: a chase that missed a fill will otherwise
+        re-send an order for size it already has. The hook is not called
+        when that read is refused or times out, so a missing call is not
+        an empty book.
 
         TD's own reconcile after a venue reconnect does not arrive here. Its
         findings reach the strategy as ordinary order updates.
