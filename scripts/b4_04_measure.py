@@ -475,6 +475,34 @@ async def probe_product_connections() -> dict[str, Any]:
         await send.close()
 
 
+def _drop_loaded_strategy(key: str, root: Path) -> None:
+    """Undo ``load_local_registry`` for this tree.
+
+    The worker imports the strategy as ``_mftik_reg_*``. A later test
+    in the same process treats any such module as a controller leak.
+    """
+    import sys
+
+    from mftik_sts.impl import _REGISTRY
+
+    _REGISTRY.pop(key, None)
+    root_s = str(root.resolve())
+    for name in list(sys.modules):
+        if not name.startswith("_mftik_reg_"):
+            continue
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        bits: list[str] = []
+        file = getattr(module, "__file__", None)
+        if isinstance(file, str):
+            bits.append(file)
+        for entry in getattr(module, "__path__", []) or []:
+            bits.append(str(entry))
+        if any(bit.startswith(root_s) for bit in bits):
+            sys.modules.pop(name, None)
+
+
 async def session_no_responders(root: Path) -> dict[str, Any]:
     """One real ``amain`` submit against an api with no TD worker.
 
@@ -523,6 +551,7 @@ async def session_no_responders(root: Path) -> dict[str, Any]:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+        _drop_loaded_strategy(key, data)
     if not out.is_file():
         return {"exit_code": code, "missing_result": True, "wall_s": wall}
     fields = {}

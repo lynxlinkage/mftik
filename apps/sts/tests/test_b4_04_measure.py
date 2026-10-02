@@ -7,6 +7,7 @@ the long run from ``scripts/b4_04_measure.py``.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -35,6 +36,12 @@ async def test_submit_without_td_waits_out_the_ack(
 ) -> None:
     result = await measure.session_no_responders(tmp_path)
     print(result)
+    leaked = [
+        name
+        for name in sys.modules
+        if name.startswith("_mftik_reg_private_B404")
+    ]
+    assert leaked == []
     assert result["exit_code"] == 0
     assert result["accepted"] is False
     assert result["code"] == int(RejectCode.TD_NO_ACK)
