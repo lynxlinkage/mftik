@@ -5,8 +5,10 @@ dead-man's-switch slot per venue. Paper submit, cancel, unsettled
 ``oms.view`` and ``ledger.view`` answer. An unwired worker refuses an
 order with ``TD_VENUE_NOT_CONNECTED`` and returns an empty book.
 Starting without a connector, settled ``oms.view``, ``oms.order``,
-keepalive, backfill, the broadcast and the dead-man's switch still
-raise ``NotImplementedError("IF-11")``. ``cancel_session`` is B6-03:
+keepalive, the broadcast and the dead-man's switch still raise
+``NotImplementedError("IF-11")``. Backfill answers: a payload that is
+not a ``TdBackfill`` is refused, it does not raise. ``cancel_session``
+is B6-03:
 an empty payload is ``invalid_payload``, and a worker with no session
 refuses the call because the order path has no book.
 
@@ -26,6 +28,7 @@ from mftik.procman.spec import validate_worker_id
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_BACKFILL_RESULT,
     TD_ERROR,
     TD_LEDGER_VIEW,
     TD_OMS_ORDER,
@@ -35,6 +38,7 @@ from mftik.protocol import (
     OrderCancel,
     OrderSubmit,
     RejectCode,
+    TdBackfillResult,
     TdCancelSessionRequest,
     TdLedgerViewRequest,
     TdOmsOrderRequest,
@@ -231,11 +235,14 @@ async def test_actions_raise_the_ticket_number() -> None:
     assert reply.payload.code == "invalid_payload"
     with pytest.raises(RuntimeError, match="session"):
         await worker.orders.cancel_session(TdCancelSessionRequest(session_id=SESSION))
+    backfill = await worker.resident.handle_backfill(message)
+    assert backfill is not None
+    assert backfill.type == TD_BACKFILL_RESULT
+    assert TdBackfillResult.model_validate(backfill.payload).ok is False
     calls = [
         worker.resident.start(),
         worker.resident.close(),
         worker.resident.keepalive_once(),
-        worker.resident.handle_backfill(message),
         worker.trading.activate(),
         worker.trading.deactivate(),
         worker.oms(message),

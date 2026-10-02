@@ -7,8 +7,9 @@ where they are; this package is how an account worker holds them.
 Paper order entry is B4-05. ``cancel_session`` is B6-03. The TD
 process spawns ``python -m mftik_td.account`` and does not import
 this package. The warm HTTP pool and its keepalive are the resident
-layer (B6-01). Settled ``oms.view``, ``oms.order``, backfill,
-the broadcast and the dead-man's switch stay later B6 tickets.
+layer (B6-01). Backfill on that pool is B6-05. Settled
+``oms.view``, ``oms.order``, the broadcast and the dead-man's switch
+stay later B6 tickets.
 
 **State authority (§3.3).** One writer each.
 

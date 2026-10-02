@@ -122,7 +122,8 @@ class FakeFactory:
         self.reader = reader
         self.error = error
 
-    async def create(self, venue, row):
+    async def create(self, venue, row, client=None):
+        self.client = client
         if self.error is not None:
             raise self.error
         return self.reader

@@ -1,5 +1,11 @@
 """Serves ``td.backfill`` for as long as the process lives.
 
+The walk belongs to the account worker (F35). Each request is forwarded
+to ``td.account.{api_id}`` and the worker's reply is what the caller
+gets. When nobody is subscribed there — a non-paper account, until a
+worker is spawned for it — this process runs the walk itself and logs
+that. The fallback goes away once every bound account has a worker.
+
 Deliberately unlike the trading sessions next to it. Those are held by one
 process at a time, because an account is traded by one strategy and two of them
 disagreeing about who owns it matters. A history read is owned by nobody: any
@@ -24,9 +30,10 @@ import asyncio
 import logging
 from typing import Any
 
-from mftik.broker import Broker
+from mftik.broker import Broker, NoRespondersError, RequestTimeoutError
 from mftik.broker.request import IncomingRequest
 from mftik.protocol import (
+    TD_BACKFILL,
     TD_BACKFILL_RESULT,
     Envelope,
     TdBackfill,
@@ -35,14 +42,32 @@ from mftik.protocol import (
 )
 
 from mftik_td.backfill.executor import BackfillExecutor, BackfillOutcome
+from mftik_td.backfill.trigger import REQUEST_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
-#: Accounts backfilling at once in one process. A ceiling on concurrency, not a
-#: rate limiter — each account paces itself and holds its own lock; this is the
-#: cruder guard behind that, so a burst of requests cannot open a venue
-#: connection per account all at once.
+#: Accounts backfilling at once in this process. Only the fallback path
+#: counts: a request the account worker accepted is not one of these.
+#: A ceiling on concurrency, not a rate limiter — each account paces
+#: itself and holds its own lock; this is the cruder guard behind that,
+#: so a burst of requests cannot open a venue connection per account
+#: all at once.
 MAX_RUNS_IN_FLIGHT = 4
+
+#: How long to wait for the account worker's accept. The same budget a
+#: detach already spends asking (:data:`REQUEST_TIMEOUT_S`). The walk
+#: is not what this waits for: the worker acks, then runs out of band.
+#: No responders give up sooner, on the broker's own re-ask ceiling.
+FORWARD_TIMEOUT_S = REQUEST_TIMEOUT_S
+
+
+def in_flight_reason(running: int) -> str:
+    """What a saturated backfill answers with, instead of queueing.
+
+    The account worker uses the same sentence when that account already
+    has a run. A new refusal would be a second way to say the same thing.
+    """
+    return f"{running} runs already in flight"
 
 #: How long the serve loop waits before rebuilding itself after an exception it
 #: did not expect. ``Broker.serve`` already survives what it knows how to
@@ -69,6 +94,7 @@ class BackfillSession:
         instance: str = "td",
         max_in_flight: int = MAX_RUNS_IN_FLIGHT,
         stop_grace: float = STOP_GRACE_S,
+        forward_timeout: float = FORWARD_TIMEOUT_S,
     ) -> None:
         self._broker = broker
         self._executor = executor
@@ -78,6 +104,7 @@ class BackfillSession:
         self._instance = instance
         self._max_in_flight = max_in_flight
         self._stop_grace = stop_grace
+        self._forward_timeout = forward_timeout
         self._runs: set[asyncio.Task[Any]] = set()
         self._stop = asyncio.Event()
         self._task: asyncio.Task[Any] | None = None
@@ -150,16 +177,21 @@ class BackfillSession:
             )
             return
 
+        forwarded = await self._forward(payload)
+        if forwarded is not None:
+            await self._reply_forwarded(req, forwarded)
+            return
+
         if len(self._runs) >= self._max_in_flight:
             # Refused rather than queued: the sender is a schedule or a detach
             # that will ask again, and a request held here is one nothing can
-            # see the state of.
+            # see the state of. The account worker is not in this count.
             await self._reply(
                 req,
                 BackfillOutcome(
                     api_id=payload.api_id,
                     ok=False,
-                    reason=f"{len(self._runs)} runs already in flight",
+                    reason=in_flight_reason(len(self._runs)),
                 ),
             )
             return
@@ -174,9 +206,81 @@ class BackfillSession:
         self._runs.add(task)
         task.add_done_callback(self._runs.discard)
 
+    async def _forward(self, payload: TdBackfill) -> TdBackfillResult | None:
+        """The account worker's reply, or ``None`` to run the walk here.
+
+        ``None`` is only "nobody is subscribed". A worker that accepted
+        the request and then went quiet is not a reason to open a second
+        connection from this process.
+        """
+        envelope = Envelope[TdBackfill].wrap(
+            payload, type=TD_BACKFILL, source="td"
+        )
+        try:
+            reply = await self._broker.request(
+                Topics.td_account(payload.api_id),
+                envelope,
+                timeout=self._forward_timeout,
+            )
+        except NoRespondersError:
+            logger.info(
+                "TD backfill no account worker api_id=%s; "
+                "running in this process",
+                payload.api_id,
+            )
+            return None
+        except RequestTimeoutError:
+            logger.warning(
+                "TD backfill account worker timed out api_id=%s",
+                payload.api_id,
+            )
+            return TdBackfillResult(
+                api_id=payload.api_id,
+                ok=False,
+                reason="account worker did not answer",
+            )
+        except Exception:
+            logger.exception(
+                "TD backfill forward failed api_id=%s", payload.api_id
+            )
+            return TdBackfillResult(
+                api_id=payload.api_id,
+                ok=False,
+                reason="account worker request failed",
+            )
+        try:
+            return TdBackfillResult.model_validate(reply.payload)
+        except Exception as exc:
+            logger.warning(
+                "TD backfill worker reply unreadable api_id=%s",
+                payload.api_id,
+                exc_info=True,
+            )
+            return TdBackfillResult(
+                api_id=payload.api_id,
+                ok=False,
+                reason=f"invalid: {exc}",
+            )
+
     async def _run(self, payload: TdBackfill) -> None:
         await self._executor.run(
             payload.api_id, tickers=payload.tickers, reason=payload.reason
+        )
+
+    async def _reply_forwarded(
+        self, req: IncomingRequest, result: TdBackfillResult
+    ) -> None:
+        await self._reply(
+            req,
+            BackfillOutcome(
+                api_id=result.api_id,
+                ok=result.ok,
+                tickers=list(result.tickers),
+                fills=result.fills,
+                orders=result.orders,
+                confirmed_through_ts=result.confirmed_through_ts,
+                reason=result.reason,
+            ),
         )
 
     async def _reply(self, req: IncomingRequest, outcome: BackfillOutcome) -> None:
@@ -207,4 +311,9 @@ class BackfillSession:
             logger.exception("TD backfill reply failed api_id=%s", outcome.api_id)
 
 
-__all__ = ["MAX_RUNS_IN_FLIGHT", "BackfillSession"]
+__all__ = [
+    "FORWARD_TIMEOUT_S",
+    "MAX_RUNS_IN_FLIGHT",
+    "BackfillSession",
+    "in_flight_reason",
+]

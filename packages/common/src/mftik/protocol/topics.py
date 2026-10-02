@@ -425,6 +425,11 @@ class Topics:
         owned is the API key's rate-limit budget, fenced with a lock per
         ``api_id`` rather than by the subject — see
         :mod:`mftik_td.backfill.executor`.
+
+        The schedule still sends here (F35). The TD process forwards each
+        request to the account worker on ``td.account.{api_id}`` and
+        returns that reply. The walk uses the worker's resident pool.
+        A subject with no worker falls back to the walk in this process.
         """
         return f"td.backfill.{instance}"
 

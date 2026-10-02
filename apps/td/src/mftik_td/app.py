@@ -30,6 +30,7 @@ from mftik.procman import (
     pinned_releases_path,
     publish_reports,
 )
+from mftik.protocol import UntypedEnvelope
 from mftik.symbols import SymbolClient
 
 from mftik_td import db as td_db
@@ -87,7 +88,13 @@ async def run_rpc(
     reason to stop answering on the other.
     """
     logger.info("TD RPC listening on subject=%s", subject)
-    await serve(broker, subject, dispatch, stop=stop)
+
+    async def handle(message: UntypedEnvelope):
+        # The broker and the instance are this process's. A delete that
+        # leaves an account idle asks for a detach backfill through them.
+        return await dispatch(message, broker=broker, instance=INSTANCE)
+
+    await serve(broker, subject, handle, stop=stop)
 
 
 async def _reconcile_once(
