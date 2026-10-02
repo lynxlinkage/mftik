@@ -24,7 +24,15 @@ the controller (§7.1).
 **cancel_session (F10, C1–C4).**
 
 * **C1.** Every OMS order whose ``client_order_id`` session field equals
-  the request's ``session_id`` is in scope. Other sessions are not.
+  the request's ``session_id`` is in scope, and so is every order the
+  venue still lists as open for that session. A recon can drop a
+  ``PENDING_NEW`` while ``place_order`` is in flight; the ack is then
+  ignored and the order rests at the venue with nothing in the book.
+  After this session's in-flight submits return, one
+  ``fetch_open_orders`` puts those listed orders back on the book.
+  That is not a second :meth:`~mftik_td.account.session.Session.reconcile`:
+  reconcile replaces the book, which is what drops the order.
+  Other sessions are not in scope.
   The field is :func:`mftik.strategy.client_order_id.session_id_of`.
 * **C2.** ``PENDING_NEW`` and ``UNKNOWN`` stay in scope. They are
   resolved first, then treated like any other order: resting is
@@ -202,6 +210,7 @@ class _CancelRun:
     chased: set[str] = field(default_factory=set)
     cancel_tried: set[str] = field(default_factory=set)
     recon_done: bool = False
+    listed: bool = False
 
 
 class OrderHandler:
@@ -504,6 +513,11 @@ class OrderHandler:
                 if cid:
                     run.seen.add(cid)
                     await self._cancel_one(session, run, cid)
+            # The book is not the whole scope. A recon (this account's
+            # other session, startup, reconnect) can drop a PENDING_NEW
+            # while place_order is out, and the ack is then ignored.
+            # The venue listing is what still has the live order.
+            await self._adopt_listed(session, run)
             self._scope(session, run)
             if self._settled(session, run):
                 return
@@ -522,6 +536,37 @@ class OrderHandler:
                         await self._cancel_one(session, run, cid)
                 continue
             return
+
+    async def _adopt_listed(self, session: Session, run: _CancelRun) -> None:
+        """Book this session's venue open orders that the book has lost.
+
+        Once per call, after this session's in-flight submits have
+        returned. ``fetch_open_orders`` is the listing; it does not
+        replace the book the way :meth:`Session.reconcile` does.
+        A connector with no such method keeps the book as its scope
+        (the contract fakes). An order already on the book is left
+        alone. One that does not decode, or belongs to another
+        session, is not booked.
+        """
+        if run.listed:
+            return
+        run.listed = True
+        fetch = getattr(session.private, "fetch_open_orders", None)
+        if fetch is None:
+            return
+        listed = await fetch()
+        for order in listed:
+            cid = order.client_order_id
+            if not cid or self._session_of(cid) != run.session_id:
+                continue
+            if order.status.is_terminal():
+                continue
+            if cid in run.confirmed or cid in run.cancel_tried:
+                continue
+            if session.oms.get_order(cid) is not None:
+                continue
+            session.oms.handle_order(order)
+            run.seen.add(cid)
 
     async def _wait_inflight(self, session_id: str) -> list[Order]:
         """Wait until this session has no submit inside ``place_order``.

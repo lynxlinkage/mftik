@@ -838,3 +838,97 @@ async def test_cancel_session_dispatch_replies_with_the_result() -> None:
     assert result.ok is True
     assert result.session_id == SESSION_A
     assert result.unconfirmed == []
+
+
+@pytest.mark.component
+@pytest.mark.parametrize("venue_type", [_Paper, _Venue], ids=["paper", "venue"])
+async def test_a_live_order_the_book_dropped_is_still_cancelled(
+    venue_type: type,
+) -> None:
+    """A recon that drops PENDING_NEW does not make a later cancel a no-op.
+
+    ``place_order`` then returns NEW and ``accept_venue_order`` ignores
+    the ack. The order is resting at the venue and absent from the book.
+    ``cancel_session`` has to cancel it. ``ok=True`` with nothing sent
+    is the bug.
+    """
+    clock = FakeClock()
+    venue = venue_type()
+    worker, session = _with_session(venue, _oms(), clock=clock)
+    cid = _cid(SESSION_A, 1)
+    await session.record_pending_new(
+        _resting(cid, OrderStatus.PENDING_NEW), session_id=SESSION_A
+    )
+    await session.reconcile()
+    live = _resting(cid, OrderStatus.NEW)
+    venue.open_orders = [live]
+    await session.accept_venue_order(live)
+    assert cid not in session.oms.view().orders
+    result = await worker.orders.cancel_session(
+        TdCancelSessionRequest(session_id=SESSION_A), timeout=5
+    )
+    assert result.ok is True
+    assert result.unconfirmed == []
+    assert venue.cancelled == [cid]
+    assert cid not in session.oms.view().orders
+
+
+@pytest.mark.component
+async def test_another_sessions_paper_recon_does_not_hide_a_live_order() -> None:
+    """``cancel_session`` for B reconciles and drops A's in-flight order.
+
+    A's submit then lands as NEW and the ack is ignored. A's own
+    ``cancel_session`` still has to cancel that resting order.
+    """
+    clock = FakeClock()
+    cid_a = _cid(SESSION_A, 1)
+    cid_b = _cid(SESSION_B, 1)
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    class _SlowPaper(_Paper):
+        async def place_order(self, request: PlaceOrderRequest) -> Order:
+            started.set()
+            await release.wait()
+            order = _resting(request.client_order_id or "", OrderStatus.NEW)
+            self.open_orders.append(order)
+            return order
+
+    venue = _SlowPaper()
+    worker, _session = _with_session(
+        venue, _oms(_resting(cid_b, OrderStatus.PENDING_NEW)), clock=clock
+    )
+    worker.trading._active = True  # noqa: SLF001 — activate() would start the sweeper
+    submit = asyncio.create_task(
+        worker.orders.submit(
+            OrderSubmit(
+                session_id=SESSION_A,
+                api_id=API,
+                universal_ticker=TICKER,
+                side=Side.BUY,
+                type=OrderType.LIMIT,
+                qty=Decimal("0.01"),
+                price=Decimal("1"),
+                client_order_id=cid_a,
+            )
+        )
+    )
+    await started.wait()
+    assert cid_a in worker.trading.oms.view().orders
+    result_b = await worker.orders.cancel_session(
+        TdCancelSessionRequest(session_id=SESSION_B), timeout=5
+    )
+    assert result_b.ok is True
+    assert cid_a not in worker.trading.oms.view().orders
+    assert cid_a not in venue.cancelled
+    release.set()
+    ack = await submit
+    assert ack.accepted is True
+    assert cid_a not in worker.trading.oms.view().orders
+    result_a = await worker.orders.cancel_session(
+        TdCancelSessionRequest(session_id=SESSION_A), timeout=5
+    )
+    assert result_a.ok is True
+    assert result_a.unconfirmed == []
+    assert cid_a in venue.cancelled
+    assert cid_a not in worker.trading.oms.view().orders
