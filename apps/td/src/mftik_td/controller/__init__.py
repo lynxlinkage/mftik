@@ -15,8 +15,10 @@ The running process registers :func:`intent_handler` on
 constructs :class:`TdOrchestrator` with the provisional
 :class:`~mftik.procman.RestartIntensity` built from
 :mod:`mftik_td.controller.defaults` (issue #286). Held intents are a
-:class:`TdIntentBook`. ``PUSH_TRADING`` is named and not delivered
-(P5, B6-02). B6-04 does drain-replace. The pid fence is
+:class:`TdIntentBook`. ``PUSH_TRADING`` is named here and delivered
+by :mod:`mftik_td.supervise` as ``td.account.trading`` (B6-02). Silence
+from this controller is still not a deactivate (P5). B6-04 does
+drain-replace. The pid fence is
 :func:`~mftik.procman.previous_worker_gone` on :class:`AccountView`,
 and :meth:`~mftik.procman.Supervisor.spawn` still enforces it (B3-03,
 F36). This package does not import strategy code and does not carry

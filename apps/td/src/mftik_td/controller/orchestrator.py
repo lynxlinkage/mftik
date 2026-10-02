@@ -5,8 +5,8 @@ The running TD process constructs this
 :mod:`mftik_td.controller.defaults`, provisional, pending issue #286)
 and calls
 :meth:`TdOrchestrator.reconcile`. :mod:`mftik_td.supervise` applies
-``SPAWN``, ``STOP`` and ``RELEASE``. ``PUSH_TRADING`` is named and not
-delivered: there is no wire type yet (B6-02). The held intents live on
+``SPAWN``, ``STOP`` and ``RELEASE``, and delivers ``PUSH_TRADING`` as
+``td.account.trading`` (B6-02). The held intents live on
 :class:`~mftik_td.controller.TdIntentBook`. B6-04 fills in
 drain-replace. ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`.
 ``MARK_FAILED``, and ``NONE`` while the shim is still waiting, name
@@ -230,8 +230,9 @@ class TdOrchestrator:
         table (B3-03).
 
         B4-07 names the actions. :mod:`mftik_td.supervise` applies
-        ``SPAWN``, ``STOP`` and ``RELEASE``. ``PUSH_TRADING`` stays in
-        the tuple and is not delivered.
+        ``SPAWN``, ``STOP`` and ``RELEASE``, and delivers
+        ``PUSH_TRADING`` as ``td.account.trading``. The action stays in
+        this tuple either way.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
