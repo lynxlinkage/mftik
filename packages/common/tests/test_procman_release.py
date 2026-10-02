@@ -125,8 +125,10 @@ def test_current_release_refuses_when_mftik_is_not_installed(
 def test_only_the_release_module_reads_the_environment() -> None:
     """``STRATEGON_RELEASE_VERSION`` has one reader. Planes call the function.
 
-    The worker heartbeat reads ``MFTIK_STATUS_FD`` (S6). That is a
-    different variable, and the only other ``os.environ`` in this package.
+    The worker heartbeat reads ``MFTIK_STATUS_FD`` (S6). Admission reads
+    ``PROCMAN_MAX_WORKERS`` and ``PROCMAN_MEMORY_BUDGET_MB`` (B4-09).
+    ``decide_admission`` and ``Supervisor`` still do not read the
+    environment; the plane asks ``admission_budget_from_environ``.
     """
     root = Path(current_release.__code__.co_filename).resolve().parent
     hits = [
@@ -134,10 +136,14 @@ def test_only_the_release_module_reads_the_environment() -> None:
         for path in sorted(root.rglob("*.py"))
         if "os.environ" in path.read_text()
     ]
-    assert hits == ["heartbeat.py", "release.py"]
+    assert hits == ["decisions.py", "heartbeat.py", "release.py"]
     beat = (root / "heartbeat.py").read_text()
     assert _ENV not in beat
     assert "STATUS_FD_ENV" in beat
+    decisions = (root / "decisions.py").read_text()
+    assert _ENV not in decisions
+    assert "PROCMAN_MAX_WORKERS" in decisions
+    assert "PROCMAN_MEMORY_BUDGET_MB" in decisions
     assert _RELEASE_ENV == _ENV
 
 

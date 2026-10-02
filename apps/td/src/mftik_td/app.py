@@ -26,6 +26,7 @@ from mftik.intent_gc import watch_sts_reports
 from mftik.procman import (
     CloseMode,
     Supervisor,
+    admission_budget_from_environ,
     current_release,
     pinned_releases_path,
     publish_reports,
@@ -201,7 +202,7 @@ async def amain() -> bool:
             _work_dir(),
             plane="td",
             instance=INSTANCE,
-            budget=None,
+            budget=admission_budget_from_environ("td"),
             # The pin file lives under the Strategon work dir, not under
             # ``td/<instance>``. ``None`` while that variable is unset.
             pin_path=pinned_releases_path(),

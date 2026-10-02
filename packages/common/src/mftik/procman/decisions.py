@@ -22,13 +22,16 @@ for the next incarnation.
 
 Admission (B3-05, §4.7) is :func:`decide_admission`. It is pure: no
 ``/proc`` walk, no shim. The orchestrator supplies an
-:class:`AdmissionBudget` and this module does not choose the numbers or
-read the environment. A spawn whose id is already held is a restart, not
+:class:`AdmissionBudget`. :func:`decide_admission` does not choose the
+numbers and does not read the environment. A plane process may call
+:func:`admission_budget_from_environ` when it builds the supervisor.
+A spawn whose id is already held is a restart, not
 a start, and is admitted.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -37,7 +40,14 @@ from types import MappingProxyType
 
 from mftik.procman.errors import InvalidWorkerSpec
 from mftik.procman.messages import WorkerHeartbeat
-from mftik.procman.spec import PLANES, RESTART_MODES, Plane, RestartMode, WorkerSpec
+from mftik.procman.spec import (
+    PLANES,
+    RESTART_MODES,
+    Plane,
+    RestartMode,
+    WorkerSpec,
+    estimates_mib,
+)
 from mftik.procman.state import ALIVE_PHASES, WorkerPhase
 
 #: How fast a ``BACKOFF`` delay grows with ``attempt``.
@@ -392,10 +402,13 @@ class AdmissionBudget:
     """The orchestrator's admission budget for one plane instance (§4.7).
 
     ``max_workers`` and ``memory_budget_mb`` are ``None`` when that limit
-    is off. Procman does not choose either number, has no default for
-    them, and does not read the environment. The orchestrator does. No
-    budget at all, on :class:`~mftik.procman.Supervisor`, is the same as
-    both limits ``None``: nothing is refused.
+    is off. Procman does not choose either number and has no default
+    for them. :func:`decide_admission` and
+    :class:`~mftik.procman.Supervisor` do not read the environment. A
+    plane process may build this object with
+    :func:`admission_budget_from_environ`. No budget at all, on
+    :class:`~mftik.procman.Supervisor`, is the same as both limits
+    ``None``: nothing is refused.
 
     ``memory_budget_mb`` and ``estimate_mb`` are mebibytes (1024×1024
     bytes), the MiB §4.7 uses for the shim. :func:`decide_admission`
@@ -435,6 +448,59 @@ class AdmissionBudget:
         object.__setattr__(self, "max_workers", max_workers)
         object.__setattr__(self, "memory_budget_mb", memory)
         object.__setattr__(self, "estimate_mb", MappingProxyType(estimate))
+
+
+#: Plane process environment. Unset or blank is that limit off.
+PROCMAN_MAX_WORKERS = "PROCMAN_MAX_WORKERS"
+PROCMAN_MEMORY_BUDGET_MB = "PROCMAN_MEMORY_BUDGET_MB"
+
+
+def admission_budget_from_environ(
+    plane: str,
+    environ: Mapping[str, str] | None = None,
+) -> AdmissionBudget | None:
+    """The budget a plane process passes to its supervisor (§4.7).
+
+    ``PROCMAN_MAX_WORKERS`` and ``PROCMAN_MEMORY_BUDGET_MB``. Unset or
+    blank leaves that limit off. Both unset returns ``None``, which is
+    no budget: nothing is refused, the same as today. A set value is a
+    positive decimal integer with no sign and no leading zero. Anything
+    else raises :class:`~mftik.procman.InvalidWorkerSpec` rather than
+    silently turning the limit off. ``0`` is not a limit.
+
+    ``estimate_mb`` is :func:`mftik.procman.spec.estimates_mib` for
+    ``plane`` only. An unknown plane raises. This function is the only
+    reader of those variables. :func:`decide_admission` and
+    :class:`~mftik.procman.Supervisor` do not call it.
+    """
+    if plane not in PLANES:
+        raise InvalidWorkerSpec(
+            f"plane {plane!r} is not one of {', '.join(PLANES)}"
+        )
+    source = os.environ if environ is None else environ
+    max_workers = _env_positive_int(source, PROCMAN_MAX_WORKERS)
+    memory = _env_positive_int(source, PROCMAN_MEMORY_BUDGET_MB)
+    if max_workers is None and memory is None:
+        return None
+    return AdmissionBudget(
+        max_workers=max_workers,
+        memory_budget_mb=memory,
+        estimate_mb=dict(estimates_mib(plane)),
+    )
+
+
+def _env_positive_int(environ: Mapping[str, str], name: str) -> int | None:
+    if name not in environ:
+        return None
+    raw = environ[name]
+    if not isinstance(raw, str):
+        raise InvalidWorkerSpec(f"{name} must be a positive integer")
+    text = raw.strip()
+    if text == "":
+        return None
+    if not text.isdigit() or text[0] == "0":
+        raise InvalidWorkerSpec(f"{name} must be a positive integer, got {text!r}")
+    return int(text)
 
 
 @dataclass(frozen=True)

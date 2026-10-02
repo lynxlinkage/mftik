@@ -27,8 +27,15 @@ RESTART_MODES: tuple[RestartMode, ...] = ("never", "on_failure")
 #: kernel prefers these processes when it has to kill something. Controller
 #: and shim stay at :data:`CONTROLLER_OOM_SCORE_ADJ` / :data:`SHIM_OOM_SCORE_ADJ`
 #: and are absent here. An STS offload child is +900 and is also absent: it
-#: is a child of the session worker (§5.5), not a worker kind (§3.1). B4
-#: replaces these numbers with measured RSS.
+#: is a child of the session worker (§5.5), not a worker kind (§3.1).
+#:
+#: B4-09 measured worker-tree Pss and left these numbers. The size order
+#: was account, then session, then MD, which is not this sacrifice order.
+#: The adjustment still dominates that gap, so a session is still chosen
+#: before an MD worker and an MD worker before an account worker. Rewriting
+#: the scores to follow raw RSS would sacrifice the account worker first.
+#: :data:`KIND_RSS_ESTIMATE_MIB` lives beside this table; that is what
+#: the measurement sets.
 OOM_SCORE_ADJ: Mapping[tuple[str, str], int] = MappingProxyType(
     {
         ("sts", "session"): 800,
@@ -37,6 +44,35 @@ OOM_SCORE_ADJ: Mapping[tuple[str, str], int] = MappingProxyType(
         ("td", "account"): 100,
     }
 )
+
+#: Worker-only RSS estimate in MiB, keyed by ``(plane, kind)`` (§4.7).
+#:
+#: B4-09 measured ``procman.report`` ``rss_bytes`` (Pss of the worker
+#: process tree, not the shim, not ``VmRSS``) and rounded each kind up
+#: to the next MiB. ``session`` is the higher of idle and a loaded
+#: strategy. ``account`` is the higher of trading off and trading on.
+#: The shim is not in this table: admission adds one shim on top of
+#: every counted worker. Provisional (#286).
+KIND_RSS_ESTIMATE_MIB: Mapping[tuple[str, str], int] = MappingProxyType(
+    {
+        ("sts", "session"): 69,
+        ("md", "conn"): 61,
+        ("md", "fetch"): 60,
+        ("td", "account"): 79,
+    }
+)
+
+
+def estimates_mib(plane: str) -> Mapping[str, int]:
+    """Kind → MiB for one plane. Empty when ``plane`` is not a procman plane."""
+    return MappingProxyType(
+        {
+            kind: mib
+            for (item_plane, kind), mib in KIND_RSS_ESTIMATE_MIB.items()
+            if item_plane == plane
+        }
+    )
+
 
 #: Shim and controller are left at the kernel default. Lowering it would
 #: need ``CAP_SYS_RESOURCE``, which the plane does not have (§4.7).

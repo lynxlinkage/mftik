@@ -103,6 +103,7 @@ from mftik.procman.decisions import (
     ReattachAction,
     RestartDecision,
     RestartIntensity,
+    admission_budget_from_environ,
     classify_failure,
     count_restarts_in_window,
     decide_admission,
@@ -160,6 +161,7 @@ from mftik.procman.shim import ShimClient, SpawnedShim, spawn_shim
 from mftik.procman.shim import main as shim_main
 from mftik.procman.spec import (
     CONTROLLER_OOM_SCORE_ADJ,
+    KIND_RSS_ESTIMATE_MIB,
     OOM_SCORE_ADJ,
     PLANES,
     RESTART_MODES,
@@ -167,6 +169,7 @@ from mftik.procman.spec import (
     Plane,
     RestartMode,
     WorkerSpec,
+    estimates_mib,
     validate_worker_id,
 )
 from mftik.procman.state import (
@@ -189,6 +192,7 @@ from mftik.procman.supervisor import (
 
 __all__ = [
     "ALIVE_PHASES",
+    "KIND_RSS_ESTIMATE_MIB",
     "AdmissionBudget",
     "AdmissionDecision",
     "AdmissionReason",
@@ -238,10 +242,12 @@ __all__ = [
     "WorkerPhase",
     "WorkerSpec",
     "WorkerStatus",
+    "admission_budget_from_environ",
     "classify_failure",
     "count_restarts_in_window",
     "current_release",
     "decide_admission",
+    "estimates_mib",
     "decode_command",
     "decode_exit",
     "decode_heartbeat",
