@@ -19,19 +19,26 @@ the plan does not give them numbers, so this layer does not invent any.
 The supervisor does not apply :func:`plan_restart` itself. The orchestrator
 does, then waits ``delay_s`` and calls :meth:`~mftik.procman.Supervisor.spawn`
 for the next incarnation.
+
+Admission (B3-05, §4.7) is :func:`decide_admission`. It is pure: no
+``/proc`` walk, no shim. The orchestrator supplies an
+:class:`AdmissionBudget` and this module does not choose the numbers or
+read the environment. A spawn whose id is already held is a restart, not
+a start, and is admitted.
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 
 from mftik.procman.errors import InvalidWorkerSpec
 from mftik.procman.messages import WorkerHeartbeat
-from mftik.procman.spec import PLANES, RESTART_MODES, Plane, RestartMode
-from mftik.procman.state import WorkerPhase
+from mftik.procman.spec import PLANES, RESTART_MODES, Plane, RestartMode, WorkerSpec
+from mftik.procman.state import ALIVE_PHASES, WorkerPhase
 
 #: How fast a ``BACKOFF`` delay grows with ``attempt``.
 #:
@@ -350,3 +357,295 @@ def observe_heartbeat(
     if beat is None:
         return previous_ready
     return beat.ready
+
+
+#: One shim's RSS, added once per counted worker (§4.7).
+#:
+#: B3-01 measured ``VmRSS`` at 14576 kB (Python 3.12.3, the worker in
+#: ``time.sleep``, the shim blocked in ``poll``, read from
+#: ``/proc/<pid>/status``). Linux reports that field in KiB, so the byte
+#: figure is ``14576 * 1024`` (about 14.2 MiB). Admission uses this
+#: constant. It does not walk ``/proc``. This is not
+#: :data:`~mftik.procman.spec.SHIM_OOM_SCORE_ADJ`, which stays 0.
+SHIM_VMRSS_BYTES = 14576 * 1024
+
+#: ``memory_budget_mb`` and ``estimate_mb`` are mebibytes. Converted once.
+_BYTES_PER_MIB = 1024 * 1024
+
+
+class AdmissionReason(StrEnum):
+    """Why :func:`decide_admission` refused a new worker.
+
+    ``WORKERS`` and ``MEMORY`` become :class:`~mftik.procman.CapacityExceeded`
+    (``capacity_exceeded``). ``UNKNOWN_KIND`` is a :class:`~mftik.procman.ProcmanError`:
+    a memory budget is set and a counted worker's kind has no estimate.
+    That is not taken as zero, and it is not a capacity code.
+    """
+
+    WORKERS = "workers"
+    MEMORY = "memory"
+    UNKNOWN_KIND = "unknown_kind"
+
+
+@dataclass(frozen=True)
+class AdmissionBudget:
+    """The orchestrator's admission budget for one plane instance (§4.7).
+
+    ``max_workers`` and ``memory_budget_mb`` are ``None`` when that limit
+    is off. Procman does not choose either number, has no default for
+    them, and does not read the environment. The orchestrator does. No
+    budget at all, on :class:`~mftik.procman.Supervisor`, is the same as
+    both limits ``None``: nothing is refused.
+
+    ``memory_budget_mb`` and ``estimate_mb`` are mebibytes (1024×1024
+    bytes), the MiB §4.7 uses for the shim. :func:`decide_admission`
+    converts them to bytes once. ``estimate_mb`` is keyed by
+    :attr:`~mftik.procman.WorkerSpec.kind` and is the worker only. One
+    shim (:data:`SHIM_VMRSS_BYTES`) is added per counted worker on top.
+    A kind with no estimate, while ``memory_budget_mb`` is set, is
+    refused. It is not taken as zero.
+
+    Only a spawn for an id the supervisor does not already hold is
+    subject to this budget. Replacing a held slot of the same id — a
+    restart after ``record_restart``, or a new incarnation over
+    ``FAILED``, ``CRASHED``, ``BACKOFF``, ``FATAL``, ``STOPPED`` or
+    ``LOST`` — is not refused, and that slot is not counted twice.
+    Refusing a restart would turn an MD or TD crash into an outage.
+    ``release_slot`` and ``close(stop)`` drop the slot, so it leaves
+    this count with ``_slots``.
+    """
+
+    max_workers: int | None
+    memory_budget_mb: int | None
+    estimate_mb: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        max_workers = _optional_positive_int(self.max_workers, "max_workers")
+        memory = _optional_positive_int(self.memory_budget_mb, "memory_budget_mb")
+        raw_estimate = self.estimate_mb
+        if isinstance(raw_estimate, str) or not isinstance(raw_estimate, Mapping):
+            raise InvalidWorkerSpec("estimate_mb must map kinds to positive ints")
+        estimate: dict[str, int] = {}
+        for key, value in raw_estimate.items():
+            if not isinstance(key, str) or key == "":
+                raise InvalidWorkerSpec(
+                    "estimate_mb must map non-empty kind strings to positive ints"
+                )
+            estimate[key] = _positive_int(value, f"estimate_mb[{key!r}]")
+        object.__setattr__(self, "max_workers", max_workers)
+        object.__setattr__(self, "memory_budget_mb", memory)
+        object.__setattr__(self, "estimate_mb", MappingProxyType(estimate))
+
+
+@dataclass(frozen=True)
+class AdmissionWorker:
+    """One worker :func:`decide_admission` can see.
+
+    A held slot has a :class:`~mftik.procman.WorkerPhase`. An in-flight
+    spawn has no slot yet: pass it in ``spawning`` with ``phase=None``.
+    ``rss_bytes`` is the last measured tree Pss, or ``None`` when no
+    report has stored one. ``0`` is a measurement. Admission does not
+    read ``/proc``.
+    """
+
+    id: str
+    kind: str | None
+    phase: WorkerPhase | None
+    rss_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or self.id == "":
+            raise ValueError("id must be a non-empty string")
+        if self.kind is not None and (type(self.kind) is not str or self.kind == ""):
+            raise ValueError("kind must be a non-empty string or None")
+        if self.phase is not None and not isinstance(self.phase, WorkerPhase):
+            raise TypeError("phase must be a WorkerPhase or None")
+        rss = self.rss_bytes
+        if rss is not None and (type(rss) is not int or rss < 0):
+            raise ValueError("rss_bytes must be an int >= 0 or None")
+
+
+@dataclass(frozen=True)
+class AdmissionDecision:
+    """Admit, or refuse with a reason the supervisor turns into an error.
+
+    ``admitted`` with ``reason is None`` is an admission. Otherwise
+    ``reason`` says which check failed and ``message`` names the limit
+    and the numbers, or the kind that has no estimate.
+    """
+
+    admitted: bool
+    reason: AdmissionReason | None
+    message: str
+
+
+def decide_admission(
+    *,
+    budget: AdmissionBudget | None,
+    held: Sequence[AdmissionWorker],
+    spawning: Sequence[AdmissionWorker],
+    candidate: WorkerSpec,
+) -> AdmissionDecision:
+    """Admit ``candidate`` or refuse it, without launching anything.
+
+    ``budget is None``, and a budget whose ``max_workers`` and
+    ``memory_budget_mb`` are both ``None``, admit. That is no limit.
+
+    Workers that count: held slots in :data:`~mftik.procman.ALIVE_PHASES`,
+    plus every id in ``spawning`` that is not already one of those, plus
+    ``candidate`` when it is not already in that set. A held slot in any
+    other phase does not count. The same id is counted once; a live slot's
+    measured ``rss_bytes`` wins over the in-flight estimate.
+
+    An id that appears in ``held`` — any phase, including ``LOST`` — is
+    a restart of a slot the supervisor already holds. It is admitted and
+    not counted twice. ``spawn`` still refuses a live phase before it
+    asks, which is the state machine's rule, not this one. A ``LOST``
+    slot is admitted here. The F36 fence runs after this check and still
+    refuses one whose worker pid is alive.
+
+    Memory, when ``memory_budget_mb`` is set: for each counted worker,
+    the last measured ``rss_bytes`` when it has one (including ``0``),
+    otherwise ``estimate_mb`` for its kind, plus one
+    :data:`SHIM_VMRSS_BYTES`. A missing estimate is
+    :attr:`AdmissionReason.UNKNOWN_KIND`, not zero. The worker count is
+    checked first. Over ``max_workers`` is reported even when a kind
+    also has no estimate. Equal to a limit is inside it; only a count
+    or a byte total past the limit is refused.
+
+    This does not read ``/proc`` and does not reserve the id.
+    """
+    if budget is not None and not isinstance(budget, AdmissionBudget):
+        raise TypeError(
+            "budget must be an AdmissionBudget or None; "
+            "this layer does not choose the numbers"
+        )
+    if not isinstance(candidate, WorkerSpec):
+        raise TypeError("candidate must be a WorkerSpec")
+    held_workers = _workers(held, "held")
+    spawning_workers = _workers(spawning, "spawning")
+    for worker in held_workers:
+        if not isinstance(worker.phase, WorkerPhase):
+            raise TypeError("a held worker needs a WorkerPhase")
+    if budget is None or (
+        budget.max_workers is None and budget.memory_budget_mb is None
+    ):
+        return _allow()
+    if any(worker.id == candidate.id for worker in held_workers):
+        return _allow()
+
+    counted = _counted(held_workers, spawning_workers, candidate)
+    if budget.max_workers is not None and len(counted) > budget.max_workers:
+        return _refuse(
+            AdmissionReason.WORKERS,
+            (
+                f"max_workers exceeded: spawning {candidate.id} would make "
+                f"{len(counted)} workers, max_workers is {budget.max_workers}"
+            ),
+        )
+    if budget.memory_budget_mb is None:
+        return _allow()
+
+    estimates = {
+        kind: mib * _BYTES_PER_MIB for kind, mib in budget.estimate_mb.items()
+    }
+    budget_bytes = budget.memory_budget_mb * _BYTES_PER_MIB
+    total = 0
+    for worker in sorted(counted, key=lambda item: item.id):
+        resident = _resident_bytes(worker, estimates)
+        if resident is None:
+            return _refuse(
+                AdmissionReason.UNKNOWN_KIND,
+                (
+                    f"no memory estimate for kind {worker.kind!r} "
+                    f"of worker {worker.id!r}; a memory budget is set "
+                    "and procman does not treat a missing estimate as zero"
+                ),
+            )
+        total += resident
+    if total > budget_bytes:
+        return _refuse(
+            AdmissionReason.MEMORY,
+            (
+                f"memory_budget_mb exceeded: spawning {candidate.id} would use "
+                f"{total} bytes, memory_budget_mb is {budget.memory_budget_mb} "
+                f"({budget_bytes} bytes)"
+            ),
+        )
+    return _allow()
+
+
+def _optional_positive_int(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    return _positive_int(value, name)
+
+
+def _positive_int(value: object, name: str) -> int:
+    # ``bool`` is an ``int`` subclass. A flag here would be a budget bug.
+    if type(value) is not int or value <= 0:
+        raise InvalidWorkerSpec(f"{name} must be a positive int")
+    return value
+
+
+def _workers(value: object, name: str) -> tuple[AdmissionWorker, ...]:
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise TypeError(f"{name} must be a sequence of AdmissionWorker")
+    workers: list[AdmissionWorker] = []
+    for item in value:
+        if not isinstance(item, AdmissionWorker):
+            raise TypeError(f"{name} must be a sequence of AdmissionWorker")
+        workers.append(item)
+    return tuple(workers)
+
+
+def _counted(
+    held: Sequence[AdmissionWorker],
+    spawning: Sequence[AdmissionWorker],
+    candidate: WorkerSpec,
+) -> tuple[AdmissionWorker, ...]:
+    """Live slots, in-flight spawns not already live, then the candidate."""
+    alive: dict[str, AdmissionWorker] = {}
+    for worker in held:
+        if worker.phase in ALIVE_PHASES and worker.id not in alive:
+            alive[worker.id] = worker
+    counted: list[AdmissionWorker] = list(alive.values())
+    seen = set(alive)
+    for worker in spawning:
+        if worker.id in seen:
+            continue
+        seen.add(worker.id)
+        counted.append(worker)
+    if candidate.id not in seen:
+        counted.append(
+            AdmissionWorker(
+                id=candidate.id,
+                kind=candidate.kind,
+                phase=None,
+                rss_bytes=None,
+            )
+        )
+    return tuple(counted)
+
+
+def _resident_bytes(
+    worker: AdmissionWorker, estimates: Mapping[str, int]
+) -> int | None:
+    """Worker bytes plus one shim, or ``None`` when the kind has no estimate.
+
+    A stored ``rss_bytes`` (including ``0``) is the measurement. Only a
+    missing one falls through to ``estimates``.
+    """
+    if worker.rss_bytes is not None:
+        return worker.rss_bytes + SHIM_VMRSS_BYTES
+    if worker.kind is None or worker.kind not in estimates:
+        return None
+    return estimates[worker.kind] + SHIM_VMRSS_BYTES
+
+
+def _allow() -> AdmissionDecision:
+    return AdmissionDecision(admitted=True, reason=None, message="")
+
+
+def _refuse(reason: AdmissionReason, message: str) -> AdmissionDecision:
+    return AdmissionDecision(admitted=False, reason=reason, message=message)

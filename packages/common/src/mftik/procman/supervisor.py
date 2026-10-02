@@ -66,13 +66,22 @@ from typing import Any
 from mftik.clock import Clock, SystemClock
 from mftik.instance import validate_instance_name
 from mftik.procman.decisions import (
+    AdmissionBudget,
+    AdmissionReason,
+    AdmissionWorker,
     FailureCause,
     ObservedWorker,
     RestartDecision,
     classify_failure,
+    decide_admission,
     previous_worker_gone,
 )
-from mftik.procman.errors import InvalidWorkerId, MessageError, ProcmanError
+from mftik.procman.errors import (
+    CapacityExceeded,
+    InvalidWorkerId,
+    MessageError,
+    ProcmanError,
+)
 from mftik.procman.messages import (
     ExitRecord,
     ShimStatus,
@@ -116,6 +125,31 @@ _REPLACEABLE: frozenset[WorkerPhase] = frozenset(
         WorkerPhase.STOPPED,
     }
 )
+
+
+class _InFlight(set[str]):
+    """Ids :meth:`Supervisor.spawn` has reserved, and the kind of each.
+
+    A ``set``, so the reservation check stays ``id in self._spawning``.
+    ``kinds`` is how admission prices an in-flight spawn before a report
+    has stored a Pss. :meth:`discard` and :meth:`clear` drop the kind too,
+    including when a launch fails after the id was reserved.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kinds: dict[str, str] = {}
+
+    def note(self, worker_id: str, kind: str) -> None:
+        self.kinds[worker_id] = kind
+
+    def discard(self, element: str) -> None:
+        super().discard(element)
+        self.kinds.pop(element, None)
+
+    def clear(self) -> None:
+        super().clear()
+        self.kinds.clear()
 
 
 class CloseMode(StrEnum):
@@ -1468,6 +1502,10 @@ class Supervisor:
     ``proc_root`` is the ``/proc`` a report reads. Tests pass a fake tree.
     Production leaves it as the host ``/proc``, which ``oci_host_pid``
     bind-mounts (§4.5).
+
+    ``budget`` is the orchestrator's :class:`~mftik.procman.AdmissionBudget`,
+    or ``None`` for no limit. This class does not read the environment and
+    does not invent ``max_workers`` or ``memory_budget_mb`` (§4.7).
     """
 
     def __init__(
@@ -1478,18 +1516,26 @@ class Supervisor:
         instance: str,
         clock: Clock | None = None,
         proc_root: Path | None = None,
+        budget: AdmissionBudget | None = None,
     ) -> None:
         if plane not in PLANES:
             raise ValueError(f"plane {plane!r} is not one of {', '.join(PLANES)}")
+        if budget is not None and not isinstance(budget, AdmissionBudget):
+            raise TypeError(
+                "budget must be an AdmissionBudget or None; "
+                "this layer does not choose the numbers"
+            )
         self.work_dir = Path(work_dir)
         self.plane: Plane = plane
         self.instance = validate_instance_name(instance)
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._proc_root = Path("/proc") if proc_root is None else Path(proc_root)
+        self._budget = budget
         self._slots: dict[str, _Slot] = {}
         # Ids whose :meth:`spawn` has passed the slot check and not yet
         # published the new slot. Held across the unlocked launch.
-        self._spawning: set[str] = set()
+        # ``kinds`` prices an in-flight spawn that has no measured Pss yet.
+        self._spawning = _InFlight()
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
         self._driver: asyncio.Task[None] | None = None
@@ -1626,6 +1672,30 @@ class Supervisor:
     async def spawn(self, spec: WorkerSpec) -> None:
         """Spawn ``spec`` on this supervisor's plane.
 
+        Admission (B3-05, §4.7) runs under this lock before the id is
+        reserved, before :func:`_fence_pid`, and before
+        :meth:`_write_spawn_intent`. It sits outside the try that
+        releases the reservation, so a refusal does not reserve the id,
+        does not retire a held slot, and does not leave a
+        ``supervisor.json`` row. Only an id this supervisor does not
+        hold is subject to it. Replacing a held slot — a restart after
+        :meth:`record_restart`, or a new incarnation over ``FAILED``,
+        ``CRASHED``, ``BACKOFF``, ``FATAL``, ``STOPPED`` or ``LOST`` —
+        is not refused, and that slot is not counted twice. Refusing a
+        restart would turn an MD or TD crash into an outage. The count
+        is the current ``_slots`` plus ids in ``_spawning``.
+        :meth:`release_slot` and ``close(stop)`` remove slots, so a
+        dropped worker leaves the count with them. With no budget, or
+        with both limits ``None``, nothing is refused. Exceeding
+        ``max_workers`` or ``memory_budget_mb`` raises
+        :class:`~mftik.procman.CapacityExceeded` (``capacity_exceeded``).
+        A counted kind with no estimate raises
+        :class:`~mftik.procman.ProcmanError` and is not
+        ``capacity_exceeded``. Either refusal launches nothing: no shim,
+        no socket, and the id is not left in ``_spawning``. The check
+        uses the last reported Pss and the orchestrator's per-kind
+        estimate. It does not walk ``/proc``.
+
         The spec's plane has to be this supervisor's plane. Replacing a
         held slot releases that incarnation's shim first, because the
         socket path is per worker id. A slot in ``BACKOFF`` enters
@@ -1678,6 +1748,9 @@ class Supervisor:
                         f"incarnation {spec.incarnation} must be greater than "
                         f"the held incarnation {retiring.spec.incarnation}"
                     )
+            # Before the reservation, the fence, and the pre-shim record.
+            # A refusal stays outside the try that releases ``_spawning``.
+            self._enforce_admission(spec)
             self._spawning.add(spec.id)
             try:
                 blocked = _fence_pid(self.work_dir, spec.id, retiring)
@@ -1734,6 +1807,50 @@ class Supervisor:
         finally:
             async with self._lock:
                 self._spawning.discard(spec.id)
+
+    def _enforce_admission(self, spec: WorkerSpec) -> None:
+        """Refuse a new id the budget cannot hold. Called under the spawn lock.
+
+        A held id is a restart and is not refused, including ``LOST``.
+        The workers that count are the slots still in ``_slots`` and the
+        ids already in ``_spawning``. On success the kind is noted so the
+        next spawn can count this reservation once it is in
+        ``_spawning``. Nothing here reads ``/proc``, writes
+        ``supervisor.json``, or launches a shim.
+        """
+        budget = self._budget
+        if budget is None:
+            return
+        held = tuple(
+            AdmissionWorker(
+                id=slot.spec.id,
+                kind=slot.spec.kind,
+                phase=slot.phase,
+                rss_bytes=slot.rss_bytes,
+            )
+            for slot in self._slots.values()
+        )
+        spawning = tuple(
+            AdmissionWorker(
+                id=worker_id,
+                kind=self._spawning.kinds.get(worker_id),
+                phase=None,
+                rss_bytes=None,
+            )
+            for worker_id in self._spawning
+        )
+        decision = decide_admission(
+            budget=budget,
+            held=held,
+            spawning=spawning,
+            candidate=spec,
+        )
+        if decision.admitted:
+            self._spawning.note(spec.id, spec.kind)
+            return
+        if decision.reason is AdmissionReason.UNKNOWN_KIND:
+            raise ProcmanError(decision.message)
+        raise CapacityExceeded(decision.message)
 
     async def stop(self, worker_id: str) -> None:
         """``SIGTERM`` the worker, then ``SIGKILL`` if it outlives ``stop_grace_s``.
