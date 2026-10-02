@@ -53,6 +53,7 @@ import os
 import signal
 import socket
 import struct
+import tempfile
 import time
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -1001,19 +1002,58 @@ def decode_supervisor_state(payload: bytes) -> tuple[SupervisorRecord, ...]:
     return records
 
 
+async def _await_blocking(func: Any, *args: Any) -> None:
+    """Run ``func(*args)`` in a thread, and finish it even if we are cancelled.
+
+    ``asyncio.to_thread`` does not stop the thread when the awaiting task
+    is cancelled, and cancelling drops an ``async with`` lock at the
+    ``await``. This holds the caller in the function until the thread
+    returns, then re-raises :class:`asyncio.CancelledError`.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    current = asyncio.current_task()
+    if current is None:
+        await task
+        return
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        pending = 0
+        while current.cancelling():
+            current.uncancel()
+            pending += 1
+        try:
+            await task
+        finally:
+            for _ in range(pending):
+                current.cancel()
+        raise
+
+
 def _write_state(
     work_dir: Path, records: tuple[SupervisorRecord, ...] | list[SupervisorRecord]
 ) -> None:
-    """Write ``supervisor.json`` via a temp file and ``rename``, like ``exit.json``."""
+    """Write ``supervisor.json`` via a temp file and ``rename``, like ``exit.json``.
+
+    The temp name is unique. ``close`` can cancel the driver while a write
+    is inside ``asyncio.to_thread``, and that thread keeps running after
+    the task has been cancelled. Two writers must not share one temp file.
+    """
     path = supervisor_state_path(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    data = encode_supervisor_state(records)
-    with tmp.open("wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    fd, raw = tempfile.mkstemp(
+        prefix="supervisor.json.", suffix=".tmp", dir=path.parent
+    )
+    tmp = Path(raw)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encode_supervisor_state(records))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def load_supervisor_state(work_dir: Path) -> tuple[SupervisorRecord, ...]:
@@ -1315,7 +1355,7 @@ def _probe_worker(
             ready=False,
             pid=record.worker_pid if record is not None else None,
             exit_code=None,
-            signal=None,
+            sig=None,
             beats=0,
             since_s=now_s,
             shim_pid=shim_pid,
@@ -1848,7 +1888,11 @@ class Supervisor:
                         self._slots.values(), key=lambda item: item.spec.id
                     )
                 )
-            await asyncio.to_thread(_write_state, self.work_dir, records)
+            # Finish the write before releasing the lock. Cancelling the
+            # driver (``close``) must not let a second snapshot rename over
+            # this one, and must not drop the lock while the thread still
+            # holds the temp file.
+            await _await_blocking(_write_state, self.work_dir, records)
 
     async def _stop_held_workers(self) -> None:
         async with self._lock:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -716,10 +717,23 @@ def _ps_family(work_dir: Path) -> tuple[set[int], set[int]]:
     return shims, workers
 
 
+def _marker(work_dir: Path, name: str) -> Path:
+    """A file whose path does not contain ``work_dir``.
+
+    :func:`_ps_family` treats every live argv that contains the work
+    directory as a shim. A worker that writes a marker has to do it
+    outside that directory, or it is counted as a second shim.
+    """
+    directory = Path("/tmp") / "mftik-markers" / work_dir.name
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / name
+
+
 def _reap_workdir(work_dir: Path) -> None:
     shims, _workers = _ps_family(work_dir)
     for pid in shims:
         _kill_tree(pid)
+    shutil.rmtree(Path("/tmp") / "mftik-markers" / work_dir.name, ignore_errors=True)
 
 
 def _peer(path: Path) -> int | None:
@@ -1137,6 +1151,7 @@ async def test_start_holds_an_exited_worker_from_the_exit_file(tmp_path: Path) -
         _record(spec, WorkerPhase.RUNNING, worker_pid=dead, worker_start_ticks=4),
     )
     path = exit_record_path(tmp_path, spec.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(
         encode_exit(
             ExitRecord(
@@ -1212,7 +1227,7 @@ async def test_release_slot_refuses_a_lost_worker_whose_pid_is_still_alive(
 
 
 async def test_detach_leaves_a_held_slot_and_cancels_the_driver(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    supervisor = Supervisor(tmp_path, plane="td", instance="td", clock=FakeClock())
     spec = _spec()
     slot = _hold(supervisor, spec, WorkerPhase.RUNNING, shim_pid=0)
     supervisor._ensure_driver_locked()
@@ -1240,7 +1255,7 @@ async def test_spawn_replaces_a_lost_slot_whose_pid_is_gone(
     """The new incarnation enters through ``STOPPED`` + ``SPAWN``. No edge
     leaves ``LOST``. The launch itself is faked: the real process is the
     integration test."""
-    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    supervisor = Supervisor(tmp_path, plane="td", instance="td", clock=FakeClock())
     spec = _spec()
     _hold(
         supervisor,
@@ -1285,8 +1300,8 @@ async def test_detach_reattach_does_not_spawn_a_duplicate_and_killing_the_shim_s
     """§4.4 and the ticket: detach leaves the worker, a new supervisor
     reattaches it, and killing the shim makes that worker stop on SIGTERM
     with no exit file."""
-    marker = tmp_path / "caught"
-    ready = tmp_path / "ready"
+    marker = _marker(tmp_path, "caught")
+    ready = _marker(tmp_path, "ready")
     spec = _spec(
         _argv(_CATCH_TERM, str(marker), str(ready)),
         labels={"desk": "a"},
@@ -1412,7 +1427,7 @@ async def test_reattach_rearms_the_heartbeat_window(tmp_path: Path) -> None:
 async def test_spawn_over_lost_refuses_while_the_old_pid_is_alive(
     tmp_path: Path,
 ) -> None:
-    ignoring = tmp_path / "ignoring"
+    ignoring = _marker(tmp_path, "ignoring")
     spec = _spec(
         _argv(_IGNORE_TERM, str(ignoring)),
         start_timeout_s=30,
@@ -1503,9 +1518,9 @@ async def test_spawn_without_start_refuses_a_worker_still_recorded_alive(
     tmp_path: Path,
 ) -> None:
     """The fence reads ``supervisor.json`` when this process holds no slot."""
-    ready = tmp_path / "ready"
+    ready = _marker(tmp_path, "ready")
     spec = _spec(
-        _argv(_CATCH_TERM, str(tmp_path / "caught"), str(ready)),
+        _argv(_CATCH_TERM, str(_marker(tmp_path, "caught")), str(ready)),
         hb_timeout_s=None,
         start_timeout_s=30,
     )
