@@ -17,6 +17,7 @@ import pytest
 from broker_harness import server_address, server_is_up
 from db_harness import POSTGRES_URL_ENV, dialect_urls
 from sleep_guard import arm, disarm, install
+from tier_budget import apply_timeouts, database_params, enforce_call_budget
 
 # Before any test, including ones collected from a path that does not import
 # this module's helpers again. Idempotent if a plugin imports it twice.
@@ -79,16 +80,21 @@ def pytest_asyncio_loop_factories(
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Fail on a missing service rather than testing something weaker.
 
-    Two of them, for the same reason. A Postgres service that failed to come up
-    would not turn the build red on its own — the suite would run against sqlite
-    alone and pass, which is the state that parametrisation exists to end. And
-    the broker has no fake at all any more, so a missing server is not a
-    degradation but sixty modules of confusing connection errors; saying so once,
-    here, is worth more than each of them saying it.
+    Postgres is the integration job's dialect (§9.1 rule 6). That job sets
+    ``MFTIK_REQUIRE_POSTGRES``; if the service did not come up, the postgres
+    parameter would simply be absent and the job would go green without it.
+    The unit job does not set the variable: sqlite is the dialect it is
+    supposed to run. The broker has no fake at all any more, so a missing
+    server is not a degradation but sixty modules of confusing connection
+    errors; saying so once, here, is worth more than each of them saying it.
     """
-    if os.getenv("CI") and "postgres" not in dialect_urls():
+    # The unit+component job is sqlite on purpose (§9.1 rule 6). The
+    # integration job sets this and fails here if its Postgres never came
+    # up — otherwise that dialect would quietly not be parametrized.
+    if os.getenv("MFTIK_REQUIRE_POSTGRES") and "postgres" not in dialect_urls():
         raise pytest.UsageError(
-            f"{POSTGRES_URL_ENV} is unset: CI would test sqlite only."
+            f"{POSTGRES_URL_ENV} is unset: the integration job would "
+            f"skip the Postgres dialect."
         )
     if not server_is_up():
         host, port = server_address()
@@ -101,10 +107,25 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if "database_url" in metafunc.fixturenames:
-        urls = dialect_urls()
         metafunc.parametrize(
-            "database_url", list(urls.values()), ids=list(urls), scope="function"
+            "database_url", database_params(dialect_urls()), scope="function"
         )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    del config
+    apply_timeouts(items)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: object) -> object:
+    """Apply the §9.1 call-phase cap after the call, before the report is logged."""
+    del call
+    report = yield
+    enforce_call_budget(item, report)
+    return report
 
 
 @pytest.hookimpl(wrapper=True)

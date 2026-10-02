@@ -30,6 +30,10 @@ from mftik.protocol import (
     probe_is_stale,
 )
 
+# §9.1 component (shared NATS client). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SUBJECT = Topics.health("md", "md-jp-1")
 
 
@@ -67,6 +71,8 @@ async def test_a_probe_to_nobody_times_out(broker: Broker) -> None:
 DEAD_PROBES = 64
 
 
+# probe deadline is the behaviour; over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="NATS no-responders grace is a real asyncio.sleep"
 )

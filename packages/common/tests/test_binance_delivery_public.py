@@ -18,6 +18,10 @@ from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.models import AggTrade, Side
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
 NATIVE = "BTCUSD_PERP"
 SIZE = Decimal("100")

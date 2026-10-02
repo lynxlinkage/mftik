@@ -1,10 +1,10 @@
 """The shared NATS connection: one per xdist worker, prefixes unsubscribed.
 
 F31. ``broker`` borrows the session connection; this file checks that borrow
-and the ``/connz`` count the ticket asks for. pytest-xdist is not installed
-yet (B2-04), so the count under a normal run is 1. The comparison is against
-:func:`xdist_worker_count`, which reads ``PYTEST_XDIST_WORKER_COUNT`` when a
-worker is running.
+and the ``/connz`` count. The count is shared clients only
+(:func:`shared_client_rows`): private ``a_broker`` sockets are still opened
+by tests B2-05 has not moved, and under ``-n`` they are not this worker's
+connection.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from broker_harness import (
     fetch_connz,
     prefixed_broker,
     session_loop,
+    shared_client_name,
+    shared_client_rows,
     subjects_under,
     xdist_worker_count,
 )
@@ -35,6 +37,25 @@ def test_xdist_worker_count_reads_the_worker_env(
 ) -> None:
     monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "4")
     assert xdist_worker_count() == 4
+
+
+def test_connz_count_ignores_private_clients() -> None:
+    """A private socket must not inflate the per-worker count."""
+    report = {
+        "num_connections": 4,
+        "connections": [
+            {"name": "mftik-pytest-gw0"},
+            {"name": "mftik-pytest-gw1"},
+            {"name": ""},
+            {"cid": 7},
+        ],
+    }
+    rows = shared_client_rows(report)
+    assert [row["name"] for row in rows] == [
+        "mftik-pytest-gw0",
+        "mftik-pytest-gw1",
+    ]
+    assert report["num_connections"] == 4
 
 
 @session_loop
@@ -73,24 +94,24 @@ async def test_two_prefixes_share_the_connection_and_leave_it_up(
 
 
 @session_loop
+@pytest.mark.component
 async def test_one_nats_connection_per_xdist_worker(
     broker: Broker,
     nats_connection: NatsClient,
 ) -> None:
-    """``/connz`` reports one live connection per xdist worker.
+    """This worker's shared client is on ``/connz``, and only one of them.
 
-    Sampled in this test, while only the shared connection is held. A test
-    that has not moved to ``broker`` still opens a private socket for its
-    own body and closes it before returning, so it is not in this count.
-    With one worker — xdist is not installed yet — the count is 1.
+    Private ``a_broker`` sockets are not named ``mftik-pytest-``, so they
+    cannot inflate the count. Other workers open a shared client only when
+    one of their tests asks for it, so the total is at most the worker
+    count rather than exactly it.
     """
     assert broker.transport.nc is nats_connection
     assert nats_connection.is_connected
 
-    report = fetch_connz()
-    expected = xdist_worker_count()
-    names = [row.get("name", "") for row in report.get("connections", [])]
-    assert report["num_connections"] == expected, (
-        f"/connz num_connections={report['num_connections']}, "
-        f"xdist workers={expected}, names={names}"
-    )
+    names = [
+        str(row.get("name", "")) for row in shared_client_rows(fetch_connz())
+    ]
+    assert names.count(shared_client_name()) == 1
+    assert len(names) == len(set(names))
+    assert len(names) <= xdist_worker_count()

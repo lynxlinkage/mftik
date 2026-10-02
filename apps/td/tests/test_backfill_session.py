@@ -28,6 +28,10 @@ from mftik.protocol import (
 from mftik_td.backfill.executor import BackfillOutcome
 from mftik_td.backfill.session import BackfillSession
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 API_ID = 7
 
 

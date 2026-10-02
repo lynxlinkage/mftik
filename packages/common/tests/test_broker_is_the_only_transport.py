@@ -41,6 +41,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 #: The tree, found from this file rather than from the working directory so
 #: the check is the same under `pytest packages` and `pytest` at the root.
 ROOT = Path(__file__).resolve().parents[3]
@@ -104,6 +106,8 @@ def _leaks(path: Path) -> list[str]:
     return found
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 def test_the_scan_reaches_the_tree() -> None:
     """A guard that checked nothing would pass every time."""
     files = _sources()
@@ -114,6 +118,8 @@ def test_the_scan_reaches_the_tree() -> None:
     )
 
 
+# walks every src tree; over the 500 ms component cap
+@pytest.mark.integration
 def test_no_domain_talks_to_a_store_directly() -> None:
     leaks = [leak for path in _sources() for leak in _leaks(path)]
 

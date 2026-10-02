@@ -23,6 +23,10 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.tickers import Category, UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: Bybit's spelling happens to differ from the canonical one here on purpose,
 #: so a test would catch a connector that passed symbols through untranslated.
 NATIVE = "BTC-USDT"

@@ -189,6 +189,8 @@ async def test_a_websocket_with_a_session_reaches_the_endpoint(db) -> None:
     assert seen["principal"].via == "password"
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 def test_the_public_surface_is_the_one_we_meant() -> None:
     """Read from the real app, so a new route cannot join the list quietly.
 

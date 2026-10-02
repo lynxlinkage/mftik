@@ -16,6 +16,10 @@ from mftik.exchange.deribit.socket import DEFAULT_HEARTBEAT, DEFAULT_MAX_SIZE
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close, CloseCode
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def test_a_reply_correlates_on_id() -> None:
     resp = DeribitResponse({"jsonrpc": "2.0", "id": 7, "result": ["ok"]})
@@ -177,6 +181,8 @@ async def test_a_summaries_refusal_names_the_rpc(deribit: FakeDeribit) -> None:
             raise AssertionError("expected DeribitWsError")
 
 
+# watchdog interval is wall-clock; over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="the venue socket still sleeps on the wall clock"
 )

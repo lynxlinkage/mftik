@@ -33,6 +33,10 @@ from mftik.protocol import (
 )
 from mftik_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder, _floor_hint
 
+# §9.1 component (chase.py still sleeps on the wall clock).
+# Slow cases miss the 50 ms unit cap; 500 ms still applies.
+pytestmark = pytest.mark.component
+
 BTCUSDT = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",
     base="BTC",
@@ -531,6 +535,9 @@ async def test_expiry_with_must_exec_sweeps_the_rest_with_ioc() -> None:
     assert strat.session.exits == ["chase_expired"]
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="chase.py still sleeps on the wall clock"
 )
@@ -556,6 +563,9 @@ async def test_the_sweep_takes_one_level_at_a_time() -> None:
     assert strat._remaining() == Decimal("0")
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="chase.py still sleeps on the wall clock"
 )
@@ -581,6 +591,9 @@ async def test_the_sweep_reprices_off_a_fresher_quote_each_slice() -> None:
     assert slices[-1]["price"] == Decimal("50010")
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="chase.py still sleeps on the wall clock"
 )

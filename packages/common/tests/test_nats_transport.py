@@ -26,6 +26,10 @@ from mftik.broker.transport.nats import (
 )
 from mftik.protocol import Envelope, Topics
 
+# §9.1 component (shared NATS client). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SUBJECT = "demo"
 
 
@@ -78,6 +82,8 @@ async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
         await broker.request(subject, _envelope(), timeout=0.2)
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="NATS no-responders grace is a real asyncio.sleep"
 )
@@ -132,6 +138,8 @@ async def test_a_probe_does_not_wait_for_a_plane_to_turn_up(broker: Broker) -> N
     assert spent < _NO_RESPONDERS_CEILING_S
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="NATS no-responders grace is a real asyncio.sleep"
 )

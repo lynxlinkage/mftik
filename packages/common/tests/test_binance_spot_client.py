@@ -21,6 +21,10 @@ from mftik.exchange.binance.spot.protocol import BinanceWsError
 from mftik.exchange.errors import ExchangeError, ExchangeNotConnectedError
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 
@@ -171,6 +175,8 @@ async def test_unsubscribe_raises_when_a_co_reader_still_holds_the_name(
         assert (await asyncio.wait_for(anext(second), timeout=2.0)).s == "BTCUSDT"
 
 
+# reconnect gap is wall-clock; over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="WireLedger still sleeps on the wall clock"
 )

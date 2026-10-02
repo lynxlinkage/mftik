@@ -404,6 +404,8 @@ async def test_an_oversized_tree_still_rescans_a_shared_disk(
     assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )

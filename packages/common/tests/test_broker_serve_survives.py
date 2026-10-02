@@ -17,7 +17,7 @@ from mftik.protocol import Envelope
 
 SUBJECT = "demo"
 
-pytestmark = session_loop
+pytestmark = [session_loop, pytest.mark.component]
 
 
 def _envelope(n: int) -> Envelope[dict[str, Any]]:

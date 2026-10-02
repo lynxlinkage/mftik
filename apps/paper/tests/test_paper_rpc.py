@@ -12,6 +12,10 @@ from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik_paper.app import BrokerEventBridge
 from mftik_paper.rpc import dispatch
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

@@ -29,6 +29,10 @@ from mftik.exchange.models import (
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.symbols import SymbolNotFoundError
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 NATIVE = "BTCUSD_PERP"
 #: A quarterly. Unlisted on a perp-only plane; listed as Future when both
 #: books are in the resolver.

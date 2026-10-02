@@ -109,6 +109,8 @@ async def test_a_deploy_against_a_missing_credential_refuses(db) -> None:
     assert refused.value.code == "unknown_api"
 
 
+# sqlite call over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="backfill sweep still sleeps on the wall clock"
 )
@@ -138,6 +140,8 @@ async def test_the_sweep_posts_each_account_to_its_own_queue(
         await asyncio.gather(jp_task, us_task, return_exceptions=True)
 
 
+# sqlite call over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="backfill sweep still sleeps on the wall clock"
 )

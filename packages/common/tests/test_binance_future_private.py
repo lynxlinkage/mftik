@@ -38,6 +38,10 @@ from mftik.exchange.models import (
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.symbols import SymbolNotFoundError
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 NATIVE = "BTC-USDT"
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 DATED_NATIVE = "BTCUSDT_250926"

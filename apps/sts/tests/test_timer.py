@@ -6,6 +6,10 @@ import time
 import pytest
 from mftik.strategy.timer import Timer, now_ms
 
+# §9.1 component (wall-clock timer; over the 50 ms unit cap).
+# Slow cases miss the 50 ms unit cap; 500 ms still applies.
+pytestmark = pytest.mark.component
+
 
 @pytest.mark.real_sleep(
     reason="strategy Timer fires on the real loop, not FakeClock"

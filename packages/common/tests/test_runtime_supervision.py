@@ -51,6 +51,8 @@ async def _boom() -> None:
     raise RuntimeError("poll failed")
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )

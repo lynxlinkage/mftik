@@ -260,6 +260,8 @@ async def test_429_is_recorded_and_matching_continues(
     assert len(runtime.pending_events(1)) == 1
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 @pytest.mark.real_sleep(
     reason="alert flush still sleeps on the wall clock"
 )
@@ -291,6 +293,8 @@ async def test_timer_flushes_once(
     assert runtime.pending_events(1) == []
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 @pytest.mark.real_sleep(
     reason="alert flush still sleeps on the wall clock"
 )

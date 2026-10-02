@@ -33,6 +33,10 @@ from mftik.protocol import (
 )
 from mftik_md import app as md_app
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 INSTANCE = "md-jp-1"
 
 #: An active instance to run beside the gated one, so the anycast pool has

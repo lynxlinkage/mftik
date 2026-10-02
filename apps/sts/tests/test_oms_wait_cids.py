@@ -27,6 +27,10 @@ from mftik.strategy import Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S, StrategyOms
 from mftik_sts.session.session import StsSession
 
+# Integration until B2-05. These borrow a private NATS connection
+# to test behaviour, and the slow cases miss the 50 ms unit cap.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

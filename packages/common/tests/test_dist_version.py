@@ -12,6 +12,12 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+import pytest
+
+# Integration: `uv build` is a real subprocess, which unit and
+# component forbid (§9.1).
+pytestmark = pytest.mark.integration
+
 REPO = Path(__file__).resolve().parents[3]
 
 

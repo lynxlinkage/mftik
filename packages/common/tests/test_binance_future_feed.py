@@ -17,6 +17,10 @@ from mftik.exchange.binance.future import streams as st
 from mftik.exchange.binance.future.feed import BinanceFutureStream
 from mftik.exchange.binance.future.protocol import BinanceWsError
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def _feed(public: FakeBinanceStream, market: FakeBinanceStream) -> BinanceFutureStream:
     return BinanceFutureStream(

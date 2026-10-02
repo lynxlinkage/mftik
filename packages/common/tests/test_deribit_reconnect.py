@@ -18,6 +18,10 @@ from mftik.exchange.deribit.account import DeribitPrivateStream
 from mftik.exchange.deribit.feed import DeribitPublicStream
 from websockets.exceptions import ConnectionClosed
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def _fast(url: str, **kwargs: float) -> DeribitPublicStream:
     return DeribitPublicStream(
@@ -184,6 +188,8 @@ async def test_a_dropped_socket_fails_the_pending_request(
         assert deribit.connections == 2
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="the venue socket still sleeps on the wall clock"
 )
@@ -223,6 +229,8 @@ async def test_a_resync_reply_lost_on_drop_does_not_drop_the_restored_socket(
         assert channel in feed._ledger.held()
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="the venue socket still sleeps on the wall clock"
 )
