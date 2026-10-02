@@ -3,8 +3,7 @@
 This is the layer §3.4 names ``mftik_sts.controller``. It replaces
 ``session/manager.py``. Start, end, list, and the reconcile that creates
 or stops a worker are real (B4-02) and wired into the STS process.
-Classifying a crash and choosing a rehang still raise
-``NotImplementedError("IF-04")`` until B5-06. The code-identity pins and
+Classifying a crash and choosing a rehang is B5-06. The code-identity pins and
 the registry / env handler signatures are IF-16; those handlers raise
 ``NotImplementedError("IF-16")`` until B5-10. This package does not
 import strategy code (F39). Artifact and event-log reads stay with
@@ -59,6 +58,7 @@ from mftik_sts.controller.defaults import (
     SESSION_HB_TIMEOUT_S,
     SESSION_START_TIMEOUT_S,
     SESSION_STOP_GRACE_S,
+    STS_CLEANUP_TIMEOUT_S,
     STS_MAX_RESTARTS,
     STS_MIN_BACKOFF_S,
     STS_RESTART_WINDOW_S,
@@ -123,6 +123,7 @@ __all__ = [
     "SESSION_KIND",
     "SESSION_START_TIMEOUT_S",
     "SESSION_STOP_GRACE_S",
+    "STS_CLEANUP_TIMEOUT_S",
     "STS_MAX_RESTARTS",
     "STS_MIN_BACKOFF_S",
     "STS_RESTART_WINDOW_S",

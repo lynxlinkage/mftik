@@ -314,6 +314,10 @@ class SessionStatus:
     ``exit_recorded`` is the shim's ``<id>.exit.json`` (S3). ``pid_gone``
     is the ``/proc`` check. Both have to be true before a new incarnation
     (R1). The shim is the authority for the exit; this layer reads it.
+
+    ``exit_code`` and ``signal`` are that record. Exactly one is set when
+    the shim wrote it. Both stay ``None`` until then. A code of 0 with no
+    signal is a clean exit: cleanup does not run.
     """
 
     phase: SessionPhase = SessionPhase.PENDING
@@ -323,6 +327,8 @@ class SessionStatus:
     exit_recorded: bool = False
     pid: int | None = None
     pid_gone: bool = True
+    exit_code: int | None = None
+    signal: int | None = None
     cleanup: Cleanup = Cleanup.NOT_RUN
     crash_class: CrashClass | None = None
     restarts_in_window: int = 0
@@ -354,6 +360,12 @@ class SessionStatus:
                 raise ValueError("pid must be > 0 or None")
         else:
             pid = None
+        exit_code = _as_optional_int(self.exit_code, "exit_code")
+        if exit_code is not None and not 0 <= exit_code <= 255:
+            raise ValueError("exit_code must be in 0..255 or None")
+        signal_no = _as_optional_int(self.signal, "signal")
+        if signal_no is not None and signal_no <= 0:
+            raise ValueError("signal must be > 0 or None")
         try:
             cleanup = Cleanup(self.cleanup)
         except ValueError as exc:
@@ -389,6 +401,8 @@ class SessionStatus:
         object.__setattr__(self, "worker_incarnation", incarnation)
         object.__setattr__(self, "restart_count", restart_count)
         object.__setattr__(self, "pid", pid)
+        object.__setattr__(self, "exit_code", exit_code)
+        object.__setattr__(self, "signal", signal_no)
         object.__setattr__(self, "cleanup", cleanup)
         object.__setattr__(self, "crash_class", crash_class)
         object.__setattr__(self, "restarts_in_window", in_window)

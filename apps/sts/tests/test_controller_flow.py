@@ -2,8 +2,8 @@
 
 The contract file calls a real Supervisor and must not spawn. These tests
 use a fake supervisor so converge can be watched: the request file, one
-spawn, the running snapshot, and a death recorded as ``failed`` without
-a restart decision.
+spawn, the running snapshot, and a non-zero death recorded as ``failed``
+by the F11 choice (the default ``restart`` is ``never``).
 """
 
 from __future__ import annotations
@@ -93,10 +93,14 @@ class FakeSupervisor:
 
     async def stop(self, worker_id: str) -> None:
         del worker_id
-        self.phase = None
+        # The slot stays readable. A real ``stop`` releases it and the
+        # controller then reads the exit file; this double keeps the
+        # exit code on ``status`` so a finished stop is exit 0.
+        self.phase = WorkerPhase.STOPPED
         self.pid = None
         self.ready = False
         self.exit_code = 0
+        self.signal = None
 
     async def release_slot(self, worker_id: str) -> None:
         self.released.append(worker_id)
@@ -333,7 +337,7 @@ async def test_a_dead_worker_is_failed_without_a_new_spawn(tmp_path: Path) -> No
     listed = _model(reply.payload, ListSessionsResult)
     assert len(listed.sessions) == 1
     assert listed.sessions[0].status == "failed"
-    assert listed.sessions[0].reason == "worker_exited:1"
+    assert listed.sessions[0].reason == "restart_never"
     assert len(supervisor.spawned) == 1
     assert supervisor.released == ["sts/session/abc123"]
 

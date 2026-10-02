@@ -1,4 +1,4 @@
-"""Crash class and the restart decision. Both raise until B5-06.
+"""Crash class and the restart decision (F11, §5.2).
 
 Procman classifies a process as ``FAILED`` or ``CRASHED`` from a ready bit
 and a death, a start timeout, or a heartbeat timeout
@@ -54,26 +54,50 @@ writes ``restarting`` and publishes one error-level line on
 Waiting on the exit record, and not having asked cleanup yet, do not
 publish it.
 
-The backoff curve has no fixed ratio here, same as procman. It is at
-least :data:`~mftik_sts.controller.STS_MIN_BACKOFF_S` and it is strictly
-increasing in ``attempt`` (attempt starts at 1).
+The backoff curve is :data:`~mftik_sts.controller.STS_MIN_BACKOFF_S`
+times ``2 ** (attempt - 1)`` (provisional, #286). It is at least that
+floor and it is strictly increasing in ``attempt`` (attempt starts at 1).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from mftik.procman import RESTART_MODES
 
-from mftik_sts.controller._ticket import unimplemented
-from mftik_sts.controller.defaults import STS_MAX_RESTARTS
+from mftik_sts.controller.defaults import STS_MAX_RESTARTS, STS_MIN_BACKOFF_S
 from mftik_sts.controller.types import (
+    REASON_CLEANUP_PENDING,
+    REASON_CLEANUP_UNCONFIRMED,
+    REASON_CRASH_CLASS_B,
+    REASON_CRASH_CLASS_C,
+    REASON_INIT_FAILURE,
+    REASON_ON_FAILURE,
+    REASON_RESTART_INTENSITY,
+    REASON_RESTART_NEVER,
+    REASON_WAITING_FOR_EXIT,
     Cleanup,
     CrashCause,
     CrashClass,
     ReportSlot,
     RestartDecision,
+    RestartVerdict,
     SessionPhase,
+)
+
+#: ``source`` on the step-1 error line. The worker's own source is
+#: ``sts.session_worker``. The alert pipeline matches the level, not this
+#: string.
+CONTROLLER_LOG_SOURCE = "sts.controller"
+
+_RETAINED = frozenset(
+    {
+        SessionPhase.PENDING,
+        SessionPhase.STARTING,
+        SessionPhase.RUNNING,
+        SessionPhase.STOPPING,
+        SessionPhase.RESTARTING,
+    }
 )
 
 
@@ -85,8 +109,12 @@ def classify_crash(cause: CrashCause) -> CrashClass:
     before ``on_ready`` is still class A, and :func:`decide_restart` is what
     refuses to rehang it.
     """
-    CrashCause(cause)
-    unimplemented()
+    named = CrashCause(cause)
+    if named is CrashCause.STRATEGY_EXCEPTION:
+        return CrashClass.A
+    if named in (CrashCause.HOOK_BLOCKED, CrashCause.STOP_STUCK):
+        return CrashClass.B
+    return CrashClass.C
 
 
 def decide_restart(
@@ -124,8 +152,8 @@ def decide_restart(
             f"restart {restart!r} is not one of {', '.join(RESTART_MODES)}"
         )
     if crash_class is not None:
-        CrashClass(crash_class)
-    Cleanup(cleanup)
+        crash_class = CrashClass(crash_class)
+    cleanup = Cleanup(cleanup)
     for name, value in (
         ("ready", ready),
         ("exit_recorded", exit_recorded),
@@ -146,20 +174,79 @@ def decide_restart(
             "decide_restart is for a crash or an init failure; "
             "ready with no crash class is neither"
         )
-    unimplemented()
+    if not exit_recorded or not pid_gone:
+        return _decided(
+            RestartVerdict.WAIT,
+            REASON_WAITING_FOR_EXIT,
+            alert=False,
+            error_log=False,
+        )
+    if cleanup is Cleanup.NOT_RUN:
+        return _decided(
+            RestartVerdict.CLEANUP,
+            REASON_CLEANUP_PENDING,
+            alert=False,
+            error_log=False,
+        )
+    # Rule 2, 4, or 5 still alerts when an earlier rule already chose failed.
+    alert = (
+        crash_class in (CrashClass.B, CrashClass.C)
+        or restarts_in_window >= max_restarts
+        or cleanup is Cleanup.UNCONFIRMED
+    )
+    if restart == "never":
+        return _decided(
+            RestartVerdict.FAILED, REASON_RESTART_NEVER, alert=alert, error_log=True
+        )
+    if crash_class is CrashClass.B:
+        return _decided(
+            RestartVerdict.FAILED, REASON_CRASH_CLASS_B, alert=True, error_log=True
+        )
+    if crash_class is CrashClass.C:
+        return _decided(
+            RestartVerdict.FAILED, REASON_CRASH_CLASS_C, alert=True, error_log=True
+        )
+    if not ready or crash_class is None:
+        return _decided(
+            RestartVerdict.FAILED, REASON_INIT_FAILURE, alert=alert, error_log=True
+        )
+    if restarts_in_window >= max_restarts:
+        return _decided(
+            RestartVerdict.FAILED,
+            REASON_RESTART_INTENSITY,
+            alert=True,
+            error_log=True,
+        )
+    if cleanup is Cleanup.UNCONFIRMED:
+        return _decided(
+            RestartVerdict.FAILED,
+            REASON_CLEANUP_UNCONFIRMED,
+            alert=True,
+            error_log=True,
+        )
+    return RestartDecision(
+        verdict=RestartVerdict.REHANG,
+        reason=REASON_ON_FAILURE,
+        alert=False,
+        error_log=True,
+        delay_s=backoff_s(attempt),
+        next_incarnation=incarnation + 1,
+        cancels_positions=False,
+    )
 
 
 def backoff_s(attempt: int) -> float:
     """Seconds to wait before incarnation ``attempt``.
 
     At least :data:`~mftik_sts.controller.STS_MIN_BACKOFF_S`, and strictly
-    increasing in ``attempt``. ``attempt`` starts at 1. The ratio is not
-    fixed. R2: the previous incarnation's last order and this one's first
-    fall in different seconds, so a seq that restarts at 0 does not collide.
+    increasing in ``attempt``. ``attempt`` starts at 1. The curve is that
+    floor times ``2 ** (attempt - 1)`` (provisional, #286). R2: the previous
+    incarnation's last order and this one's first fall in different
+    seconds, so a seq that restarts at 0 does not collide.
     """
     if type(attempt) is not int or attempt < 1:
         raise ValueError("attempt starts at 1")
-    unimplemented()
+    return STS_MIN_BACKOFF_S * (2 ** (attempt - 1))
 
 
 def spawn_allowed(
@@ -183,8 +270,8 @@ def spawn_allowed(
     for name, value in (("exit_recorded", exit_recorded), ("pid_gone", pid_gone)):
         if not isinstance(value, bool):
             raise ValueError(f"{name} must be a bool")
-    Cleanup(cleanup)
-    unimplemented()
+    named = Cleanup(cleanup)
+    return exit_recorded and pid_gone and named is Cleanup.CONFIRMED
 
 
 def retains_intents(phase: SessionPhase) -> bool:
@@ -205,11 +292,11 @@ def retains_intents(phase: SessionPhase) -> bool:
       ``procman.report.sts.{instance}`` until the process exits. §8.1's
       ``intent.delete`` after ``on_stop`` is what releases the intents.
 
-    The body still raises. B5-06 fills it in. Publishing the report does
-    not filter phases, so a stopping worker stays listed either way.
+    Publishing the report does not filter phases, so a stopping worker
+    stays listed either way. This function is what :meth:`StsOrchestrator.extra_workers`
+    uses for the gap the supervisor's own list does not cover.
     """
-    SessionPhase(phase)
-    unimplemented()
+    return SessionPhase(phase) in _RETAINED
 
 
 def reported_session_ids(slots: Sequence[ReportSlot]) -> frozenset[str]:
@@ -226,4 +313,51 @@ def reported_session_ids(slots: Sequence[ReportSlot]) -> frozenset[str]:
     for slot in slots:
         if not isinstance(slot, ReportSlot):
             raise ValueError("slots must be a sequence of ReportSlot")
-    unimplemented()
+    return frozenset(
+        slot.session_id for slot in slots if retains_intents(slot.phase)
+    )
+
+
+def crash_log_message(
+    *,
+    crash_class: CrashClass | None,
+    reason: str,
+    incarnation: int,
+    unconfirmed: Mapping[int, Sequence[str]] | None = None,
+) -> str:
+    """The step-1 error line on ``log.sts.{session_id}``.
+
+    The class, the F11 reason, and the incarnation that died. When cleanup
+    is unconfirmed the accounts and the outstanding client order ids are
+    on the same line, including when an earlier rule supplied ``reason``.
+    """
+    label = "-" if crash_class is None else CrashClass(crash_class).value
+    text = f"class={label} reason={reason} incarnation={incarnation}"
+    if not unconfirmed:
+        return text
+    parts: list[str] = []
+    for api_id in sorted(unconfirmed):
+        cids = tuple(unconfirmed[api_id])
+        detail = ",".join(cids) if cids else "timeout"
+        parts.append(f"api_id={api_id}:{detail}")
+    if not parts:
+        return text
+    return f"{text} unconfirmed={' '.join(parts)}"
+
+
+def _decided(
+    verdict: RestartVerdict,
+    reason: str,
+    *,
+    alert: bool,
+    error_log: bool,
+) -> RestartDecision:
+    return RestartDecision(
+        verdict=verdict,
+        reason=reason,
+        alert=alert,
+        error_log=error_log,
+        delay_s=None,
+        next_incarnation=None,
+        cancels_positions=False,
+    )
