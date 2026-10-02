@@ -10,8 +10,8 @@ from mftik.exchange import PaperExchange, Side
 from mftik.exchange.models import OrderStatus, limit_order
 from mftik_td.session import PaperSessionFactory
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test paper session OMS behaviour. Direct handler
+# call: B4-05 (#205).
 pytestmark = pytest.mark.integration
 
 

@@ -13,8 +13,9 @@ sync:
 # `just test-int`. Postgres is not in this set. Needs the broker up:
 # `just up nats`. There is no fake to fall back on. On CI the recipe
 # fails when this step's wall time exceeds 120s — that clock does not
-# include `uv sync` or service startup. A unit or component call over
-# its cap warns on CI (the hook sees `CI`) and still fails locally.
+# include `uv sync` or service startup. CI is `tier_budget.on_ci`
+# (empty, 0, false, no, off are not CI). A unit or component call over
+# its cap warns on CI and still fails locally.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -23,12 +24,11 @@ test:
     uv run --all-packages pytest packages apps -q -n auto -m "not integration and not e2e"
     code=$?
     set -e
+    end=$(date +%s.%N)
+    elapsed=$(python3 -c "print(${end} - ${start})")
+    # check_wall_budget asks on_ci(); off CI it exits 0 without gating.
     wall=0
-    if [ -n "${CI:-}" ]; then
-      end=$(date +%s.%N)
-      elapsed=$(python3 -c "print(${end} - ${start})")
-      uv run --all-packages python scripts/check_wall_budget.py "$elapsed" || wall=$?
-    fi
+    uv run --all-packages python scripts/check_wall_budget.py "$elapsed" || wall=$?
     if [ "$code" -ne 0 ]; then
       exit "$code"
     fi

@@ -16,8 +16,7 @@ from mftik.protocol import (
 )
 from mftik_td.rpc import dispatch
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to reach TD's router. Direct handler call: B4-05 (#205).
 pytestmark = pytest.mark.integration
 
 

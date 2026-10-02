@@ -44,10 +44,6 @@ from mftik.protocol import (
 )
 from mftik.registry.protocol import MFTIK_VERSION
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
-pytestmark = pytest.mark.integration
-
 SUBJECT = "demo.handler"
 
 
@@ -130,8 +126,13 @@ async def test_what_a_plane_says_about_itself_is_read_at_reply_time() -> None:
 
 
 # --- serve, over the bus ---------------------------------------------------
+#
+# B2-05: these open a private socket to test ``serve``. That is the transport
+# half IF-02 tests once; the direct handler calls above stay unit. No later
+# ticket rewrites them into a direct call.
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -159,6 +160,7 @@ async def test_serve_sends_back_what_the_handler_returned(broker: Broker) -> Non
     assert seen[0].type == "demo"
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -207,6 +209,7 @@ async def test_serve_answers_one_message_at_a_time(broker: Broker) -> None:
     assert order == ["start 1", "end 1", "start 2", "end 2"]
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -230,6 +233,7 @@ async def test_a_handler_returning_none_sends_nothing(broker: Broker) -> None:
         await asyncio.wait_for(task, timeout=5)
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -263,6 +267,7 @@ async def test_a_handler_that_raises_costs_one_reply_not_the_subject(
     assert reply.payload == {"n": 2}
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -288,6 +293,7 @@ async def test_a_handler_may_reject_by_returning_a_reject(broker: Broker) -> Non
     assert RpcError.model_validate(reply.payload).code == "unknown_type"
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -319,6 +325,7 @@ async def test_an_unreadable_request_never_reaches_the_handler(
     assert [message.payload for message in seen] == [{"n": 7}]
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -362,6 +369,7 @@ async def test_serve_rebuilds_itself_after_an_unexpected_failure(
     assert reply.payload == {"n": 3}
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
@@ -385,6 +393,7 @@ async def test_stop_ends_the_loop(broker: Broker) -> None:
 # --- the conversion: the wire did not move ---------------------------------
 
 
+@pytest.mark.integration
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )

@@ -33,8 +33,9 @@ from mftik.protocol import (
 )
 from mftik_md import app as md_app
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test MD role gating on ``run_rpc``. ``app.py``
+# wiring is B4-06 (#206). Placement in B8-02 (#239) replaces the role gate.
+# Not a direct handler call.
 pytestmark = pytest.mark.integration
 
 INSTANCE = "md-jp-1"

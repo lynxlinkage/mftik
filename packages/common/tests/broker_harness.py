@@ -67,8 +67,9 @@ def xdist_worker_count() -> int:
     return int(raw)
 
 
-#: Prefix of :func:`shared_client_name`. Private ``a_broker`` sockets do not
-#: use it, so a ``/connz`` count can ignore them (B2-04, until B2-05).
+#: Prefix of :func:`shared_client_name`. Private sockets do not use it, so a
+#: ``/connz`` count can ignore them. B2-05 moved behaviour tests off
+#: ``just test``; the filter stays so a private socket cannot flake the count.
 SHARED_CLIENT_PREFIX = "mftik-pytest-"
 
 

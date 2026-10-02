@@ -12,8 +12,9 @@ from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik_paper.app import BrokerEventBridge
 from mftik_paper.rpc import dispatch
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test the paper engine's order RPC. The engine is
+# outside the plane rewrite (§5–§7); no ticket turns this into a plane
+# handler call. B4-05 (#205) builds the paper resident layer on this engine.
 pytestmark = pytest.mark.integration
 
 

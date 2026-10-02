@@ -29,8 +29,10 @@ from mftik_sym.plane import SymbolPlane
 from mftik_sym.rpc import dispatch, handle_list
 from mftik_sym.sources.base import Instrument
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test SYM RPC. SYM is outside the process-planes
+# refactor (§5–§7); no ticket rewrites this into a direct handler call.
+# Splitting the non-NATS cases would mean changing the module, so the
+# whole file stays integration.
 pytestmark = pytest.mark.integration
 
 VENUE = "Gate"

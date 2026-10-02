@@ -13,8 +13,8 @@ from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import PAPER_ORDER_BOOK, Topics, UntypedEnvelope
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test paper public reads. Product topics become
+# atoms in B7-02g (#234). Not a plane handler call.
 pytestmark = pytest.mark.integration
 
 

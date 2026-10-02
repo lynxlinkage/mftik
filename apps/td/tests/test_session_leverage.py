@@ -19,8 +19,8 @@ from mftik.protocol.messages import SymbolInfo
 from mftik_td.oms import Ledger
 from mftik_td.session.session import Session
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test leverage behaviour. Direct handler call:
+# B6-02 (#220).
 pytestmark = pytest.mark.integration
 
 DATED = UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")

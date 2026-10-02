@@ -30,8 +30,8 @@ from mftik_td.backfill.executor import BackfillExecutor
 from mftik_td.backfill.reader import HistoryPage, NoHistoryReaderError
 from mftik_td.history import order_row
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test the backfill walk. Direct handler call:
+# B6-05 (#223).
 pytestmark = pytest.mark.integration
 
 API_ID = 7

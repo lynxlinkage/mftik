@@ -10,8 +10,8 @@ from mftik.broker import Broker
 from mftik.health import InstanceAlreadyServing, refuse_if_serving
 from mftik.protocol import HealthStatus, HealthStatusEnvelope, Topics
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: boot probe through NATS. F36 replaces ``refuse_if_serving`` with
+# the supervisor's /proc scan in B3-03 (#196). Not a handler call.
 pytestmark = pytest.mark.integration
 
 

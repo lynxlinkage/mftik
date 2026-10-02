@@ -32,8 +32,8 @@ from mftik.protocol import (
 from mftik.strategy.eventlog import DIR_ENV
 from mftik_sts.rpc import dispatch
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test operator event-log reads. Direct handler
+# call: B5-11 (#277). B5-02 (#211) changes the file layout those reads follow.
 pytestmark = pytest.mark.integration
 
 
@@ -172,7 +172,7 @@ async def test_read_returns_the_bytes_gzipped(
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
-# private NATS plus a real sleep; over the 50 ms unit cap. B2-05.
+# private NATS plus a real sleep; over the 50 ms unit cap.
 @pytest.mark.integration
 async def test_chunks_concatenate_into_one_valid_gzip(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch

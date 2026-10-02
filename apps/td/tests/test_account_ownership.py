@@ -20,8 +20,9 @@ from mftik.protocol import (
     Topics,
 )
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: boot probe through NATS (a second TD of the same name). F36
+# replaces this with the supervisor's /proc scan in B3-03 (#196). Not a
+# handler call.
 pytestmark = pytest.mark.integration
 
 

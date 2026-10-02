@@ -228,6 +228,10 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
     assert seen == [2]
 
 
+# B2-05: broker semantics (a subscription on one socket is visible to
+# another). Component forbids a private socket (§9.1), so this case is
+# integration. It is not rewritten into a handler call.
+@pytest.mark.integration
 @session_loop
 async def test_a_cross_connection_subscribe_is_visible_before_publish(
     broker: Broker,
