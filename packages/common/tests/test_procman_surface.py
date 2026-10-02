@@ -1,10 +1,11 @@
 """The procman interface IF-03 defines, and what B3 still has to decide.
 
 The shape is real: ``WorkerSpec`` is §4.3, the transition table is the
-diagram, the NDJSON frames round-trip, and the report payload has the
-fields §3.3 and §4.7 name. The shim is real as of B3-01. Classifying a
-death and planning a restart are real as of B3-02. Reattaching and
-publishing a report still raise ``NotImplementedError("IF-03")``.
+diagram, and the NDJSON frames round-trip. The shim is real as of
+B3-01. Classifying a death and planning a restart are real as of B3-02.
+The liveness report is real as of B3-04; its wire shape is
+:class:`mftik.protocol.v2.ProcmanReport`, not a second type in this
+package. Reattach still raises ``NotImplementedError("IF-03")``.
 
 What B3-03 has to make true is in ``test_procman_contract.py``, as xfail.
 """
@@ -32,9 +33,7 @@ from mftik.procman import (
     InvalidWorkerId,
     InvalidWorkerSpec,
     MessageError,
-    ProcmanReport,
     ReleaseCommand,
-    ReportedWorker,
     ShimStatus,
     SignalCommand,
     StatusQuery,
@@ -47,19 +46,16 @@ from mftik.procman import (
     decode_command,
     decode_exit,
     decode_heartbeat,
-    decode_report,
     decode_status,
     dump_frame,
     encode_command,
     encode_exit,
     encode_heartbeat,
-    encode_report,
     encode_status,
     exit_record_path,
     exit_record_tmp_path,
     load_frame,
     reattach_action,
-    report_subject,
     socket_path,
     supervisor_state_path,
     transition,
@@ -375,62 +371,27 @@ def test_an_unknown_shim_op_is_refused() -> None:
         load_frame(b'{"op":"status"}')
 
 
-def test_report_payload_round_trips() -> None:
-    report = ProcmanReport(
-        plane="md",
-        instance="md-jp-1",
-        generation=3,
-        workers=(
-            ReportedWorker(
-                id="md/conn/Deribit/public/0",
-                incarnation=2,
-                phase=WorkerPhase.BACKOFF,
-                code_ref="v1",
-                rss_bytes=None,
-                ready=False,
-            ),
-        ),
-    )
-    assert decode_report(encode_report(report)) == report
-    assert {item.name for item in fields(ProcmanReport)} == {
-        "plane",
-        "instance",
-        "generation",
-        "workers",
-    }
-    assert {item.name for item in fields(ReportedWorker)} == {
-        "id",
-        "incarnation",
-        "phase",
-        "code_ref",
-        "rss_bytes",
-        "ready",
-    }
-    assert report_subject("md", "md-jp-1") == "procman.report.md.md-jp-1"
-
-
-def test_a_report_refuses_a_second_copy_of_the_same_worker() -> None:
-    worker = ReportedWorker(
-        id="td/account/42",
-        incarnation=1,
-        phase=WorkerPhase.RUNNING,
-        code_ref="v1",
-        rss_bytes=10,
-        ready=True,
-    )
-    with pytest.raises(MessageError):
-        ProcmanReport(plane="td", instance="td", generation=1, workers=(worker, worker))
+def test_the_duplicate_report_types_are_gone() -> None:
+    """The wire type is ``mftik.protocol.v2.ProcmanReport``. One subject helper."""
+    for name in (
+        "ProcmanReport",
+        "ReportedWorker",
+        "encode_report",
+        "decode_report",
+        "report_subject",
+    ):
+        assert not hasattr(procman, name), name
+    assert procman.REPORT_PERIOD_S == 5.0
 
 
 async def test_supervisor_methods_raise_the_ticket(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
-    # spawn, stop and status are real (B3-02). start, close and report
-    # stay with B3-03 and B3-04.
+    # spawn, stop, status and report are real (B3-02, B3-04). start and
+    # close stay with B3-03. close pauses publication, then still raises.
     calls = (
         supervisor.start(),
         supervisor.close(CloseMode.DETACH),
         supervisor.close("stop"),
-        supervisor.report(),
     )
     for call in calls:
         with pytest.raises(NotImplementedError, match=rf"^{TICKET}$"):

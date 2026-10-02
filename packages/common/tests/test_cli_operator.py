@@ -174,7 +174,14 @@ def test_a_result_names_one_target() -> None:
 
 def test_decisions_raise_not_implemented() -> None:
     """共同驗收: the surface returns ``NotImplementedError("IF-15")``."""
-    worker = ProcmanWorker(id="md/conn/a", code_ref="1.4.0", rss_bytes=1)
+    worker = ProcmanWorker(
+        id="md/conn/a",
+        code_ref="1.4.0",
+        rss_bytes=1,
+        phase="running",
+        ready=True,
+        incarnation=1,
+    )
     with pytest.raises(NotImplementedError, match="^IF-15$"):
         select_workers([worker], stale=True, latest="1.5.0")
     with pytest.raises(NotImplementedError, match="^IF-15$"):

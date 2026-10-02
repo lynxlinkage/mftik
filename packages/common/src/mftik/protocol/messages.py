@@ -1550,8 +1550,8 @@ STS_ORDER_SUBMIT = "sts.order.submit"
 STS_ORDER_CANCEL = "sts.order.cancel"
 STS_ENSURE_LEVERAGE = "sts.ensure_leverage"
 #: Supervisor liveness report (§8.2). Subject is
-#: ``procman.report.{plane}.{instance}``. IF-03 produces the payload;
-#: the shape is :class:`mftik.protocol.v2.ProcmanReport`.
+#: ``procman.report.{plane}.{instance}``. The shape is
+#: :class:`mftik.protocol.v2.ProcmanReport`. B3-04 publishes it.
 PROCMAN_REPORT = "procman.report"
 
 MD_HEALTH = "md.health"

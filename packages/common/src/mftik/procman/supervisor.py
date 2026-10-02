@@ -3,7 +3,9 @@
 Embedded in each plane's controller (§4.1). :meth:`start` loads
 ``supervisor.json`` and reattaches (B3-03). :meth:`close` is ``detach``
 (signal nothing, flush, exit 0) or ``stop`` (the whole host is going
-down) and is B3-03 as well. :meth:`report` is B3-04.
+down) and is B3-03 as well; it pauses publication before that work.
+:meth:`report` is the liveness snapshot (B3-04). The orchestrator
+publishes it; this class has no NATS client.
 
 :meth:`spawn`, :meth:`stop` and :meth:`status` are real (B3-02). So is
 the live machine: start timeout, death, ready, heartbeat timeout, a shim
@@ -33,8 +35,11 @@ The default is the process clock. Tests pass a
 :class:`~mftik.clock.FakeClock`.
 
 A new incarnation's ``/proc`` fence (F36) is B3-03. This class does not
-keep a pid table beyond the slots it holds in memory. ``rss_bytes`` stays
-``None`` (B3-04).
+keep a pid table beyond the slots it holds in memory.
+
+``rss_bytes`` is the Pss of the worker's process tree, measured when a
+report is built, not on the status poll. It is not the shim and not
+plain ``VmRSS`` (§4.7). The shim's frame leaves the field ``None``.
 """
 
 from __future__ import annotations
@@ -59,10 +64,10 @@ from mftik.procman.messages import (
     decode_exit,
     exit_record_path,
 )
-from mftik.procman.report import ProcmanReport
 from mftik.procman.shim import ShimClient, spawn_shim
 from mftik.procman.spec import PLANES, Plane, WorkerSpec, validate_worker_id
 from mftik.procman.state import ALIVE_PHASES, Trigger, WorkerPhase, transition
+from mftik.protocol.v2 import ProcmanReport, ProcmanWorker
 
 #: How often a live slot's socket is polled.
 #:
@@ -103,6 +108,20 @@ class CloseMode(StrEnum):
     STOP = "stop"
 
 
+class _ReportGate(StrEnum):
+    """Whether :meth:`Supervisor.report` may return a set.
+
+    ``PENDING`` until :meth:`Supervisor.allow_reports`, which B3-03's
+    ``start`` calls after reconciliation. ``CLOSED`` after
+    :meth:`Supervisor.pause_reports`, which ``close`` calls. Both refuse.
+    An absent report is not an observation (P5, F32).
+    """
+
+    PENDING = "pending"
+    OPEN = "open"
+    CLOSED = "closed"
+
+
 @dataclass(frozen=True)
 class WorkerStatus:
     """The supervisor's view of one worker: the spec plus the phase it chose.
@@ -110,8 +129,11 @@ class WorkerStatus:
     ``pid``, ``ready``, ``exit_code`` and ``signal`` are the shim's facts,
     copied onto the slot. ``phase`` is the state machine. ``exit_code`` and
     ``signal`` follow the exit record: both empty while the worker is
-    alive, exactly one set after it has been reaped. ``rss_bytes`` stays
-    ``None`` until B3-04 reads the process tree.
+    alive, exactly one set after it has been reaped. ``rss_bytes`` is the
+    Pss of the worker's process tree from the last :meth:`Supervisor.report`,
+    or ``None`` when that has not run, the phase is not live, or the
+    worker's ``smaps_rollup`` could not be read. Status polls do not
+    measure it.
     """
 
     spec: WorkerSpec
@@ -171,6 +193,8 @@ class _Slot:
     shim_gone: bool
     shim_pid: int
     socket: Path
+    #: Pss from the last report, for a live phase. Not read on the poll.
+    rss_bytes: int | None = None
     stopped: asyncio.Future[None] | None = None
 
     def snapshot(self) -> _Snapshot:
@@ -465,8 +489,7 @@ def _pid_alive(pid: int) -> bool:
     return state != "Z"
 
 
-def _proc_children(pid: int) -> list[int]:
-    path = Path(f"/proc/{pid}/task/{pid}/children")
+def _read_pid_list(path: Path) -> list[int]:
     try:
         text = path.read_text()
     except OSError:
@@ -478,6 +501,106 @@ def _proc_children(pid: int) -> list[int]:
         except ValueError:
             continue
     return found
+
+
+def _proc_children(pid: int) -> list[int]:
+    """Children of the main thread, on the host ``/proc``.
+
+    The kill path uses this. A report walks every thread; see
+    :func:`_thread_children`.
+    """
+    return _read_pid_list(Path(f"/proc/{pid}/task/{pid}/children"))
+
+
+def _thread_children(pid: int, proc_root: Path) -> list[int]:
+    """Children of every thread: ``proc_root/<pid>/task/*/children``.
+
+    A pid listed by two threads is returned once. A missing ``task``
+    directory means the process is gone; the caller skips it.
+    """
+    task = proc_root / str(pid) / "task"
+    try:
+        names = sorted(entry.name for entry in task.iterdir() if entry.is_dir())
+    except OSError:
+        return []
+    seen: set[int] = set()
+    found: list[int] = []
+    for name in names:
+        for child in _read_pid_list(task / name / "children"):
+            if child in seen:
+                continue
+            seen.add(child)
+            found.append(child)
+    return found
+
+
+def _pss_bytes(pid: int, proc_root: Path) -> int | None:
+    """``Pss:`` from ``smaps_rollup``, in bytes. ``None`` if unreadable.
+
+    Only the ``Pss:`` key counts. ``Pss_Anon`` and the other breakdowns
+    are the same memory again. The kernel reports kibibytes.
+    """
+    path = proc_root / str(pid) / "smaps_rollup"
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    total = 0
+    found = False
+    for line in text.splitlines():
+        if not line.startswith("Pss:"):
+            continue
+        parts = line.split()
+        if len(parts) < 3 or parts[2] != "kB":
+            continue
+        try:
+            kb = int(parts[1])
+        except ValueError:
+            continue
+        if kb < 0:
+            continue
+        total += kb * 1024
+        found = True
+    if not found:
+        return None
+    return total
+
+
+def _tree_pss_bytes(pid: int | None, proc_root: Path) -> int | None:
+    """Pss of ``pid`` and its descendants, in bytes.
+
+    ``pid`` is the worker, not the shim. ``None`` when ``pid`` is missing
+    or the worker's own ``smaps_rollup`` cannot be read (missing file or
+    permission): a partial sum of the children is not a measurement. A
+    descendant that exits during the walk is skipped.
+    """
+    if pid is None or pid <= 0:
+        return None
+    own = _pss_bytes(pid, proc_root)
+    if own is None:
+        return None
+    total = own
+    seen = {pid}
+    stack = [pid]
+    while stack:
+        current = stack.pop()
+        for child in _thread_children(current, proc_root):
+            if child in seen or child <= 0:
+                continue
+            seen.add(child)
+            child_pss = _pss_bytes(child, proc_root)
+            if child_pss is None:
+                continue
+            total += child_pss
+            stack.append(child)
+    return total
+
+
+def _measure_pss(
+    live: list[tuple[_Slot, int | None]], proc_root: Path
+) -> list[tuple[_Slot, int | None]]:
+    """Pss for each live slot. Runs off the event loop."""
+    return [(slot, _tree_pss_bytes(pid, proc_root)) for slot, pid in live]
 
 
 def _kill(pid: int) -> None:
@@ -598,6 +721,10 @@ class Supervisor:
     ``clock`` supplies ``monotonic`` and ``sleep`` for the live deadlines.
     It defaults to the process clock. Restart intensity is not an argument:
     the orchestrator owns those numbers.
+
+    ``proc_root`` is the ``/proc`` a report reads. Tests pass a fake tree.
+    Production leaves it as the host ``/proc``, which ``oci_host_pid``
+    bind-mounts (§4.5).
     """
 
     def __init__(
@@ -607,6 +734,7 @@ class Supervisor:
         plane: Plane,
         instance: str,
         clock: Clock | None = None,
+        proc_root: Path | None = None,
     ) -> None:
         if plane not in PLANES:
             raise ValueError(f"plane {plane!r} is not one of {', '.join(PLANES)}")
@@ -614,6 +742,7 @@ class Supervisor:
         self.plane: Plane = plane
         self.instance = validate_instance_name(instance)
         self._clock: Clock = clock if clock is not None else SystemClock()
+        self._proc_root = Path("/proc") if proc_root is None else Path(proc_root)
         self._slots: dict[str, _Slot] = {}
         # Ids whose :meth:`spawn` has passed the slot check and not yet
         # published the new slot. Held across the unlocked launch.
@@ -621,18 +750,29 @@ class Supervisor:
         self._lock = asyncio.Lock()
         self._driver: asyncio.Task[None] | None = None
         self._failure: BaseException | None = None
+        self._report_gate = _ReportGate.PENDING
+        # Publications this process has produced. Not durable.
+        self._generation = 0
 
     async def start(self) -> None:
         """Load ``supervisor.json``, then reattach each socket (§4.4).
 
         Control subjects stay dark until reconciliation finishes. Workers
-        that are already running keep running through it (P1). B3-03.
+        that are already running keep running through it (P1). B3-03
+        calls :meth:`allow_reports` after that reconciliation. Until
+        then :meth:`report` refuses, so a rolling controller does not
+        publish a partial set.
         """
         raise NotImplementedError(TICKET)
 
     async def close(self, mode: CloseMode) -> None:
-        """``detach`` leaves workers running; ``stop`` ends them (§4.4). B3-03."""
+        """``detach`` leaves workers running; ``stop`` ends them (§4.4).
+
+        Publication stops first (:meth:`pause_reports`). The detach and
+        stop work is B3-03; that implementation keeps the pause.
+        """
         CloseMode(mode)
+        self.pause_reports()
         raise NotImplementedError(TICKET)
 
     async def spawn(self, spec: WorkerSpec) -> None:
@@ -756,6 +896,7 @@ class Supervisor:
             slot = self._slots.get(worker_id)
             if slot is None:
                 return None
+            rss = slot.rss_bytes if slot.phase in ALIVE_PHASES else None
             return WorkerStatus(
                 spec=slot.spec,
                 phase=slot.phase,
@@ -763,7 +904,7 @@ class Supervisor:
                 ready=slot.ready,
                 exit_code=slot.exit_code,
                 signal=slot.signal,
-                rss_bytes=None,
+                rss_bytes=rss,
             )
 
     async def record_restart(self, worker_id: str, decision: RestartDecision) -> None:
@@ -801,9 +942,96 @@ class Supervisor:
                     slot.ready = record.ready
                     slot.pid = record.pid
 
+    def allow_reports(self) -> None:
+        """Open publication. B3-03's ``start`` calls this after reconciliation.
+
+        Until this runs, :meth:`report` raises :class:`ProcmanError`
+        instead of returning a partial set.
+        """
+        self._report_gate = _ReportGate.OPEN
+
+    def pause_reports(self) -> None:
+        """Stop publication. :meth:`close` calls this.
+
+        The next report is not published. Absence is not an observation
+        (P5, F32). Callers must not publish an empty report to mean this.
+        """
+        self._report_gate = _ReportGate.CLOSED
+
+    def reports_open(self) -> bool:
+        """True only after :meth:`allow_reports` and before :meth:`pause_reports`."""
+        return self._report_gate is _ReportGate.OPEN
+
+    def reports_closed(self) -> bool:
+        """True after :meth:`pause_reports`. A publish loop returns on this."""
+        return self._report_gate is _ReportGate.CLOSED
+
     async def report(self) -> ProcmanReport:
-        """The payload :meth:`start` will publish. Not persisted (§3.3, F32). B3-04."""
-        raise NotImplementedError(TICKET)
+        """One publication of the live slots. Not persisted (§3.3, F32).
+
+        Lists held slots in ``STARTING``, ``RUNNING`` and ``STOPPING``
+        only. ``FAILED``, ``FATAL``, ``LOST``, ``CRASHED`` and
+        ``BACKOFF`` are absent, so two reports that omit an owner let
+        §8.2 rule 3 reclaim that owner's intents. ``STOPPING`` stays
+        listed while the process is still in the stop grace (issue
+        #298 is the STS session phase, not this one). A session in
+        ``restarting`` with no live worker is not here; the plane's
+        orchestrator appends it when it publishes (R4).
+
+        ``generation`` increases by one per successful call and is not
+        durable. ``rss_bytes`` is the Pss of that worker's process tree,
+        read off the event loop, or ``None`` when the worker's
+        ``smaps_rollup`` cannot be read.
+
+        Raises :class:`ProcmanError` before :meth:`allow_reports` and
+        after :meth:`pause_reports`. That refusal is the pause.
+        """
+        self._check_failure()
+        async with self._lock:
+            self._require_reports_open()
+            live = [
+                (slot, slot.pid)
+                for slot in self._slots.values()
+                if slot.phase in ALIVE_PHASES
+            ]
+        # No /proc read, no thread. A pid of None is "not measured", not
+        # a walk of the host. The 50 ms poll never gets here.
+        if any(pid is not None and pid > 0 for _slot, pid in live):
+            measured = await asyncio.to_thread(
+                _measure_pss, live, self._proc_root
+            )
+        else:
+            measured = [(slot, None) for slot, _pid in live]
+        async with self._lock:
+            self._require_reports_open()
+            workers: list[ProcmanWorker] = []
+            for slot, rss in measured:
+                current = self._slots.get(slot.spec.id)
+                if current is not slot or slot.phase not in ALIVE_PHASES:
+                    continue
+                slot.rss_bytes = rss
+                workers.append(
+                    ProcmanWorker(
+                        id=slot.spec.id,
+                        code_ref=slot.spec.code_ref,
+                        rss_bytes=rss,
+                        phase=slot.phase.value,
+                        ready=slot.ready,
+                        incarnation=slot.spec.incarnation,
+                    )
+                )
+            self._generation += 1
+            generation = self._generation
+        return ProcmanReport(generation=generation, workers=workers)
+
+    def _require_reports_open(self) -> None:
+        if self._report_gate is _ReportGate.OPEN:
+            return
+        if self._report_gate is _ReportGate.CLOSED:
+            raise ProcmanError("procman report is paused: supervisor is closed")
+        raise ProcmanError(
+            "procman report is paused until start finishes reconciling"
+        )
 
     def _check_failure(self) -> None:
         failure = self._failure

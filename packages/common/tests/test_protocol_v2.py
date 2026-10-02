@@ -34,6 +34,7 @@ from mftik.protocol import (
     MdIntentPut,
     MdUniverseEvent,
     ProcmanReport,
+    ProcmanReportEnvelope,
     ProcmanWorker,
     RpcError,
     StsCreateSessionRequest,
@@ -213,12 +214,88 @@ def test_account_state_vocabulary_and_report_omit_code_identity_axes() -> None:
 
     report = ProcmanReport(
         generation=2,
-        workers=[ProcmanWorker(id="td/account/7", code_ref="1.4.0", rss_bytes=10)],
+        workers=[
+            ProcmanWorker(
+                id="td/account/7",
+                code_ref="1.4.0",
+                rss_bytes=10,
+                phase="running",
+                ready=True,
+                incarnation=1,
+            )
+        ],
     )
     assert report.generation == 2
+    assert set(ProcmanReport.model_fields) == {"generation", "workers"}
+    assert set(ProcmanWorker.model_fields) == {
+        "id",
+        "code_ref",
+        "rss_bytes",
+        "phase",
+        "ready",
+        "incarnation",
+    }
     assert "strategy_digest" not in ProcmanReport.model_fields
     assert "env_generation" not in ProcmanWorker.model_fields
     assert "strategy_digest" not in ProcmanWorker.model_fields
+
+
+def test_procman_report_round_trips_on_the_envelope() -> None:
+    """The wire body is the v2 model inside an envelope, so ``pv`` is set."""
+    worker = ProcmanWorker(
+        id="md/conn/Deribit/public/0",
+        code_ref="v1",
+        rss_bytes=None,
+        phase="backoff",
+        ready=False,
+        incarnation=2,
+    )
+    report = ProcmanReport(generation=3, workers=[worker])
+    envelope = ProcmanReportEnvelope.wrap(
+        report, type=PROCMAN_REPORT, source="md"
+    )
+    restored = ProcmanReportEnvelope.model_validate_json(envelope.to_json())
+    assert restored.pv == PROTOCOL_VERSION
+    assert restored.type == PROCMAN_REPORT
+    assert restored.payload == report
+    body = json.loads(envelope.to_json())
+    assert body["pv"] == PROTOCOL_VERSION
+    assert "strategy_digest" not in body["payload"]
+    assert body["payload"]["workers"][0]["rss_bytes"] is None
+    assert body["payload"]["workers"][0]["phase"] == "backoff"
+
+
+def test_procman_report_refuses_a_duplicate_worker_and_a_bad_field() -> None:
+    worker = ProcmanWorker(
+        id="td/account/42",
+        code_ref="v1",
+        rss_bytes=10,
+        phase="running",
+        ready=True,
+        incarnation=1,
+    )
+    with pytest.raises(ValidationError):
+        ProcmanReport(generation=1, workers=[worker, worker])
+    with pytest.raises(ValidationError):
+        ProcmanWorker(
+            id="td/account/42",
+            code_ref="v1",
+            rss_bytes=-1,
+            phase="running",
+            ready=True,
+            incarnation=1,
+        )
+    with pytest.raises(ValidationError):
+        ProcmanWorker(
+            id="td/account/42",
+            code_ref="v1",
+            rss_bytes=None,
+            phase="restarting",
+            ready=False,
+            incarnation=0,
+        )
+    with pytest.raises(ValidationError):
+        ProcmanReport(generation=-1, workers=[])
 
 
 def test_cancel_session_reports_what_it_could_not_confirm() -> None:

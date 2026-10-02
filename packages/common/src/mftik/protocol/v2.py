@@ -21,8 +21,9 @@ state whose authority sits somewhere else.
 * ``td.account.state.*`` and ``td.account.reset`` are the account
   worker's. ``td.order.cancel_session`` asks that worker to cancel.
 * ``procman.report.*`` is the Supervisor's observation of which workers
-  are alive. It is not stored. A gap in the whole report reclaims
-  nothing (F32).
+  are alive, plus the entries the plane's orchestrator adds for a
+  worker that should stay listed with no process (R4). It is not
+  stored. A gap in the whole report reclaims nothing (F32).
 
 **Invariants.**
 
@@ -38,19 +39,34 @@ state whose authority sits somewhere else.
   runs ``on_stop``, then the status becomes terminal (§8.1).
 * **P-5** ``md.a.{venue}.{hash}`` is one subject token per part. The hash
   is of the ``atom_id``, because the channel contains ``.`` (§6.1).
-* **P-6** A ``procman.report`` lists workers whose desired state is
-  running, including a session that is ``restarting`` (R4). An owner
-  missing from two consecutive reports is released (§8.2 rule 3). Each
-  worker carries the release it was spawned from (``code_ref``, §4.3)
-  and its RSS (§4.7). ``strategy_digest`` and ``env_generation`` are
-  added by IF-16 (#275); they are not fields of this model.
+* **P-6** A published ``procman.report`` lists workers whose desired
+  state is running. The Supervisor contributes slots in ``starting``,
+  ``running`` and ``stopping``. The plane's orchestrator adds a
+  session that is ``restarting`` and has no live process (R4). An
+  owner missing from two consecutive reports is released (§8.2 rule
+  3). Each worker carries ``code_ref`` (§4.3), ``incarnation``,
+  ``phase`` (a :class:`~mftik.procman.WorkerPhase` value as a string;
+  this module does not import procman), ``ready``, and ``rss_bytes``:
+  the proportional set size (Pss) of that worker's process tree, not
+  the shim and not plain ``VmRSS`` (§4.7). ``strategy_digest`` and
+  ``env_generation`` are added by IF-16 (#275); they are not fields of
+  this model. ``generation`` increases by one per publication and is
+  not durable: a new process starts again. While publication is
+  paused, or once it has stopped, the absence is not an observation
+  and nothing is reclaimed (P5, F32).
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from mftik.protocol.envelope import Envelope
 from mftik.protocol.strategy_yml import MdSelect, load_md
@@ -395,45 +411,121 @@ class TdCancelSessionResult(BaseModel):
 
 # --- procman report --------------------------------------------------------
 
+#: :class:`~mftik.procman.WorkerPhase` values, as strings. Duplicated here
+#: so this module does not import procman. The supervisor publishes
+#: ``phase.value``. A test locks this set to the enum.
+_WORKER_PHASES = frozenset(
+    {
+        "stopped",
+        "starting",
+        "running",
+        "stopping",
+        "failed",
+        "crashed",
+        "backoff",
+        "fatal",
+        "lost",
+    }
+)
+
 
 class ProcmanWorker(BaseModel):
     """One worker inside a :class:`ProcmanReport`.
 
     ``id`` is the worker id (``sts/session/a1b2c3``). ``code_ref`` is the
-    platform release the worker was spawned from (§4.3). ``rss_bytes`` is
-    the RSS §4.7 asks the report to carry. The strategy-tree digest and
-    the extras generation are not here; IF-16 adds them.
+    platform release the worker was spawned from (§4.3). ``incarnation``
+    tells a new process from the previous one. ``phase`` is the
+    supervisor's phase value, as a string. ``ready`` is the slot's ready
+    bit.
+
+    ``rss_bytes`` is the proportional set size (Pss) of that worker's
+    process tree, summed from ``/proc/<pid>/smaps_rollup`` (kB × 1024).
+    It is not the shim, and it is not plain ``VmRSS`` (§4.7). ``None``
+    when ``smaps_rollup`` cannot be read for the worker pid itself. The
+    strategy-tree digest and the extras generation are not here; IF-16
+    adds them.
     """
 
     model_config = ConfigDict(frozen=True)
 
     id: str
     code_ref: str
-    rss_bytes: int
+    rss_bytes: int | None
+    phase: str
+    ready: bool
+    incarnation: int
+
+    @field_validator("rss_bytes")
+    @classmethod
+    def _rss(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("rss_bytes must be >= 0")
+        return value
+
+    @field_validator("phase")
+    @classmethod
+    def _phase(cls, value: str) -> str:
+        if value not in _WORKER_PHASES:
+            raise ValueError(f"unknown phase {value!r}")
+        return value
+
+    @field_validator("incarnation")
+    @classmethod
+    def _incarnation(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("incarnation must be >= 0")
+        return value
 
 
 class ProcmanReport(BaseModel):
     """Supervisor → listeners: ``procman.report`` (§8.2, §4.7).
 
-    Published on ``procman.report.{plane}.{instance}``. ``generation``
-    increases on each publication so a reader can tell two reports
-    apart; it is the report's own counter, not an extras generation and
-    not a session generation. ``workers`` is the set whose desired state
-    is running, including a session in ``restarting`` (R4, P-6), not
-    only the processes that happen to be up at that instant.
+    Published on ``procman.report.{plane}.{instance}``, inside
+    :data:`ProcmanReportEnvelope` so ``pv`` is set. ``generation``
+    increases by one each time this supervisor publishes, so a consumer
+    can tell two successive reports apart. It is not durable: a new
+    process starts again. It is the report's own counter, not an extras
+    generation and not a session generation.
 
-    Authority: the Supervisor (§3.3). The report is not stored. While
-    publications are paused, or once they have stopped entirely, nothing
-    is reclaimed (P5, F32).
+    ``workers`` is the set a listener treats as alive. The Supervisor
+    contributes slots in ``starting``, ``running`` and ``stopping``, and
+    nothing else: ``failed``, ``fatal``, ``lost``, ``crashed`` and
+    ``backoff`` are absent, so two reports that omit an owner release
+    that owner's intents (§8.2 rule 3). The plane's orchestrator may
+    append entries whose desired state is running but that have no live
+    process, including an STS session in ``restarting`` (R4). Putting
+    those on the report belongs to the orchestrator, not the Supervisor.
 
-    IF-03 owns producing this payload. The shape lives here so that
-    ticket imports it instead of declaring a second one.
+    Authority: the Supervisor for the live slots (§3.3). The report is
+    not stored. While publication is paused — before ``start`` has
+    finished reconciling, and after ``close`` — and once publications
+    have stopped entirely, the absence is not an observation. Consumers
+    reclaim nothing (P5, F32). An empty ``workers`` list is an
+    observation that nothing is live; pause is the absence of a report,
+    not an empty one.
+
+    The shape lives here so procman publishes this model instead of
+    declaring a second one.
     """
 
     model_config = ConfigDict(frozen=True)
 
     generation: int
     workers: list[ProcmanWorker] = Field(default_factory=list)
+
+    @field_validator("generation")
+    @classmethod
+    def _generation(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("generation must be >= 0")
+        return value
+
+    @model_validator(mode="after")
+    def _unique_workers(self) -> Self:
+        ids = [worker.id for worker in self.workers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("report lists a worker id twice")
+        return self
 
 
 MdIntentPutEnvelope = Envelope[MdIntentPut]

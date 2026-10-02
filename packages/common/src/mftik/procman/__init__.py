@@ -16,9 +16,10 @@ parent (F6).
   worker and answers ``status`` on ``${WORK_DIR}/run/<id>.sock``. The
   supervisor reads both.
 * The supervisor is the authority for the set of workers it still holds on
-  this instance. It publishes that set on
-  ``procman.report.{plane}.{instance}`` and does not persist the report.
-  While publication is stopped, the absence is not an observation:
+  this instance. It publishes the live ones (``STARTING``, ``RUNNING``,
+  ``STOPPING``) on ``procman.report.{plane}.{instance}`` and does not
+  persist the report. A held worker in any other phase is not on that
+  list. While publication is stopped, the absence is not an observation:
   consumers reclaim nothing (F32, P7).
 * ``code_ref`` is the release version of the controller that spawned the
   worker (§4.5).
@@ -63,8 +64,9 @@ parent (F6).
 Framing, path names, the transition table and :class:`WorkerSpec`
 validation are real. The shim — spawn, the socket, the exit record — is
 real as of B3-01. Restart decisions and the live state machine (spawn,
-stop, status, heartbeat timeout) are real as of B3-02. Reattach and
-publishing a report still raise ``NotImplementedError("IF-03")``.
+stop, status, heartbeat timeout) are real as of B3-02. The liveness
+report, its generation, and the worker-tree Pss are real as of B3-04.
+Reattach still raises ``NotImplementedError("IF-03")``.
 """
 
 from mftik.procman._ticket import TICKET
@@ -117,13 +119,7 @@ from mftik.procman.messages import (
     socket_path,
     supervisor_state_path,
 )
-from mftik.procman.report import (
-    ProcmanReport,
-    ReportedWorker,
-    decode_report,
-    encode_report,
-    report_subject,
-)
+from mftik.procman.publish import REPORT_PERIOD_S, publish_reports
 from mftik.procman.shim import ShimClient, SpawnedShim, spawn_shim
 from mftik.procman.shim import main as shim_main
 from mftik.procman.spec import (
@@ -153,6 +149,7 @@ __all__ = [
     "OOM_SCORE_ADJ",
     "PIPE_BUF",
     "PLANES",
+    "REPORT_PERIOD_S",
     "RESTART_MODES",
     "SHIM_OOM_SCORE_ADJ",
     "STATUS_FD_ENV",
@@ -169,10 +166,8 @@ __all__ = [
     "ObservedWorker",
     "Plane",
     "ProcmanError",
-    "ProcmanReport",
     "ReattachAction",
     "ReleaseCommand",
-    "ReportedWorker",
     "RestartDecision",
     "RestartIntensity",
     "RestartMode",
@@ -194,13 +189,11 @@ __all__ = [
     "decode_command",
     "decode_exit",
     "decode_heartbeat",
-    "decode_report",
     "decode_status",
     "dump_frame",
     "encode_command",
     "encode_exit",
     "encode_heartbeat",
-    "encode_report",
     "encode_status",
     "exit_record_path",
     "exit_record_tmp_path",
@@ -208,8 +201,8 @@ __all__ = [
     "log_path",
     "observe_heartbeat",
     "plan_restart",
+    "publish_reports",
     "reattach_action",
-    "report_subject",
     "run_dir",
     "shim_main",
     "socket_path",
