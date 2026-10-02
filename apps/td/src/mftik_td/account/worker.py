@@ -92,7 +92,7 @@ class AccountWorker:
         )
         self.deadman: DeadMansSwitch = deadman_for(self.venue)
         self.broadcast = StateBroadcast(self.api_id, self.incarnation)
-        self.orders = OrderHandler(self)
+        self.orders = OrderHandler(self, clock=clock)
         self.oms = OmsHandler(self)
         self.ledger = LedgerHandler(self)
 

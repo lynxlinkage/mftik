@@ -25,6 +25,7 @@ from mftik.exchange.oms import Position
 from mftik.protocol import TdCancelSessionRequest, TdOmsViewRequest
 from mftik.strategy.client_order_id import format_client_order_id
 from mftik_td.account import AccountWorker, deadman_for
+from mftik_td.account.session import Session
 from mftik_td.oms import Oms
 
 API = 7
@@ -59,6 +60,50 @@ def _book(*orders: Order, position: bool = False) -> Oms:
     )
     oms.apply_reconcile(orders=orders, balances=[], positions=positions)
     return oms
+
+
+class _QuietBroker:
+    async def publish(self, subject: str, envelope: object) -> None:
+        return None
+
+
+class _FetchAdapter:
+    """The chase path passes ``ticker=``. The fakes below do not take it.
+
+    ``resolve_unknown`` calls ``fetch_order_by_client_order_id(cid,
+    ticker=...)``. Wrapping here keeps that call working without
+    changing what the fake records.
+    """
+
+    name = "Paper"
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def __getattr__(self, item: str) -> object:
+        return getattr(self._inner, item)
+
+    async def fetch_order_by_client_order_id(
+        self, client_order_id: str, *, ticker: object = None
+    ) -> Order:
+        fetch = self._inner.fetch_order_by_client_order_id  # type: ignore[attr-defined]
+        return await fetch(client_order_id)
+
+
+def _worker(oms: Oms, private: object) -> AccountWorker:
+    """The running worker always has a session. These fakes did not.
+
+    ``cancel_session`` goes through that session (the same book, the
+    same connector). Building one here is the construction change;
+    the assertions are the contract.
+    """
+    session = Session(
+        api_id=API,
+        broker=_QuietBroker(),  # type: ignore[arg-type]
+        private=_FetchAdapter(private),  # type: ignore[arg-type]
+        oms=oms,
+    )
+    return AccountWorker(API, venue="Paper", session=session)
 
 
 class _Probe:
@@ -98,7 +143,10 @@ class _StuckUnknown:
 
     async def fetch_order_by_client_order_id(self, client_order_id: str) -> Order:
         if client_order_id == CID_UNKNOWN:
-            await asyncio.sleep(5)
+            # Never answers. An event, not a sleep: the unit/component
+            # guard forbids asyncio.sleep(x > 0), and the caller's
+            # timeout is what has to cancel this.
+            await asyncio.Event().wait()
         if client_order_id == CID_PENDING:
             return _order(client_order_id, OrderStatus.NEW)
         return _order(client_order_id, OrderStatus.NEW)
@@ -154,7 +202,6 @@ async def test_trading_layer_toggle_leaves_the_resident_layer_up() -> None:
 # --- cancel_session confirmation (F10) -------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B6-03 confirms cancel_session")
 async def test_cancel_session_confirms_only_this_sessions_orders() -> None:
     """Success is every in-scope order confirmed, and nothing else touched.
 
@@ -165,17 +212,15 @@ async def test_cancel_session_confirms_only_this_sessions_orders() -> None:
     there: cancel_session does not flatten (C4).
     """
     venue = _ResolvingVenue()
-    worker = AccountWorker(
-        API,
-        venue="Paper",
-        oms=_book(
+    worker = _worker(
+        _book(
             _order(CID_RESTING, OrderStatus.NEW),
             _order(CID_UNKNOWN, OrderStatus.UNKNOWN),
             _order(CID_PENDING, OrderStatus.PENDING_NEW),
             _order(CID_OTHER, OrderStatus.NEW),
             position=True,
         ),
-        private=venue,
+        venue,
     )
 
     result = await worker.orders.cancel_session(
@@ -198,7 +243,8 @@ async def test_cancel_session_confirms_only_this_sessions_orders() -> None:
     assert POSITION in book.positions
 
 
-@pytest.mark.xfail(strict=True, reason="B6-03 reports unconfirmed cids on timeout")
+# The call waits out timeout=0.05, which is the unit call cap.
+@pytest.mark.component
 async def test_cancel_session_timeout_lists_what_did_not_confirm() -> None:
     """A timeout is not success, and the reply names the orders still open.
 
@@ -207,16 +253,14 @@ async def test_cancel_session_timeout_lists_what_did_not_confirm() -> None:
     never in scope (C1, C3).
     """
     venue = _StuckUnknown()
-    worker = AccountWorker(
-        API,
-        venue="Paper",
-        oms=_book(
+    worker = _worker(
+        _book(
             _order(CID_RESTING, OrderStatus.NEW),
             _order(CID_UNKNOWN, OrderStatus.UNKNOWN),
             _order(CID_PENDING, OrderStatus.PENDING_NEW),
             _order(CID_OTHER, OrderStatus.NEW),
         ),
-        private=venue,
+        venue,
     )
 
     result = await asyncio.wait_for(
