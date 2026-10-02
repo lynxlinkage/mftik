@@ -78,6 +78,71 @@ class Broker:
         """
         await self._transport.publish(topic, envelope.to_json())
 
+    async def publish_with_reply(
+        self,
+        subject: str,
+        envelope: Envelope[Any],
+        *,
+        reply: str,
+    ) -> None:
+        """Publish ``envelope`` on an RPC subject with ``reply`` as the inbox.
+
+        The NATS transport writes the message and flushes before this
+        returns. A transport without that method cannot host the session
+        worker's order path: the ack would be waited for on the same
+        connection the hook is blocking.
+        """
+        method = getattr(self._transport, "publish_with_reply", None)
+        if method is None:
+            raise NotImplementedError(
+                "this transport has no cross-connection publish-with-reply"
+            )
+        await method(subject, envelope.to_json(), reply=reply)
+
+    async def flush(self) -> None:
+        """Force buffered publishes out, when the transport can."""
+        method = getattr(self._transport, "flush", None)
+        if method is not None:
+            await method()
+
+    async def iter_raw(
+        self,
+        topics: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(topic, raw)`` from fan-out topics, without parsing.
+
+        The session ingress logs the bytes it was given and decodes them
+        on the strategy thread (I4). :meth:`subscribe` parses first.
+        """
+        topic_list = (topics,) if isinstance(topics, str) else tuple(topics)
+        if not topic_list:
+            raise ValueError("iter_raw requires at least one topic")
+        async for item in self._transport.subscribe(
+            topic_list, stop=stop, ready=ready
+        ):
+            yield item
+
+    async def iter_core(
+        self,
+        subjects: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(subject, raw)`` for core subjects with no ``ps`` prefix.
+
+        Reply inboxes are this. Fan-out topics are :meth:`iter_raw`.
+        """
+        method = getattr(self._transport, "subscribe_core", None)
+        if method is None:
+            raise NotImplementedError("this transport has no core subscription")
+        subject_list = (subjects,) if isinstance(subjects, str) else tuple(subjects)
+        async for item in method(subject_list, stop=stop, ready=ready):
+            yield item
+
     async def publish_log(
         self,
         topic: str,

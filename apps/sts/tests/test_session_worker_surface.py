@@ -6,10 +6,9 @@ here, and both should pass:
 * The table. Phases, delivery modes, overflow policy, hook-budget
   numbers, the report shape, ``event.age``. These are data. A later
   ticket should not have to rediscover them.
-* The null. Operations that move a thread, a queue or a measurement
-  raise ``NotImplementedError("IF-05")`` or return ``None`` / an empty
-  collection. The contract file is where those operations are expected
-  to do the real thing, and it is ``xfail`` until they do.
+* The null. Operations a later ticket owns still raise
+  ``NotImplementedError("IF-05")``. I1–I4 are real (B4-03). The queues
+  are B5-01. Hook classification is B5-04. The log file is B5-02.
 
 An operation that starts returning a plausible answer has to come off
 the raise-list in this file in the same change that removes the
@@ -59,7 +58,6 @@ from mftik_sts.session_worker import (
     kind_of_feed,
     kind_of_topic,
     overflow_policy,
-    refuse_strategy_signal_handler,
     topic_of,
 )
 
@@ -335,22 +333,9 @@ def test_operations_refuse_with_the_ticket_number() -> None:
     runner = StrategyRunner(ingress, _strategy())
     event = _ticker()
     calls = [
-        ingress.start,
-        ingress.abort,
-        ingress.stop,
-        ingress.close,
-        lambda: ingress.offer(event),
-        runner.start,
-        runner.begin_on_start,
-        runner.end_on_start,
-        runner.begin_on_ready,
-        runner.end_on_ready,
-        runner.begin_on_stop,
-        runner.finish,
         lambda: runner.note_hook("on_ticker", 1.5),
         lambda: ingress.delivery.accept(event),
         lambda: assess_hook("on_ticker", 1.5),
-        refuse_strategy_signal_handler,
     ]
     for call in calls:
         with pytest.raises(NotImplementedError, match="IF-05"):

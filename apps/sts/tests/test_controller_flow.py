@@ -16,6 +16,8 @@ from mftik.clock import FakeClock
 from mftik.intent_gc import owners_in_report
 from mftik.procman import CapacityExceeded, WorkerPhase
 from mftik.protocol import (
+    DEFAULT_READY_TIMEOUT_S,
+    DEFAULT_START_TIMEOUT_S,
     STS_ERROR,
     STS_REASON_OPERATOR_STOP,
     STS_SESSION_END,
@@ -44,7 +46,9 @@ from mftik_sts.controller import (
     list_handler,
     start_handler,
 )
+from mftik_sts.controller.env import forwarded_env
 from mftik_sts.controller.spawn import write_session_request
+from mftik_sts.controller.worker import ON_READY_BACKSTOP_S
 from mftik_sts.rpc.router import control_handler
 
 
@@ -281,10 +285,19 @@ async def test_converge_spawns_once_and_observe_publishes_running(
     spec = supervisor.spawned[0]
     assert spec.restart == "never"  # type: ignore[attr-defined]
     assert spec.argv == ("stand-in", str(path))  # type: ignore[attr-defined]
-    assert spec.start_timeout_s == SESSION_START_TIMEOUT_S  # type: ignore[attr-defined]
+    assert spec.start_timeout_s == (  # type: ignore[attr-defined]
+        SESSION_START_TIMEOUT_S
+        + DEFAULT_START_TIMEOUT_S
+        + DEFAULT_READY_TIMEOUT_S
+        + ON_READY_BACKSTOP_S
+    )
     assert spec.hb_timeout_s == SESSION_HB_TIMEOUT_S  # type: ignore[attr-defined]
     assert spec.stop_grace_s == SESSION_STOP_GRACE_S  # type: ignore[attr-defined]
     assert spec.code_ref == "test"  # type: ignore[attr-defined]
+    assert spec.env == forwarded_env()  # type: ignore[attr-defined]
+    assert "DATABASE_URL" not in spec.env  # type: ignore[attr-defined]
+    assert "DATABASE_URL_SYNC" not in spec.env  # type: ignore[attr-defined]
+    assert "MFTIK_STATUS_FD" not in spec.env  # type: ignore[attr-defined]
 
     supervisor.phase = WorkerPhase.RUNNING
     supervisor.ready = True
@@ -321,6 +334,37 @@ async def test_a_dead_worker_is_failed_without_a_new_spawn(tmp_path: Path) -> No
     assert len(listed.sessions) == 1
     assert listed.sessions[0].status == "failed"
     assert listed.sessions[0].reason == "worker_exited:1"
+    assert len(supervisor.spawned) == 1
+    assert supervisor.released == ["sts/session/abc123"]
+
+
+async def test_a_clean_exit_while_desired_running_is_done(tmp_path: Path) -> None:
+    """Exit 0 while desired is still running is ``done``, not ``failed``.
+
+    The controller cannot see the worker log, so the reason is
+    ``worker_exited:0``. Non-zero stays the path above.
+    """
+    orch, supervisor = _orch(tmp_path)
+    supervisor.ready_on_spawn = True
+    await start_handler(orch)(_request())
+    await orch.converge("abc123")
+    supervisor.phase = WorkerPhase.STOPPED
+    supervisor.ready = False
+    supervisor.pid = None
+    supervisor.exit_code = 0
+    await orch.observe_all()
+    reply = await list_handler(orch)(
+        Envelope[dict].wrap(
+            ListSessionsRequest(domain="sts", status="done").model_dump(),
+            type=STS_SESSION_LIST,
+            source="api",
+        )
+    )
+    assert reply is not None
+    listed = _model(reply.payload, ListSessionsResult)
+    assert len(listed.sessions) == 1
+    assert listed.sessions[0].status == "done"
+    assert listed.sessions[0].reason == "worker_exited:0"
     assert len(supervisor.spawned) == 1
     assert supervisor.released == ["sts/session/abc123"]
 

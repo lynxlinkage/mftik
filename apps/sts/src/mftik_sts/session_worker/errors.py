@@ -1,8 +1,8 @@
-"""Failures the session worker names, and does not handle yet.
+"""Failures the session worker names.
 
-The classes are the interface. Nothing raises them until the ticket that
-owns the situation: a delivery overflow is B5-01, the lifecycle refusals
-are B4-03.
+The lifecycle refusals are raised by the ingress and the runner. A
+must-deliver overflow still is not: that queue is B5-01, and
+:class:`SessionFailed` stays unused until then.
 """
 
 from __future__ import annotations

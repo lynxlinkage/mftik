@@ -1,14 +1,13 @@
 """What the session worker will do, written down before it does it (IF-05).
 
-Every test here is ``xfail(strict=True)``. The surface file is where
-the null answers are pinned, so a stub that starts returning a real
-queue fails there until this marker is taken off in the same change.
-``strict`` is what makes the marker have to come off: an ``xfail``
-that passes is a failure.
+I1–I4 run. The rest are ``xfail(strict=True)``. The surface file is
+where the null answers are pinned, so a stub that starts returning a
+real queue fails there until this marker is taken off in the same
+change. ``strict`` is what makes the marker have to come off: an
+``xfail`` that passes is a failure.
 
-The ticket that owns each test is named in its ``reason``.
+The ticket that owns each remaining test is named in its ``reason``.
 
-* I1–I4 — B4-03, the two threads and phases 0 to 6.
 * The delivery table, including a TD overflow that fails the session
   — B5-01.
 * The log line carrying the same mark — B5-02.
@@ -53,7 +52,6 @@ from mftik_sts.session_worker import (
     refuse_strategy_signal_handler,
 )
 
-_B4 = "B4-03 runs the two threads and phases 0 to 6"
 _B5_DELIVERY = "B5-01 applies the delivery table"
 _B5_LOG = "B5-02 writes delivered / superseded / dropped onto the event log"
 _B5_BUDGET = "B5-04 classifies hook time (F15)"
@@ -118,7 +116,6 @@ def _drain(lane: Delivery) -> list[Inbound]:
 # --- I1 to I4 --------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i1_the_strategy_thread_cannot_start_first() -> None:
     """I1. The ingress is already up before the strategy thread exists,
     so the receive side is there for the whole of ``on_start``."""
@@ -127,7 +124,6 @@ def test_i1_the_strategy_thread_cannot_start_first() -> None:
         runner.start()
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i1_close_is_refused_while_the_strategy_thread_is_alive() -> None:
     """I1, the other end. ``close`` is phase 6, and phase 6 is after
     the strategy thread has finished."""
@@ -140,7 +136,6 @@ def test_i1_close_is_refused_while_the_strategy_thread_is_alive() -> None:
         ingress.close()
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i1_phases_run_in_order_and_delivery_waits_for_on_ready() -> None:
     """Phases 0 to 6, and the two holds around them.
 
@@ -222,7 +217,6 @@ def test_i1_phases_run_in_order_and_delivery_waits_for_on_ready() -> None:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i2_a_dead_ingress_is_not_restarted_in_process() -> None:
     """I2. The ingress is the process. It does not come back as a
     second walk of the same object, and the session id does not change
@@ -242,7 +236,6 @@ def test_i2_a_dead_ingress_is_not_restarted_in_process() -> None:
         runner.start()
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i3_start_off_the_main_thread_is_refused() -> None:
     """I3. Signal handlers run on the main thread, so the ingress is
     that thread and no other."""
@@ -262,14 +255,12 @@ def test_i3_start_off_the_main_thread_is_refused() -> None:
     assert isinstance(box[0], IngressNotMainThread)
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i3_a_strategy_cannot_install_a_signal_handler() -> None:
     """I3, the SDK half. Refused on whatever thread asks."""
     with pytest.raises(SignalHandlersReserved):
         refuse_strategy_signal_handler()
 
 
-@pytest.mark.xfail(strict=True, reason=_B4)
 def test_i4_the_ingress_does_not_decode_or_run_the_hook() -> None:
     """I4. ``offer`` queues the bytes it was given. The hook runs on
     the strategy thread, after ``pull``, and the file write is the

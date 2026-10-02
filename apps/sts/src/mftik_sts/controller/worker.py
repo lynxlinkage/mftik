@@ -9,7 +9,14 @@ from collections.abc import Mapping, Sequence
 
 from mftik.procman import OOM_SCORE_ADJ, WorkerSpec
 
+from mftik_sts.controller.defaults import SESSION_START_TIMEOUT_S
 from mftik_sts.controller.types import SESSION_KIND, SessionSpec, session_worker_id
+
+#: ``on_ready`` wall clock, in seconds. The same number as
+#: ``mftik_sts.session_worker.budget.ON_READY_LIMIT_S``. This package
+#: does not import the session worker (F39); the literal is the backstop
+#: the procman ready timer adds on top of the worker's own deadlines.
+ON_READY_BACKSTOP_S = 10.0
 
 #: ``WorkerSpec.labels`` keys for an STS session (F39, §4.3). Procman
 #: copies them and does not read them (P6). ``env_generation`` is stored
@@ -18,6 +25,27 @@ from mftik_sts.controller.types import SESSION_KIND, SessionSpec, session_worker
 #: a digest.
 LABEL_STRATEGY_DIGEST = "strategy_digest"
 LABEL_ENV_GENERATION = "env_generation"
+
+
+def procman_start_timeout_s(spec: SessionSpec) -> float:
+    """How long procman waits for the first ``ready`` heartbeat.
+
+    The worker enforces F12 itself and exits non-zero when it misses.
+    This sum is only the backstop, so a stuck process is still killed
+    if it never exits: the interpreter boot budget, ``on_start``,
+    ``ready_timeout_s``, and :data:`ON_READY_BACKSTOP_S`.
+
+    ``StsCreateSessionRequest`` has no timeout fields. Both sides use
+    :class:`SessionSpec`'s defaults (60s and 30s) unless a caller built
+    a spec with other numbers. Those other numbers reach this timer.
+    They do not reach the worker, which reads the request JSON.
+    """
+    return (
+        SESSION_START_TIMEOUT_S
+        + spec.start_timeout_s
+        + spec.ready_timeout_s
+        + ON_READY_BACKSTOP_S
+    )
 
 
 def session_worker_spec(

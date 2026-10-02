@@ -1,19 +1,16 @@
-"""Process entry the controller spawns. B4-03 implements the worker.
+"""Process entry the controller spawns.
 
-The controller runs ``python -m mftik_sts.session_worker <request.json>``.
-The file is UTF-8 JSON of the ``StsCreateSessionRequest`` the API sent.
-This entry refuses to run so a spawn before that ticket is a visible
-failure rather than a process that looks idle.
+``python -m mftik_sts.session_worker <request.json>`` reads one
+``StsCreateSessionRequest`` and walks phases 0–6.
 """
 
 from __future__ import annotations
 
-import sys
+from mftik_sts.session_worker.process import main as run
 
 
 def main() -> None:
-    sys.stderr.write("mftik_sts.session_worker is not implemented (B4-03)\n")
-    raise SystemExit(1)
+    raise SystemExit(run())
 
 
 if __name__ == "__main__":
