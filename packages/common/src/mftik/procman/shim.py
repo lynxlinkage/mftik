@@ -14,9 +14,10 @@ The intermediate is launched from a bootstrap that loads this module
 without executing that package init, so the shim process stays on the
 standard library (F29).
 
-``ShimStatus.rss_bytes`` stays ``None``. The worker's process-tree RSS is
-B3-04. ``ShimStatus.beats`` counts valid heartbeats. The shim does not
-read ``hb_timeout_s`` and does not kill on a missed beat (S6, B3-02).
+``ShimStatus.rss_bytes`` stays ``None``. The Supervisor measures the
+worker's process tree; the shim does not. ``ShimStatus.beats`` counts
+valid heartbeats. The shim does not read ``hb_timeout_s`` and does not
+kill on a missed beat (S6, B3-02).
 
 S2 kills the shim with ``SIGKILL``. The worker then stops on
 ``PDEATHSIG`` or a status-pipe ``EPIPE``. Nothing writes
@@ -741,8 +742,8 @@ class _Server:
             self._close()
 
     def _current(self) -> ShimStatus:
-        # B3-04 fills rss_bytes from the worker's process tree. Until then
-        # the field stays None, including after the worker has been reaped.
+        # The Supervisor measures the worker tree. This frame keeps
+        # rss_bytes and always sends None.
         return ShimStatus(
             id=self.spec.id,
             incarnation=self.spec.incarnation,

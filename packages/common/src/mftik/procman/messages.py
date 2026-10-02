@@ -220,9 +220,10 @@ class ShimStatus:
     alive. After it has been reaped, exactly one of them is set: a normal
     exit carries the code, a signal death carries the signal. ``ready`` is
     the last status-pipe snapshot, or ``False`` when none has arrived.
-    ``rss_bytes`` is the worker's process tree, not the shim (§4.7); ``None``
-    when the shim has not read it yet. B3-04 fills it; the shim leaves it
-    ``None``.
+    ``rss_bytes`` stays ``None``. The Supervisor measures the worker's
+    process tree (Pss, not the shim and not plain ``VmRSS``, §4.7) when
+    it builds a report. The field stays on this frame so the NDJSON
+    protocol does not change; the shim always sends ``None``.
 
     ``beats`` is how many valid status-pipe heartbeats the shim has
     decoded. A torn, oversized or undecodable line does not count. A beat

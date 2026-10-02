@@ -55,7 +55,14 @@ _REAL_HTTPX = httpx.Client
 
 
 def _worker(worker_id: str, code_ref: str) -> ProcmanWorker:
-    return ProcmanWorker(id=worker_id, code_ref=code_ref, rss_bytes=1)
+    return ProcmanWorker(
+        id=worker_id,
+        code_ref=code_ref,
+        rss_bytes=1,
+        phase="running",
+        ready=True,
+        incarnation=1,
+    )
 
 
 # --- F12: mftik run --wait / --no-wait ------------------------------------
