@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.34（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F43）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.35（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F43）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.35（#297、#296）：** F37 的 Gate 定為現貨（`Gate`）與合約（`GateFutures`）兩個都用，倒數取帳號層級（§7.1，B6-07）。#296 追認 B5-01 的做法（must-deliver 共用一條 FIFO、`bind_delivery` 綁 `seq` / `age`、ingress 從已解析的 dict 讀 `bar_open`）；worker 收到的 spec 由 B5-10 補上 `(strategy_digest, env_generation)`；must-deliver 的佇列長度和行情分開（B3-09）。
 >
 > **v0.34（#279，offload 子進程的額度）：** 新增 F43：`limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設改為 0；`offload_pool` 建立時預留額度，`isolate=True` 拿剩下的，超額拋出 `OffloadQuotaExceeded`；准入在部署時為宣告的子進程預留記憶體。§4.7、§5.5 隨之更新；實作併入 B5-03（#212）。
 >
@@ -1086,10 +1088,11 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 - **帳本查詢：** `td.account` 服務 `oms.view` / `ledger.view`，並支援 `settled=True`：有狀態 UNKNOWN 的單時，等它們收斂（或逾時）才回覆，沿用現在 `_handle_recon` 的等待邏輯。
 - **cancel-on-disconnect（F37）：**
   - 預設關閉，逐帳號開啟。設定掛在帳號上，不放在 strategy.yml，因為帳號 worker 是多個 session 共用的。
-  - 語意是「TD worker 的死人開關」，不是「socket 斷線就撤」。只用倒數計時型機制（Binance UM/CM 以 symbol 為單位、Bitget UTA、OKX、Gate）：交易層啟用且有掛單時，帳號 worker 定期刷新倒數；進程死掉或卡住、刷新停止，交易所才撤單。一般的重連不會觸發。
+  - 語意是「TD worker 的死人開關」，不是「socket 斷線就撤」。只用倒數計時型機制（Binance UM/CM 以 symbol 為單位、Bitget UTA、OKX、Gate 現貨與合約）：交易層啟用且有掛單時，帳號 worker 定期刷新倒數；進程死掉或卡住、刷新停止，交易所才撤單。一般的重連不會觸發。
   - 不用 Deribit 的 COD（每次重連都會撤單），也不用 Bybit 的 DCP（只開放給機構客戶，需另外申請）。
   - 計畫內的換版（F27）在 drain-replace 之前先延長倒數，新 incarnation 接手後再恢復。
   - 被交易所撤掉的單，照常以 `on_order_update(cancelled)` 送給策略；帳號重啟時另外有 `on_resync`。不需要新的 hook。
+  - Gate 的現貨（`Gate`）和合約（`GateFutures`）在 registry 是兩個 venue，各有自己的 `api_id` 和帳號 worker，各自刷新：`POST /spot/countdown_cancel_all`、`POST /futures/usdt/countdown_cancel_all`，都不帶 `currency_pair` / `contract`，所以是整個市場的倒數，每次刷新一次呼叫。到期時，同一把 key 在那個市場上不是 MFTIK 下的單也會被撤；帳號綁給 MFTIK，這是預期的行為。Gate 的 `timeout` 至少 5 秒，0 代表取消倒數。
   - 各家的倒數範圍和刷新間隔，在 B6 實測後寫進 adapter。
 
 ### 7.2 TD orchestrator

@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.34。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.35。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
@@ -611,6 +611,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - 拿掉 `apps/`、`packages/` 裡所有 `pending Yi Te` 與指向 #286 的「待決」標記；註解改成說明這個值的依據（量測、交易所文件、或「預設值，依量測調整」）
   - 在計畫附錄 D 填一張表：常數名稱、值、位置、用途、依據
   - F42 要改值的常數（重啟曲線、TD 帳號與 MD 連線的 heartbeat timeout）由 B3-08、B6-09、B8-02 改；這張票只記錄現值，不改值
+  - 例外（#296）：`MUST_DELIVER_CAPACITY` 不再等於 `ALL_QUEUE_CAPACITY`，改為 8192。行情佇列溢位只丟最舊的，must-deliver 溢位會讓 session fail，兩者不該共用同一個數字
   - `scripts/` 或 CI 加一個檢查：`pending Yi Te` 不得出現在 `apps/`、`packages/`
 - **驗收：** `git grep -n "pending Yi Te"` 在 `apps/`、`packages/` 沒有結果；附錄 D 列出的常數和代碼一致；CI 檢查在加回標記時會失敗。
 - **依賴：** —
@@ -768,6 +769,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - STS 磁碟的 registry 副本改成以 digest 定址，取代 `RegistryStore` 在 STS 端的 `<origin>/<name>/` 原地替換。API 端的 store 不變
   - API 的 start 從自己的 registry 與 env 解析 `(strategy_digest, env_generation)`，寫進 SessionSpec
   - worker 依 digest 載入；controller 的可部署檢查不 import
+  - worker 收到的 spec（目前是 `StsCreateSessionRequest`）補上 `(strategy_digest, env_generation)`；不換成 controller 的 `SessionSpec`，因為那份 spec 帶著刻意不交給 worker 的 `restart` 等欄位（#296）
   - import 探測子進程取代平面進程內的 `load_local_registry` 與 `runtime_env.refresh`
   - GC 與 env 的 `_prune_generations` 改成保留被釘住的版本
   - `mftik workers --stale` 加上 digest 的比對
@@ -839,8 +841,9 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 ### B6-07 cancel-on-disconnect（倒數計時型）（#225）
 
-- **範圍：** Binance UM / CM（逐 symbol）、Bitget UTA、OKX、Gate 的死人開關；帳號層級的設定；drain-replace 之前延長倒數。
-- **驗收：** 在 testnet 上 kill -9 帳號 worker，倒數到期時交易所撤單；一般重連不會觸發；各家參數寫進 adapter。
+- **範圍：** Binance UM / CM（逐 symbol）、Bitget UTA、OKX、Gate 現貨與合約的死人開關；帳號層級的設定；drain-replace 之前延長倒數。
+  - Gate（#297）：`GateDeadMan` 與 `GateFuturesDeadMan` 都 `supported()`；分別呼叫 `POST /spot/countdown_cancel_all` 與 `POST /futures/usdt/countdown_cancel_all`，不帶 `currency_pair` / `contract`（整個市場一個倒數），`refresh` 忽略 `symbols`；`timeout` 至少 5 秒，`stop` 送 `timeout=0`。adapter 的說明寫明：到期時同一把 key 在那個市場上不是 MFTIK 下的單也會被撤。
+- **驗收：** 在 testnet 上 kill -9 帳號 worker，倒數到期時交易所撤單；一般重連不會觸發；各家參數寫進 adapter。Gate 現貨若沒有 testnet，改在主網用遠離市價的最小單驗證。
 - **依賴：** B6-02、B6-04
 - **決策：** F37
 
