@@ -4,7 +4,10 @@ This is the layer §3.4 names ``mftik_td.account``. It replaces the lease
 and refcount in the old session manager, and the lifecycle half of
 ``session/session.py``. The connector, the OMS and the ledger stay
 where they are; this package is how an account worker holds them.
-B6 implements it. Nothing here is mounted on the running TD process.
+Paper order entry is B4-05. The TD process spawns
+``python -m mftik_td.account`` and does not import this package.
+``cancel_session``, settled ``oms.view``, ``oms.order``, keepalive,
+backfill, the broadcast and the dead-man's switch stay B6.
 
 **State authority (§3.3).** One writer each.
 
@@ -65,8 +68,10 @@ Subjects the handlers serve are ``td.order.{api_id}`` and
 remain fan-out. See :mod:`mftik_td.account.handlers`.
 
 Null data: reads that have no value yet return ``None`` or an empty
-collection, ``active`` and ``started`` and ``cancel_on_disconnect``
-stay false, and every action raises ``NotImplementedError("IF-11")``.
+collection, and ``active`` and ``started`` stay false until paper
+:meth:`ResidentLayer.start` and :meth:`TradingLayer.activate`.
+Actions this ticket does not implement still raise
+``NotImplementedError("IF-11")``.
 """
 
 from mftik_td.account._ticket import TICKET

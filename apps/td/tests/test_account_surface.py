@@ -1,9 +1,12 @@
 """The account-worker interface IF-11 defines, and that it only returns null.
 
 The shape is real: two layers, the handlers, the broadcast subjects, one
-dead-man's-switch slot per venue. The behaviour is not. Starting the
-pool, switching the trading layer, answering an order and publishing a
-state raise ``NotImplementedError("IF-11")``.
+dead-man's-switch slot per venue. Paper submit, cancel, unsettled
+``oms.view`` and ``ledger.view`` answer. An unwired worker refuses an
+order with ``TD_VENUE_NOT_CONNECTED`` and returns an empty book.
+Starting without a connector, ``cancel_session``, settled ``oms.view``,
+``oms.order``, keepalive, backfill, the broadcast and the dead-man's
+switch still raise ``NotImplementedError("IF-11")``.
 
 What B6 has to make true is in ``test_account_contract.py``, as xfail.
 """
@@ -28,6 +31,7 @@ from mftik.protocol import (
     Envelope,
     OrderCancel,
     OrderSubmit,
+    RejectCode,
     TdCancelSessionRequest,
     TdLedgerViewRequest,
     TdOmsOrderRequest,
@@ -156,11 +160,18 @@ def test_order_handler_types_are_submit_cancel_and_cancel_session() -> None:
 # walks the TD sources; over the 50 ms unit call cap
 @pytest.mark.component
 def test_the_td_process_does_not_import_the_account_worker() -> None:
-    """B6 wires it. The process that is running today must not."""
+    """The process spawns the worker. It does not import it."""
     root = Path(__file__).resolve().parents[1] / "src" / "mftik_td"
     offenders: list[str] = []
     for path in root.rglob("*.py"):
-        if "account" in path.relative_to(root).parts:
+        relative = path.relative_to(root)
+        if "account" in relative.parts:
+            continue
+        # B4-05 moved Session into the trading layer. This module only
+        # re-exports it so the factory, the settled helper and the tests
+        # that already import it from here keep working. The process
+        # sources still must not import the worker.
+        if relative.as_posix() == "session/session.py":
             continue
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -196,6 +207,20 @@ async def test_actions_raise_the_ticket_number() -> None:
     message = Envelope[dict[str, object]].wrap(
         {}, type=TD_ORDER_CANCEL_SESSION, source="test"
     )
+    ack = await worker.orders.submit(_submit())
+    assert ack.accepted is False
+    assert ack.error_code == RejectCode.TD_VENUE_NOT_CONNECTED
+    assert ack.client_order_id == "1"
+    cancel = await worker.orders.cancel(
+        OrderCancel(session_id=SESSION, api_id=API, client_order_id="1")
+    )
+    assert cancel.accepted is False
+    assert cancel.error_code == RejectCode.TD_VENUE_NOT_CONNECTED
+    view = await worker.oms.view(TdOmsViewRequest(api_id=API))
+    assert view.orders == {}
+    ledger = await worker.ledger.view(TdLedgerViewRequest(api_id=API))
+    assert ledger.api_id == API
+    assert ledger.balances == {}
     calls = [
         worker.resident.start(),
         worker.resident.close(),
@@ -204,17 +229,11 @@ async def test_actions_raise_the_ticket_number() -> None:
         worker.trading.activate(),
         worker.trading.deactivate(),
         worker.orders(message),
-        worker.orders.submit(_submit()),
-        worker.orders.cancel(
-            OrderCancel(session_id=SESSION, api_id=API, client_order_id="1")
-        ),
         worker.orders.cancel_session(TdCancelSessionRequest(session_id=SESSION)),
         worker.oms(message),
-        worker.oms.view(TdOmsViewRequest(api_id=API)),
         worker.oms.view(TdOmsViewRequest(api_id=API, settled=True)),
         worker.oms.order(TdOmsOrderRequest(api_id=API, client_order_id="1")),
         worker.ledger(message),
-        worker.ledger.view(TdLedgerViewRequest(api_id=API)),
         worker.broadcast.publish("ready"),
         worker.broadcast.publish_steady(),
         worker.broadcast.publish_reset(),

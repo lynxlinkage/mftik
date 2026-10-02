@@ -55,6 +55,21 @@ class ApiRepository(BaseRepository[Api]):
         result = await self.session.execute(select(Api).order_by(Api.id.asc()))
         return result.scalars().all()
 
+    async def list_by_instance(self, instance: str) -> Sequence[Api]:
+        """Credentials bound to the TD instance named ``instance``.
+
+        ``apis.instance_id`` points at ``instances.name``. There is no
+        account-level enabled column: a row in this list is an account
+        that instance may run.
+        """
+        result = await self.session.execute(
+            select(Api)
+            .join(Instance, Api.instance_id == Instance.id)
+            .where(Instance.name == instance)
+            .order_by(Api.id.asc())
+        )
+        return result.scalars().all()
+
     async def list_by_owner(self, owner_id: int) -> Sequence[Api]:
         result = await self.session.execute(
             select(Api)

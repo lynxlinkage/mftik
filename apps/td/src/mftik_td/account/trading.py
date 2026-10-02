@@ -35,8 +35,13 @@ section), so a strategy restart does not flap this layer. That rule
 belongs to the STS controller; this class only sees the intent count
 the TD controller pushes.
 
-Null until B6-02. :attr:`active` is false, and both switches raise
-``NotImplementedError("IF-11")``.
+Paper (B4-05) activates for the worker's whole life: there is no wire
+type yet for the controller's ``PUSH_TRADING``, and switching the layer
+by intent is B6-02. A trading layer constructed with a
+:class:`~mftik_td.account.session.Session` starts that book in
+:meth:`activate` and closes it in :meth:`deactivate`. Without one, both
+switches still raise ``NotImplementedError("IF-11")``. The T1–T4
+toggle, and every real venue, stay B6-02.
 """
 
 from __future__ import annotations
@@ -49,17 +54,23 @@ from mftik_td.account.resident import ResidentLayer
 from mftik_td.oms import Ledger, Oms
 
 if TYPE_CHECKING:
-    from mftik_td.session.session import TradingConnector
+    from mftik_td.account.session import Session, TradingConnector
 
 
 class TradingLayer:
     """The half of an account worker that follows intent (F35).
 
-    ``oms`` and ``ledger`` start empty. That is the null book, not a
-    reconcile. ``private`` is the venue connector B6-02 will drive;
-    ``None`` until the caller passes one. The connector protocol is the
-    one :class:`~mftik_td.session.session.Session` already consumes, not
+    ``oms`` and ``ledger`` start empty, or as the session's book when
+    the caller passes one. That empty book is not a reconcile.
+    ``private`` is the venue connector. The connector protocol is the
+    one :class:`~mftik_td.account.session.Session` already consumes, not
     a second trading interface.
+
+    Paper passes ``session``. :meth:`activate` starts it and
+    :meth:`deactivate` destroys it, and neither call touches the
+    resident layer (T1). B6-02 is what switches this from intent. Until
+    then a paper worker activates once, at startup, and leaves the
+    layer up.
     """
 
     def __init__(
@@ -69,35 +80,66 @@ class TradingLayer:
         oms: Oms | None = None,
         ledger: Ledger | None = None,
         private: TradingConnector | None = None,
+        session: Session | None = None,
     ) -> None:
         self.resident = resident
-        self.oms = oms if oms is not None else Oms()
-        self.ledger = ledger if ledger is not None else Ledger()
-        self.private = private
+        self._session = session
+        if session is not None:
+            self.oms = session.oms
+            self.ledger = session.ledger
+            self.private = session.private
+        else:
+            self.oms = oms if oms is not None else Oms()
+            self.ledger = ledger if ledger is not None else Ledger()
+            self.private = private
         #: Leverage figures, keyed by universal ticker. Empty until a
         #: lookup fills them (B6-02). The cache is this layer's, so it
         #: goes away on :meth:`deactivate` and is not part of the
         #: resident pool.
         self.leverage: dict[str, Decimal] = {}
+        self._active = False
+
+    @property
+    def session(self) -> Session | None:
+        """The paper book, or ``None`` until the caller binds one."""
+        return self._session
 
     @property
     def active(self) -> bool:
-        """Whether the private book is up. False until B6-02."""
-        return False
+        """Whether the private book is up.
+
+        False until :meth:`activate` on a layer that has a session.
+        """
+        return self._active
 
     async def activate(self) -> None:
-        """Open the private book (T3). Does not touch the resident layer (T1).
+        """Open the private book. Does not touch the resident layer (T1).
 
-        Connects the private websocket, runs recon, brings the OMS and
-        the ledger online, and subscribes ``td.order.{api_id}``.
-        ``TdReady`` is false until that recon finishes. B6-02.
+        With a session, this is :meth:`Session.start`: connect, recon,
+        the OMS and the ledger. The order subject is served by the
+        worker process, not by this method. Without a session the
+        switch is still B6-02.
         """
-        raise NotImplementedError(TICKET)
+        if self._session is None:
+            raise NotImplementedError(TICKET)
+        if self._active:
+            return
+        await self._session.start()
+        self.oms = self._session.oms
+        self.ledger = self._session.ledger
+        self.private = self._session.private
+        self._active = True
 
     async def deactivate(self) -> None:
-        """Close the private book now (T2). The resident layer stays (T1).
+        """Close the private book. The resident layer stays (T1).
 
-        No linger. In-flight backfill on the resident pool is not
-        cancelled by this. B6-02.
+        With a session, this is :meth:`Session.destroy`. Without one the
+        switch is still B6-02. A layer that was never activated still
+        raises: there is nothing to close, and the null surface stays
+        distinguishable from a book that came down.
         """
-        raise NotImplementedError(TICKET)
+        if self._session is None or not self._active:
+            raise NotImplementedError(TICKET)
+        await self._session.destroy()
+        self.leverage = {}
+        self._active = False

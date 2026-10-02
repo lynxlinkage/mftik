@@ -5,8 +5,9 @@ Splitting the two websockets a venue opens (Bybit's trade socket and
 its private stream, Binance's WS API and its user stream) would put
 the OMS and the ledger in two processes. They stay here.
 
-The TD process does not construct this. B6 wires it. Importing the
-module starts nothing.
+The TD process does not import this package. It spawns
+``python -m mftik_td.account``, and that entry constructs one worker.
+Importing the module starts nothing.
 
 Code identity (F39, F40) is not this layer's. There is no
 ``strategy_digest``, ``env_generation`` or ``code_ref`` here, and this
@@ -26,8 +27,8 @@ from mftik_td.account.resident import Keepalive, ResidentLayer
 from mftik_td.account.trading import TradingLayer
 
 if TYPE_CHECKING:
+    from mftik_td.account.session import Session, TradingConnector
     from mftik_td.oms import Ledger, Oms
-    from mftik_td.session.session import TradingConnector
 
 
 def _positive_id(value: object, name: str) -> int:
@@ -64,6 +65,7 @@ class AccountWorker:
         oms: Oms | None = None,
         ledger: Ledger | None = None,
         private: TradingConnector | None = None,
+        session: Session | None = None,
     ) -> None:
         self.api_id = _positive_id(api_id, "api_id")
         self.incarnation = _incarnation(incarnation)
@@ -71,11 +73,19 @@ class AccountWorker:
             raise TypeError("cancel_on_disconnect must be a bool")
         self.venue = require(venue).name
         self.cancel_on_disconnect = cancel_on_disconnect
+        connector = session.private if session is not None else private
         self.resident = ResidentLayer(
-            self.api_id, venue=self.venue, keepalive=keepalive
+            self.api_id,
+            venue=self.venue,
+            keepalive=keepalive,
+            connector=connector,
         )
         self.trading = TradingLayer(
-            self.resident, oms=oms, ledger=ledger, private=private
+            self.resident,
+            oms=oms,
+            ledger=ledger,
+            private=private,
+            session=session,
         )
         self.deadman: DeadMansSwitch = deadman_for(self.venue)
         self.broadcast = StateBroadcast(self.api_id, self.incarnation)

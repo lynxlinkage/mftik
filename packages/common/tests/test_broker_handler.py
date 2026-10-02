@@ -565,13 +565,7 @@ def test_the_three_planes_answer_through_this_layer() -> None:
     [
         "sts",
         "md",
-        pytest.param(
-            "td",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="B4-05 rewrites the TD router onto this layer",
-            ),
-        ),
+        "td",
     ],
 )
 async def test_a_plane_s_health_type_is_answered_by_a_handler(plane: str) -> None:

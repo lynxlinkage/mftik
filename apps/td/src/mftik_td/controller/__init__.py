@@ -11,16 +11,16 @@ Drain-replace still raises ``NotImplementedError("IF-12")``.
 change :meth:`~mftik.procman.Supervisor.spawn`.
 
 The running process registers :func:`intent_handler` on
-``td.{instance}`` and subscribes to ``procman.report.sts.*``. It does
-not construct :class:`TdOrchestrator`: that needs a
-:class:`~mftik.procman.RestartIntensity`, and those numbers are not
-chosen (issue #286). Held intents are a :class:`TdIntentBook`. Nothing
-is delivered to an account worker from that book (P5). B6-04 does
-drain-replace. The pid fence is :func:`~mftik.procman.previous_worker_gone`
-on :class:`AccountView`, and :meth:`~mftik.procman.Supervisor.spawn`
-still enforces it (B3-03, F36). This package does not import strategy
-code and does not carry ``strategy_digest`` or ``env_generation``
-(F39, IF-16).
+``td.{instance}``, subscribes to ``procman.report.sts.*``, and
+constructs :class:`TdOrchestrator` with the provisional
+:class:`~mftik.procman.RestartIntensity` built from
+:mod:`mftik_td.controller.defaults` (issue #286). Held intents are a
+:class:`TdIntentBook`. ``PUSH_TRADING`` is named and not delivered
+(P5, B6-02). B6-04 does drain-replace. The pid fence is
+:func:`~mftik.procman.previous_worker_gone` on :class:`AccountView`,
+and :meth:`~mftik.procman.Supervisor.spawn` still enforces it (B3-03,
+F36). This package does not import strategy code and does not carry
+``strategy_digest`` or ``env_generation`` (F39, IF-16).
 
 **State authority (§3.3).**
 
@@ -64,8 +64,8 @@ code and does not carry ``strategy_digest`` or ``env_generation``
   stop. The next incarnation is named only once the pid is gone. The
   trading bit is not cleared by a drain.
 * **K1** The worker spec says ``restart="on_failure"``. The intensity
-  passed to :func:`~mftik.procman.plan_restart` is the caller's
-  (issue #286). This package does not construct one. There is no crash
+  passed to :func:`~mftik.procman.plan_restart` is the provisional one
+  built from :mod:`mftik_td.controller.defaults` (issue #286). There is no crash
   class (P6). See :meth:`TdOrchestrator.account_restart`.
 
 Procman knows processes. Account membership, the trading bit and

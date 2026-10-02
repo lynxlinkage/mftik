@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
-import pytest
-from broker_harness import a_broker
-from mftik.broker import Broker
 from mftik.protocol import (
     TD_ERROR,
     TD_HEALTH,
@@ -12,47 +7,24 @@ from mftik.protocol import (
     HealthCheckEnvelope,
     HealthStatus,
     RpcError,
-    Topics,
+    UntypedEnvelope,
 )
 from mftik_td.rpc import dispatch
 
-# B2-05: borrows NATS to reach TD's router. Direct handler call: B4-05 (#205).
-pytestmark = pytest.mark.integration
 
-
-@pytest.fixture
-async def broker() -> Broker:
-    async with a_broker() as client:
-        yield client
-
-
-@pytest.mark.real_sleep(
-    reason="this test calls asyncio.sleep while waiting for a real side effect"
-)
-@pytest.mark.asyncio
-async def test_td_health_reply(broker: Broker) -> None:
-    stop = asyncio.Event()
-
-    async def server() -> None:
-        async for req in broker.serve(Topics.td("td"), stop=stop):
-            await dispatch(req)
-            break
-        stop.set()
-
-    task = asyncio.create_task(server())
-    await asyncio.sleep(0.05)
-
-    reply = await broker.request(
-        Topics.td("td"),
+async def test_td_health_reply() -> None:
+    """Direct handler call: B4-05 (#205)."""
+    message = UntypedEnvelope.model_validate_json(
         HealthCheckEnvelope.wrap(
             HealthCheck(),
             type=TD_HEALTH,
             source="api",
-        ),
-        timeout=2,
+        ).to_json()
     )
-    await task
 
+    reply = await dispatch(message)
+
+    assert reply is not None
     assert reply.type == TD_HEALTH
     assert reply.source == "td"
     status = HealthStatus.model_validate(reply.payload)
@@ -60,33 +32,19 @@ async def test_td_health_reply(broker: Broker) -> None:
     assert status.service == "td"
 
 
-@pytest.mark.real_sleep(
-    reason="this test calls asyncio.sleep while waiting for a real side effect"
-)
-@pytest.mark.asyncio
-async def test_td_unknown_type_error(broker: Broker) -> None:
-    stop = asyncio.Event()
-
-    async def server() -> None:
-        async for req in broker.serve(Topics.td("td"), stop=stop):
-            await dispatch(req)
-            break
-        stop.set()
-
-    task = asyncio.create_task(server())
-    await asyncio.sleep(0.05)
-
-    reply = await broker.request(
-        Topics.td("td"),
+async def test_td_unknown_type_error() -> None:
+    """Direct handler call: B4-05 (#205)."""
+    message = UntypedEnvelope.model_validate_json(
         HealthCheckEnvelope.wrap(
             HealthCheck(note="nope"),
             type="td.not_a_method",
             source="api",
-        ),
-        timeout=2,
+        ).to_json()
     )
-    await task
 
+    reply = await dispatch(message)
+
+    assert reply is not None
     assert reply.type == TD_ERROR
     err = RpcError.model_validate(reply.payload)
     assert err.code == "unknown_type"
