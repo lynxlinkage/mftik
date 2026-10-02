@@ -11,6 +11,9 @@ from mftik.registry import RegistryStore, migrate, qualify
 from mftik.registry.errors import RegistryError
 from mftik.registry.migrate import migrate_registry
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 
 def _plant(root: Path, dirname: str, cls: str) -> None:
     dest = root / dirname

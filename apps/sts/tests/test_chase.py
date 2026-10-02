@@ -33,6 +33,10 @@ from mftik.protocol import (
 )
 from mftik_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder, _floor_hint
 
+# §9.1 component (chase.py still sleeps on the wall clock).
+# Slow cases miss the 50 ms unit cap; 500 ms still applies.
+pytestmark = pytest.mark.component
+
 BTCUSDT = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",
     base="BTC",
@@ -484,6 +488,9 @@ async def test_a_partial_fill_keeps_chasing_the_remainder() -> None:
     assert strat.oms.submitted[1]["qty"] == Decimal("0.06")
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_expiry_ends_the_session() -> None:
     strat = _strategy(expiry_s=30, must_exec=False)
@@ -499,6 +506,9 @@ async def test_expiry_ends_the_session() -> None:
     assert all(o["type"] is OrderType.LIMIT for o in strat.oms.submitted)
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_expiry_with_must_exec_sweeps_the_rest_with_ioc() -> None:
     strat = _strategy(qty=Decimal("0.1"), expiry_s=30, must_exec=True)
@@ -525,6 +535,12 @@ async def test_expiry_with_must_exec_sweeps_the_rest_with_ioc() -> None:
     assert strat.session.exits == ["chase_expired"]
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_takes_one_level_at_a_time() -> None:
     """Slice by slice off the touch, rather than one walk down the book."""
@@ -547,6 +563,12 @@ async def test_the_sweep_takes_one_level_at_a_time() -> None:
     assert strat._remaining() == Decimal("0")
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_reprices_off_a_fresher_quote_each_slice() -> None:
     """Quotes keep arriving while the sweep pauses; each slice reads the last."""
@@ -569,6 +591,12 @@ async def test_the_sweep_reprices_off_a_fresher_quote_each_slice() -> None:
     assert slices[-1]["price"] == Decimal("50010")
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_gives_up_rather_than_looping_forever() -> None:
     """must_exec is a promise the venue can still refuse to let us keep."""
@@ -585,6 +613,9 @@ async def test_the_sweep_gives_up_rather_than_looping_forever() -> None:
     assert strat.session.exits == ["chase_expired"]
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_slippage_past_extreme_bps_ends_the_session() -> None:
     strat = _strategy(side="buy", extreme_bps=50, must_exec=False)
@@ -609,6 +640,9 @@ async def test_slippage_is_measured_in_the_direction_that_costs() -> None:
     assert strat.session.exits == []
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_a_sell_slips_when_the_bid_falls() -> None:
     strat = _strategy(side="sell", extreme_bps=50)
@@ -634,6 +668,9 @@ async def test_a_complete_fill_at_expiry_sends_no_market_order() -> None:
     assert len(strat.oms.submitted) == before
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_it_ends_only_once() -> None:
     strat = _strategy(expiry_s=30, must_exec=True)
@@ -740,6 +777,9 @@ async def test_any_other_td_refusal_also_stops() -> None:
     assert strat.session.failures == ["chase_refused"]
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_stops_on_a_refusal_instead_of_burning_its_budget() -> None:
     strat = _strategy(qty=Decimal("0.1"), expiry_s=30, must_exec=True)
@@ -798,6 +838,9 @@ async def test_exactly_enough_is_enough() -> None:
     assert strat.session.exits == []
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_checks_the_ledger_too() -> None:
     strat = _strategy(qty=Decimal("0.1"), expiry_s=30, must_exec=True)

@@ -16,6 +16,10 @@ from mftik.exchange.okx.rest import OkxPublicRest
 from mftik.exchange.tickers import Category, UniversalTicker
 from okx_stub import FakeOkx
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("Okx_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Okx_Perp_BTCUSDT")
 NATIVE = "BTC-USDT"
@@ -120,6 +124,9 @@ async def test_a_perp_liquidation_stream_is_offered_and_spot_is_not() -> None:
             client.stream_liquidation(TICKER)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_funding_rate_arrives_from_its_own_channel(
     okx_public: FakeOkx,
 ) -> None:
@@ -161,6 +168,9 @@ async def test_spot_has_no_funding_rate_stream() -> None:
             client.stream_funding_rate(TICKER)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_open_interest_arrives_from_its_own_channel(
     okx_public: FakeOkx,
 ) -> None:
@@ -194,6 +204,9 @@ async def test_open_interest_arrives_from_its_own_channel(
     assert okx_public.subscribed == {("open-interest", "BTC-USDT-SWAP", "")}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_empty_open_interest_row_is_skipped(
     okx_public: FakeOkx,
 ) -> None:

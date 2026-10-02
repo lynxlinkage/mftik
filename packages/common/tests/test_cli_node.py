@@ -16,6 +16,9 @@ import pytest
 import yaml
 from mftik.cli.app import EXIT_ERROR, main
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 
 def _written(root: Path) -> dict[str, str]:
     return {

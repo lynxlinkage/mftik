@@ -16,6 +16,10 @@ from mftik.exchange.gate.future.rest import GateFuturesPublicRest
 from mftik.exchange.models import Side
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("GateFutures_Perp_BTCUSDT")
 CS = Decimal("0.0001")
 
@@ -69,6 +73,9 @@ async def _wait_sub(gate: FakeGateFutures, channel: str) -> None:
     raise AssertionError(f"no subscribe for {channel}")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_five_feeds_and_liquidation(gate_futures: FakeGateFutures) -> None:
     client = await _public(gate_futures)
     async with client:
@@ -152,6 +159,9 @@ async def test_five_feeds_and_liquidation(gate_futures: FakeGateFutures) -> None
         assert liq.qty == Decimal("0.001")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_ticker_and_funding_share_one_single_contract_subscribe(
     gate_futures: FakeGateFutures,
 ) -> None:
@@ -184,6 +194,9 @@ async def test_ticker_and_funding_share_one_single_contract_subscribe(
     assert not hasattr(funding, "next_funding_time")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_funding_ts_falls_back_to_the_row_when_the_frame_has_no_clock(
     gate_futures: FakeGateFutures,
 ) -> None:
@@ -208,6 +221,9 @@ async def test_funding_ts_falls_back_to_the_row_when_the_frame_has_no_clock(
     assert funding.ts == 1_700_000_000.0
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_open_interest_converts_total_size_and_skips_a_row_without_it(
     gate_futures: FakeGateFutures,
 ) -> None:
@@ -239,6 +255,9 @@ async def test_open_interest_converts_total_size_and_skips_a_row_without_it(
     assert interest.ts == 1_700_000_001.5
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_ticker_and_open_interest_share_one_single_contract_subscribe(
     gate_futures: FakeGateFutures,
 ) -> None:

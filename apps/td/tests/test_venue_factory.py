@@ -30,6 +30,10 @@ from mftik.exchange.okx.private import OkxPrivateClient
 from mftik.exchange.tickers import Category
 from mftik_td.session import PaperSessionFactory, VenueSessionFactory
 
+# B2-05: borrows NATS to build venue sessions. B4-05 (#205) moves this
+# factory into the resident layer.
+pytestmark = pytest.mark.integration
+
 #: What a Binance credential's ``api_secret`` actually holds: an Ed25519
 #: private key, not a shared secret.
 ED25519_PEM = (
@@ -75,6 +79,9 @@ def _factory(broker: Broker, rows: dict[int, FakeApiRow], **kwargs):
     return VenueSessionFactory(broker, load_api=load_api, **kwargs)
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 async def test_paper_venue_builds_a_paper_session(
     broker: Broker, paper: PaperExchange
 ) -> None:

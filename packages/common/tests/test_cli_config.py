@@ -13,6 +13,9 @@ import pytest
 from mftik.cli import config
 from mftik.cli.config import Config, ConfigError, Profile
 
+# profile file IO; over the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 
 @pytest.fixture(autouse=True)
 def config_file(tmp_path: Path, monkeypatch) -> Path:

@@ -159,6 +159,8 @@ async def test_a_websocket_without_a_session_is_refused_before_accept(db) -> Non
     assert sent == [{"type": "websocket.close", "code": 1008}]
 
 
+# password hash plus the socket; over the 500 ms component cap
+@pytest.mark.integration
 async def test_a_websocket_with_a_session_reaches_the_endpoint(db) -> None:
     async with a_client(an_api()) as client:
         await an_owner_with_a_password(client)
@@ -189,6 +191,8 @@ async def test_a_websocket_with_a_session_reaches_the_endpoint(db) -> None:
     assert seen["principal"].via == "password"
 
 
+# OpenAPI generation; over the 500 ms component cap
+@pytest.mark.integration
 def test_the_public_surface_is_the_one_we_meant() -> None:
     """Read from the real app, so a new route cannot join the list quietly.
 

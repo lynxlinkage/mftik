@@ -25,8 +25,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Same matrix as tests.yml — see the note there for why sqlite alone will
-    # not do. A release must not be gated on a weaker suite than a PR is.
+    # Same split as tests.yml. A release must not be gated on a weaker suite
+    # than a PR is: `just test` (unit + component, 120s gate) and
+    # `just test-int` (integration, e2e, Postgres).
     services:
       postgres:
         image: postgres:16-alpine
@@ -67,6 +68,12 @@ jobs:
           docker logs nats >&2 || true
           exit 1
 
+      - name: Install just
+        run: |
+          curl -sSfL -o /tmp/just.tar.gz \
+            https://github.com/casey/just/releases/download/1.42.4/just-1.42.4-x86_64-unknown-linux-musl.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/just.tar.gz just
+
       - name: Sync
         run: uv sync --all-packages
 
@@ -81,8 +88,16 @@ jobs:
           uv run --all-packages alembic -c packages/db/alembic.ini upgrade head
           uv run --all-packages alembic -c packages/db/alembic.ini check
 
-      - name: Test
-        run: uv run --all-packages pytest packages apps -q
+      # Unit + component. Postgres is parametrized but deselected (`-m`),
+      # and this step fails if its wall time exceeds 120s (F30).
+      - name: just test
+        run: just test
+
+      - name: just test-int
+        env:
+          MFTIK_REQUIRE_POSTGRES: "1"
+        run: just test-int
+
       - name: Contracts up to date
         run: |
           uv run --all-packages python -c \

@@ -18,6 +18,10 @@ from mftik.exchange.binance.delivery.protocol import BinanceWsError
 from mftik.exchange.binance.delivery.user import BinanceDeliveryUserStream
 from mftik.exchange.errors import ExchangeError
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def _api(stub: FakeBinanceDeliveryApi, pem: str | None = None) -> BinanceDeliveryWsApi:
     return BinanceDeliveryWsApi(
@@ -49,6 +53,9 @@ async def test_a_public_client_never_logs_on(
     assert not delivery_api.calls(m.SESSION_LOGON)
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_reconnect_logs_on_again_before_anything_else(
     delivery_api: FakeBinanceDeliveryApi, binance_key
 ) -> None:
@@ -227,6 +234,9 @@ async def test_a_listen_key_call_off_a_cold_session_names_the_key(
     assert delivery_api.call(m.USER_DATA_STREAM_PING)["params"] == {"apiKey": API_KEY}
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_the_user_socket_is_opened_on_the_key_it_was_issued(
     delivery_user: FakeBinanceDeliveryUser,
 ) -> None:
@@ -240,6 +250,9 @@ async def test_the_user_socket_is_opened_on_the_key_it_was_issued(
         await stream.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_account_events_route_to_their_own_views(
     delivery_user: FakeBinanceDeliveryUser,
 ) -> None:
@@ -284,6 +297,9 @@ async def test_account_events_route_to_their_own_views(
         await stream.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_an_expired_listen_key_reopens_the_socket_with_a_new_one(
     delivery_user: FakeBinanceDeliveryUser,
 ) -> None:
@@ -304,6 +320,9 @@ async def test_an_expired_listen_key_reopens_the_socket_with_a_new_one(
         await stream.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_the_key_is_renewed_for_as_long_as_the_socket_is_up(
     delivery_user: FakeBinanceDeliveryUser,
 ) -> None:

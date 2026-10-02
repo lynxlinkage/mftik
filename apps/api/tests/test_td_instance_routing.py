@@ -109,6 +109,12 @@ async def test_a_deploy_against_a_missing_credential_refuses(db) -> None:
     assert refused.value.code == "unknown_api"
 
 
+# B2-05: the sweep borrows NATS. Direct handler call: B6-05 (#223).
+# sqlite call over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="backfill sweep still sleeps on the wall clock"
+)
 async def test_the_sweep_posts_each_account_to_its_own_queue(
     broker, db
 ) -> None:
@@ -135,6 +141,12 @@ async def test_the_sweep_posts_each_account_to_its_own_queue(
         await asyncio.gather(jp_task, us_task, return_exceptions=True)
 
 
+# B2-05: the sweep borrows NATS. Direct handler call: B6-05 (#223).
+# sqlite call over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="backfill sweep still sleeps on the wall clock"
+)
 async def test_a_jp_credential_never_reaches_the_us_queue(broker, db) -> None:
     """Stated on its own because it is the sentence the requirement is in."""
     async with db() as session:

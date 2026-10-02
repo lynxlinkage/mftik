@@ -10,6 +10,10 @@ from mftik.broker import Broker
 from mftik.health import InstanceAlreadyServing, refuse_if_serving
 from mftik.protocol import HealthStatus, HealthStatusEnvelope, Topics
 
+# B2-05: boot probe through NATS. F36 replaces ``refuse_if_serving`` with
+# the supervisor's /proc scan in B3-03 (#196). Not a handler call.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -17,11 +21,17 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_quiet_subject_is_not_already_serving(broker: Broker) -> None:
     await refuse_if_serving(broker, domain="sts", instance="sts-tw", timeout=0.3)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_responder_is_named_and_refused(broker: Broker) -> None:
     stop = asyncio.Event()
@@ -50,6 +60,9 @@ async def test_a_responder_is_named_and_refused(broker: Broker) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_health_on_the_control_subject_counts_as_a_responder(
     broker: Broker,

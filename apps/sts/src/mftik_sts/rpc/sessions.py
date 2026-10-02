@@ -1,14 +1,17 @@
-"""STS session start / end / list RPC — placeholders until IF-04.
+"""STS session RPC — still the router's placeholders.
+
+The interface is :mod:`mftik_sts.controller` (IF-04). These functions stay
+registered and still raise ``NotImplementedError("IF-04")``. The running
+process does not call the controller. B4-02 is what wires it in.
 
 RM-04 deleted the session manager these handlers called: the per-session
 subprocess, its process table, and the DB wiring that made a row out of it.
 Nothing in this plane can start or end a session now, so each handler raises
 rather than answering with something a caller could mistake for a session.
 
-They stay registered in the router on purpose. An unknown type is a plane
-that was never told about the message; this is a plane that knows the
-message and cannot serve it yet, and the two should not read the same in a
-log. IF-04 (#182) defines the interface that replaces them.
+They stay registered on purpose. An unknown type is a plane that was never
+told about the message; this is a plane that knows the message and cannot
+serve it yet, and the two should not read the same in a log.
 """
 
 from __future__ import annotations

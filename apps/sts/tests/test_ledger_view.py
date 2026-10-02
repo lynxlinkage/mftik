@@ -23,6 +23,10 @@ from mftik.protocol import (
 )
 from mftik.strategy.ledger import StrategyLedger
 
+# B2-05: borrows NATS to test strategy ledger reads. Direct handler call:
+# B6-02 (#220).
+pytestmark = pytest.mark.integration
+
 API_ID = 7
 
 
@@ -181,6 +185,9 @@ async def test_a_later_write_is_what_the_strategy_sees(broker: Broker) -> None:
         await book.close()
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_td_down_fails_closed(broker: Broker) -> None:
     ledger = _ledger(broker, API_ID)

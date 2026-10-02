@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from mftik.cli.app import EXIT_ERROR, main
+
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -267,6 +271,8 @@ def test_on_initialized_refusal_is_named(tmp_path: Path, capsys) -> None:
     assert "Traceback" not in err
 
 
+# imports the tree and formats a traceback; over the 50 ms unit cap
+@pytest.mark.component
 def test_traceback_shows_where_the_strategy_raised(tmp_path: Path, capsys) -> None:
     """The message alone rarely locates a line in somebody's own code."""
     dest = _tree(tmp_path, _QTY)

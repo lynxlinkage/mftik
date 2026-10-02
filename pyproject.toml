@@ -21,6 +21,9 @@ dev = [
     # is why one loop factory leaves test ids alone.
     "pytest>=8.4",
     "pytest-asyncio>=1.4",
+    # B2-04: parallel unit+component runs, and a hang backstop per tier.
+    "pytest-xdist>=3.6",
+    "pytest-timeout>=2.3",
     "ruff>=0.9",
     "aiosqlite>=0.20",
     "fakeredis>=2.23",
@@ -38,6 +41,22 @@ ignore = ["UP046"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages", "apps"]
+# Tier markers. ``integration`` keeps the B2-02 wording the sleep guard was
+# written against. ``component`` and ``e2e`` are the §9.1 tiers (B2-04).
+# ``real_sleep`` is the narrow opt-out from the sleep ban.
+# pytest-timeout is the per-tier hang backstop (§9.2 rule 8). It times the
+# call only — fixture setup is not the call phase F30 measures. The §9.1
+# caps themselves are the call-phase gate in ``tier_budget``. Locally that
+# fails a unit test whose call ran past 50 ms. On CI the unit and component
+# caps warn instead; the numbers stay the same.
+markers = [
+    "component: component tier (§9.1). Shared NATS, sqlite, FakeClock, in-proc fakes. Wall-clock asyncio.sleep is forbidden, same as an unmarked unit test.",
+    "integration: real subprocesses; outside the unit budget once tiers land (§9.1). Wall-clock asyncio.sleep is allowed.",
+    "e2e: e2e tier (§9.1). Wall-clock asyncio.sleep is allowed.",
+    "real_sleep(reason): opt a unit or component test out of the asyncio.sleep(x > 0) ban. reason is a non-empty string.",
+]
+timeout_func_only = true
+timeout_method = "thread"
 pythonpath = [
     # The venue stand-in servers (`gate_stub`, `binance_stub`) live beside the
     # adapter tests that drive them hardest, but the apps composing those

@@ -19,6 +19,10 @@ from mftik.protocol.messages import SymbolInfo
 from mftik_td.oms import Ledger
 from mftik_td.session.session import Session
 
+# B2-05: borrows NATS to test leverage behaviour. Direct handler call:
+# B6-02 (#220).
+pytestmark = pytest.mark.integration
+
 DATED = UniversalTicker.parse("BinanceUM_Future_BTCUSDT-250926")
 PERP = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 SPOT = UniversalTicker.parse("Binance_Spot_BTCUSDT")

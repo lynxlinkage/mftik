@@ -183,6 +183,8 @@ def test_the_session_is_given_back_after_minting(a_node, monkeypatch) -> None:
     assert node.paths.index("/auth/logout") > node.paths.index("/auth/keys")
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 def test_the_key_is_named_after_this_machine(a_node, monkeypatch) -> None:
     """So revoking the laptop that was lost is not revoking all of them."""
     node = a_node(Node_())

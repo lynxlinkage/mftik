@@ -256,6 +256,9 @@ async def test_a_redelivered_fill_does_not_cost_the_whole_batch(
     assert [f.fill_id for f in fills] == ["987654", "987655"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_backlog_drains_without_waiting_out_the_interval(
     scope, read
 ) -> None:
@@ -347,6 +350,9 @@ async def test_stop_drains_what_is_queued(scope, read) -> None:
     assert len(fills) == 1
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_flush_loop_writes_on_its_own_interval(scope, read) -> None:
     writer = HistoryWriter(scope=scope, flush_interval=0.05)
     await writer.start()

@@ -16,6 +16,10 @@ from mftik.exchange.bitget.rest import BitgetPublicRest
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SPOT = UniversalTicker.parse("Bitget_Spot_BTCUSDT")
 PERP = UniversalTicker.parse("Bitget_Perp_BTCUSDT")
 USDC = UniversalTicker.parse("Bitget_Perp_BTCUSDC")
@@ -87,6 +91,9 @@ async def test_feeds_start_empty_and_open_per_product() -> None:
         assert hasattr(client, "stream_liquidation")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_spot_ticker_never_opens_a_futures_socket(
     bitget_public: FakeBitget,
 ) -> None:
@@ -121,6 +128,9 @@ async def test_a_spot_ticker_never_opens_a_futures_socket(
     assert opened == {"SPOT"}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_public_trade_on_btcusdc_publishes_the_usdc_perp(
     bitget_public: FakeBitget,
 ) -> None:
@@ -171,6 +181,9 @@ async def test_i6_spot_has_no_liquidation_funding_or_oi() -> None:
         client.stream_open_interest(USDC)
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_bestquote_and_trade_both_print_on_one_spot_socket(
     bitget_public: FakeBitget,
 ) -> None:
@@ -218,6 +231,9 @@ async def test_bestquote_and_trade_both_print_on_one_spot_socket(
     }
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_v5_funding_and_oi_ride_the_ticker(
     bitget_public: FakeBitget,
 ) -> None:

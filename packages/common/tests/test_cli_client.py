@@ -20,6 +20,9 @@ from mftik.cli.client import (
     probe,
 )
 
+# HTTP client round-trip; over the 50 ms unit call cap under load
+pytestmark = pytest.mark.component
+
 
 def _transport(handler) -> httpx.MockTransport:  # noqa: ANN001
     return httpx.MockTransport(handler)

@@ -404,6 +404,11 @@ async def test_an_oversized_tree_still_rescans_a_shared_disk(
     assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
 
 
+# fake broker plus wall-clock sleep; over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_reconcile_cannot_prune_an_oversized_push(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

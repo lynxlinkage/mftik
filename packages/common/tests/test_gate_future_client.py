@@ -12,6 +12,10 @@ from mftik.exchange.gate.future import channels as ch
 from mftik.exchange.gate.future.client import GateFuturesWebSocket
 from mftik.exchange.gate.future.protocol import api_sign
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 async def _client(gate: FakeGateFutures, **kwargs: Any) -> GateFuturesWebSocket:
     return GateFuturesWebSocket(url=gate.url, ping_interval=0, **kwargs)  # type: ignore[attr-defined]
@@ -75,6 +79,9 @@ async def test_two_consumers_share_one_venue_subscription(
             assert row.contract == "BTC_USDT"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_replays_each_order_book_payload(
     gate_futures: FakeGateFutures,
 ) -> None:
@@ -112,6 +119,9 @@ async def test_unsubscribe_scoped_without_uid_is_refused(
             await ws.unsubscribe(ch.POSITIONS, [])
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribe_one_contract_leaves_the_other(
     gate_futures: FakeGateFutures,
 ) -> None:

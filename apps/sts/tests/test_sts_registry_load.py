@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from mftik.registry import RegistryStore
 from mftik.registry.migrate import migrate_registry
 from mftik_sts.impl import load_local_registry, resolve, resolve_class
@@ -95,6 +96,8 @@ def test_public_and_private_both_load(tmp_path) -> None:
     assert resolve("private::Tiny").name == "tiny"
 
 
+# loads and resolves a tree; over the 50 ms unit call cap
+@pytest.mark.component
 def test_a_pulled_copy_resolves_once_the_migration_has_renamed_it(
     tmp_path,
 ) -> None:

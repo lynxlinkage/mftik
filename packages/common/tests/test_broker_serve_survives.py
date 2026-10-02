@@ -10,19 +10,23 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from broker_harness import inject_raw_request, session_loop
 from mftik.broker import Broker, IncomingRequest
 from mftik.protocol import Envelope
 
 SUBJECT = "demo"
 
-pytestmark = session_loop
+pytestmark = [session_loop, pytest.mark.component]
 
 
 def _envelope(n: int) -> Envelope[dict[str, Any]]:
     return Envelope[dict].wrap({"n": n}, type="demo", source="test")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_unreadable_request_is_dropped_rather_than_served(
     broker: Broker,
 ) -> None:
@@ -51,6 +55,9 @@ async def test_an_unreadable_request_is_dropped_rather_than_served(
     assert req.envelope.payload == {"n": 2}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_stop_event_ends_the_loop(broker: Broker) -> None:
     """The one thing that may end it, and it must actually end it."""
     stop = asyncio.Event()

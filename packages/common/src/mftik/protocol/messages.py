@@ -1231,11 +1231,21 @@ class TdLedgerViewRequest(BaseModel):
 
 
 class TdOmsViewRequest(BaseModel):
-    """STS → TD: live orders and positions on ``td.account.{api_id}``."""
+    """STS → TD: live orders and positions on ``td.account.{api_id}``.
+
+    ``settled`` defaults to false: the book as it stands, including any
+    ``UNKNOWN`` order, answered from TD memory without waiting on the
+    venue (§7.1). ``settled=True`` waits until those orders converge, or
+    until the wait times out, and then answers with the book as it
+    stands (F13). The account-worker handler is
+    ``mftik_td.account.OmsHandler.view`` (IF-11). Making the wait real
+    is B6-08. Callers that omit the field keep the unsettled read.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     api_id: int
+    settled: bool = False
 
 
 class TdOmsOrderRequest(BaseModel):

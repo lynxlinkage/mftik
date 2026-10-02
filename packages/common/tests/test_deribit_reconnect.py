@@ -18,6 +18,10 @@ from mftik.exchange.deribit.account import DeribitPrivateStream
 from mftik.exchange.deribit.feed import DeribitPublicStream
 from websockets.exceptions import ConnectionClosed
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 
 def _fast(url: str, **kwargs: float) -> DeribitPublicStream:
     return DeribitPublicStream(
@@ -58,6 +62,9 @@ def _gap() -> dict[str, object]:
     }
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 @pytest.mark.parametrize("hook", ["_on_open", "_restore"])
 async def test_a_failed_setup_closes_the_socket_and_retries(
     deribit_public: FakeDeribit, hook: str
@@ -95,6 +102,9 @@ async def test_a_failed_setup_closes_the_socket_and_retries(
         assert feed.connected
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_failed_private_auth_is_retried(deribit: FakeDeribit) -> None:
     """An auth error after the socket is open must not leave it unauthenticated."""
     stream = DeribitPrivateStream(
@@ -137,6 +147,9 @@ async def test_a_failed_private_auth_is_retried(deribit: FakeDeribit) -> None:
         assert stream.authenticated
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dropped_socket_fails_the_pending_request(
     deribit: FakeDeribit,
 ) -> None:
@@ -175,6 +188,11 @@ async def test_a_dropped_socket_fails_the_pending_request(
         assert deribit.connections == 2
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_resync_reply_lost_on_drop_does_not_drop_the_restored_socket(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -211,6 +229,11 @@ async def test_a_resync_reply_lost_on_drop_does_not_drop_the_restored_socket(
         assert channel in feed._ledger.held()
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_resync_from_the_old_socket_does_not_drop_the_new_one(
     deribit_public: FakeDeribit,
 ) -> None:

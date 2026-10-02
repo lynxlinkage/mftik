@@ -32,6 +32,11 @@ from mftik.protocol import (
     Topics,
 )
 
+# B2-05: wiring smoke (§9.2), one case per plane. It still opens a private
+# socket, so it stays out of component. ``app.py`` wiring is B4-02 (STS,
+# #202), B4-05 (TD, #205) and B4-06 (MD, #206). Not a direct handler call.
+pytestmark = pytest.mark.integration
+
 #: The planes with a named subject, and how to ask each one whether it is
 #: listening. Health is the probe that needs no session manager — every other
 #: request type would fail on the ``None`` passed below for reasons that have
@@ -73,6 +78,9 @@ def _run_rpc(plane: str):
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("plane", "health_type", "named"), PLANES)
 async def test_a_plane_answers_on_the_subject_it_was_given(
@@ -102,6 +110,9 @@ async def test_a_plane_answers_on_the_subject_it_was_given(
         assert HealthStatus.model_validate(reply.payload).status == "ok"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("plane", "health_type", "named"), PLANES)
 async def test_a_plane_does_not_answer_on_a_subject_it_was_not_given(

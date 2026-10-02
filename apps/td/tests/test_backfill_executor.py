@@ -30,6 +30,10 @@ from mftik_td.backfill.executor import BackfillExecutor
 from mftik_td.backfill.reader import HistoryPage, NoHistoryReaderError
 from mftik_td.history import order_row
 
+# B2-05: borrows NATS to test the backfill walk. Direct handler call:
+# B6-05 (#223).
+pytestmark = pytest.mark.integration
+
 API_ID = 7
 TICKER = "Binance_Spot_BTCUSDT"
 LAG = 60.0

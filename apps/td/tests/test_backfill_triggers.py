@@ -15,6 +15,10 @@ from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
 from mftik_td.backfill.trigger import request_backfill
 
+# B2-05: borrows NATS to test backfill triggers. Direct handler call:
+# B6-05 (#223).
+pytestmark = pytest.mark.integration
+
 API_ID = 42
 
 
@@ -40,6 +44,9 @@ async def _serve_backfill(broker: Broker, stop: asyncio.Event, seen: list) -> No
 # --- asking ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_request_is_answered_when_td_is_there(broker) -> None:
     seen: list[TdBackfill] = []
     stop = asyncio.Event()
@@ -53,6 +60,9 @@ async def test_a_request_is_answered_when_td_is_there(broker) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_request_fails_at_once_when_nobody_is_serving(broker) -> None:
     assert (
         await request_backfill(
@@ -62,6 +72,9 @@ async def test_a_request_fails_at_once_when_nobody_is_serving(broker) -> None:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_request_may_name_instruments(broker) -> None:
     seen: list[TdBackfill] = []
     stop = asyncio.Event()
@@ -94,6 +107,9 @@ async def test_asking_never_raises_on_a_broken_broker(broker) -> None:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
     class Hanging:
         async def request(self, *a, **kw):
@@ -107,6 +123,9 @@ async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
     assert result is False
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_in_flight_refusal_is_not_accepted(broker) -> None:
     """Saturated TD replies ``ok=False``; that is not a successful ask."""
     stop = asyncio.Event()
@@ -139,6 +158,9 @@ async def test_an_in_flight_refusal_is_not_accepted(broker) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
     class Hanging:
         async def request(self, *a, **kw):

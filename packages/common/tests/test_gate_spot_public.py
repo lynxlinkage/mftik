@@ -320,6 +320,9 @@ async def test_rest_error_surfaces(
 # --- streams (WebSocket) ---------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stream_ticker(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -336,6 +339,9 @@ async def test_stream_ticker(
     assert ticker.bid == Decimal("59999")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stream_trades(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -366,6 +372,9 @@ async def test_stream_trades(
     assert trade.side == "sell"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stream_order_book_is_a_full_snapshot(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -398,6 +407,9 @@ async def test_stream_order_book_is_a_full_snapshot(
     assert not gate.frames_for(ch.ORDER_BOOK_UPDATE)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stream_kline(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -442,6 +454,9 @@ async def test_stream_kline(
     assert kline.closed is True
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stream_best_quote(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -472,6 +487,9 @@ async def test_stream_best_quote(
     assert quote.ts == 1_700_000_000.5
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_streams_are_filtered_per_pair(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -511,6 +529,9 @@ async def test_streams_are_filtered_per_pair(
     assert (eth_trade.symbol, eth_trade.price) == ("ETHUSDT", Decimal("3000"))
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_klines_are_filtered_per_interval(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:
@@ -537,6 +558,9 @@ async def test_klines_are_filtered_per_interval(
     assert kline.close == Decimal("2")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_stream_unhooks_itself_when_the_consumer_stops(
     gate: FakeGate, rest_stub: FakePublicRest, resolver: StubResolver
 ) -> None:

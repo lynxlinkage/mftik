@@ -152,6 +152,8 @@ async def test_the_minimum_password_length_is_where_it_says_it_is(db) -> None:
     assert exact.status_code == 201
 
 
+# password hash; over the 500 ms component cap under load
+@pytest.mark.integration
 async def test_login_takes_the_password_and_refuses_the_wrong_one(db) -> None:
     await a_seeded_owner(db)
     app = an_api()

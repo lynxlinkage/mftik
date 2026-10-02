@@ -18,6 +18,10 @@ from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.models import AggTrade, Side
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("BinanceCM_Inverse_BTCUSD")
 NATIVE = "BTCUSD_PERP"
 SIZE = Decimal("100")
@@ -115,6 +119,9 @@ def test_delivery_serves_no_one_second_candles() -> None:
 # --- streams ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_ticker_pairs_the_stats_with_a_real_quote(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -147,6 +154,9 @@ async def test_a_ticker_pairs_the_stats_with_a_real_quote(
     }
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_tape_is_the_aggregated_one_because_there_is_no_other(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -171,6 +181,9 @@ async def test_the_tape_is_the_aggregated_one_because_there_is_no_other(
     assert binance_stream.subscribed == {f"{NATIVE.lower()}@aggTrade"}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_book_is_dated_by_binance_and_sized_in_contracts(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -201,6 +214,9 @@ async def test_the_book_is_dated_by_binance_and_sized_in_contracts(
     assert book.ts == 1672515782.0
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_liquidations_are_reported_as_the_position_that_was_closed(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -236,6 +252,9 @@ async def test_liquidations_are_reported_as_the_position_that_was_closed(
     assert liquidation.qty == Decimal("13"), "contracts, unscaled"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_mark_price_yields_a_funding_rate_and_skips_a_print_without_one(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -284,6 +303,9 @@ async def test_a_dated_future_has_no_funding_rate_stream(
             )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_ws_klines_swap_the_volume_columns(
     binance_stream: FakeBinanceStream,
 ) -> None:
@@ -337,6 +359,9 @@ async def test_a_kline_subscribe_refuses_a_missing_contract_size(
     assert not binance_stream.subscribed
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_best_quotes_carry_the_resting_sizes_in_contracts(
     binance_stream: FakeBinanceStream,
 ) -> None:

@@ -28,6 +28,10 @@ from mftik.protocol import (
 from mftik_td.backfill.executor import BackfillOutcome
 from mftik_td.backfill.session import BackfillSession
 
+# B2-05: borrows NATS to test the backfill session. Direct handler call:
+# B6-05 (#223).
+pytestmark = pytest.mark.integration
+
 API_ID = 7
 
 
@@ -113,6 +117,9 @@ async def test_an_account_this_process_never_traded_is_still_served(
     assert executor.runs == [(999, (), "")]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_walk_outcome_is_not_on_the_reply(broker) -> None:
     """Accepted means TD took it. The cursor is how the walk went."""
     executor = FakeExecutor(
@@ -143,6 +150,9 @@ async def test_an_unreadable_request_is_refused_not_dropped(serving, broker) -> 
     assert executor.runs == []
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_long_walk_does_not_stall_the_queue_behind_it(broker) -> None:
     """A walk is minutes of venue round trips; the serve loop is one consumer."""
     executor = FakeExecutor()
@@ -170,6 +180,9 @@ async def test_a_long_walk_does_not_stall_the_queue_behind_it(broker) -> None:
         await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_too_many_runs_at_once_are_refused_not_queued(broker) -> None:
     """Refused, because a request held here is one nothing can see the state of."""
     executor = FakeExecutor()

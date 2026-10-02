@@ -25,6 +25,7 @@ from mftik.cli import connect as connect_cmd
 from mftik.cli import env as env_cmd
 from mftik.cli import init as init_cmd
 from mftik.cli import node as node_cmd
+from mftik.cli import operator as operator_cmd
 from mftik.cli import profiles, sessions
 from mftik.cli import push as push_cmd
 from mftik.cli import registry_migrate as registry_migrate_cmd
@@ -502,6 +503,100 @@ def _setup_run(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="print the session id and exit, without tailing its log",
     )
+    # Neither flag is the default. A bare ``mftik run`` keeps today's
+    # deploy-and-follow; B4-08 is what makes ``--wait`` the default the
+    # plan describes (F12). Passing both is an error.
+    wait = parser.add_mutually_exclusive_group()
+    wait.add_argument(
+        "--wait",
+        dest="wait",
+        action="store_const",
+        const=True,
+        help=(
+            "watch status until running or failed, then tail the log "
+            "(not implemented)"
+        ),
+    )
+    wait.add_argument(
+        "--no-wait",
+        dest="wait",
+        action="store_const",
+        const=False,
+        help=(
+            "print the session id and return, without watching or tailing "
+            "(not implemented)"
+        ),
+    )
+    parser.set_defaults(wait=None)
+
+
+def _setup_workers(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--stale",
+        action="store_true",
+        help="only workers whose release is not the latest",
+    )
+
+
+def _setup_md(parser: argparse.ArgumentParser) -> None:
+    """``md`` has a verb, same shape as ``env``.
+
+    The handler goes on ``_md_run``, not ``_run``: argparse fills a nested
+    parser's defaults only when the attribute is absent, and the outer
+    command has already set ``_run`` by then.
+    """
+    verbs = parser.add_subparsers(dest="md_command", metavar="<verb>")
+    restart = verbs.add_parser(
+        "restart", help="restart one MD connection in place"
+    )
+    restart.add_argument("conn", help="connection to restart")
+    restart.set_defaults(_md_run=operator_cmd.restart)
+
+
+def _run_md(args: argparse.Namespace) -> int:
+    run = getattr(args, "_md_run", None)
+    if run is None:
+        print("usage: mftik md {restart}")
+        return EXIT_ERROR
+    return run(args)
+
+
+def _setup_td(parser: argparse.ArgumentParser) -> None:
+    """``td`` has a verb. See :func:`_setup_md` for why ``_td_run``."""
+    verbs = parser.add_subparsers(dest="td_command", metavar="<verb>")
+    drain = verbs.add_parser("drain", help="drain-replace one TD account")
+    drain.add_argument("api_id", type=int, help="account to drain")
+    drain.set_defaults(_td_run=operator_cmd.drain)
+
+
+def _run_td(args: argparse.Namespace) -> int:
+    run = getattr(args, "_td_run", None)
+    if run is None:
+        print("usage: mftik td {drain}")
+        return EXIT_ERROR
+    return run(args)
+
+
+def _setup_intents(parser: argparse.ArgumentParser) -> None:
+    """``intents`` has a verb. See :func:`_setup_md` for why ``_intents_run``."""
+    verbs = parser.add_subparsers(dest="intents_command", metavar="<verb>")
+    gc = verbs.add_parser(
+        "gc", help="reclaim intents for one STS instance that is gone"
+    )
+    gc.add_argument(
+        "--instance",
+        required=True,
+        help="STS instance whose intents to reclaim",
+    )
+    gc.set_defaults(_intents_run=operator_cmd.gc)
+
+
+def _run_intents(args: argparse.Namespace) -> int:
+    run = getattr(args, "_intents_run", None)
+    if run is None:
+        print("usage: mftik intents {gc}")
+        return EXIT_ERROR
+    return run(args)
 
 
 def _setup_session(parser: argparse.ArgumentParser) -> None:
@@ -650,6 +745,30 @@ COMMANDS: tuple[Command, ...] = (
         help="stop a live session",
         setup=_setup_session,
         run=sessions.stop_session,
+    ),
+    Command(
+        name="workers",
+        help="list workers and the release each one is running",
+        setup=_setup_workers,
+        run=operator_cmd.workers,
+    ),
+    Command(
+        name="md",
+        help="restart one MD connection in place",
+        setup=_setup_md,
+        run=_run_md,
+    ),
+    Command(
+        name="td",
+        help="drain-replace one TD account",
+        setup=_setup_td,
+        run=_run_td,
+    ),
+    Command(
+        name="intents",
+        help="reclaim intents for one STS instance that is gone",
+        setup=_setup_intents,
+        run=_run_intents,
     ),
 )
 

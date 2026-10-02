@@ -93,6 +93,8 @@ async def test_run_log_persist_flushes_on_batch_size(
     assert any(len(batch) == 2 for batch in flushed)
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 async def test_run_log_persist_flushes_on_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -36,6 +36,10 @@ from mftik.exchange.models import (
 from mftik.exchange.stream import EventStream
 from mftik.exchange.tickers import Category, UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
 INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
 DATED = UniversalTicker.parse("Deribit_Future_BTCUSD-260906")
@@ -553,6 +557,9 @@ async def test_portfolio_push_maps_the_same_fields() -> None:
     assert balance.locked == Decimal("60")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_portfolio_watched_later_still_reaches_the_account_stream(
     deribit: FakeDeribit,
 ) -> None:

@@ -42,7 +42,12 @@ class _Answering:
         self.peak = max(self.peak, self.concurrent)
         try:
             if self._delay:
-                await asyncio.sleep(self._delay)
+                # A yield, not a wait. The delay is only a flag that this
+                # probe should overlap its sibling: a positive sleep is
+                # forbidden in this tier, and the assertion is the overlap,
+                # not a duration. FakeClock does not fit — the request waits
+                # on the probes, and the probes would wait on advance().
+                await asyncio.sleep(0)
             status = self._up.get(subject)
             if status is None:
                 raise RequestTimeoutError(subject, envelope.id, timeout or 0)
@@ -143,8 +148,7 @@ async def test_probes_run_concurrently_so_the_page_costs_one_timeout(
         await client.get("/stats")
 
     # The overlap is the proof. A wall-clock bound here also timed app startup
-    # and the DB round trips, and failed on a loaded CI runner (B2-02 replaces
-    # real sleeps in this tier with FakeClock).
+    # and the DB round trips, and failed on a loaded CI runner.
     assert broker.peak == 2, "both probes were in flight at once"
 
 

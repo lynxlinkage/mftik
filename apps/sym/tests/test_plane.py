@@ -29,6 +29,12 @@ from mftik_sym.plane import SymbolPlane
 from mftik_sym.rpc import dispatch, handle_list
 from mftik_sym.sources.base import Instrument
 
+# B2-05: borrows NATS to test SYM RPC. SYM is outside the process-planes
+# refactor (§5–§7); no ticket rewrites this into a direct handler call.
+# Splitting the non-NATS cases would mean changing the module, so the
+# whole file stays integration.
+pytestmark = pytest.mark.integration
+
 VENUE = "Gate"
 
 
@@ -658,6 +664,9 @@ async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
     ]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_client_get_finds_inactive_settled_instrument(
     broker: Broker, plane_factory
 ) -> None:

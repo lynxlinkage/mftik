@@ -59,7 +59,7 @@ def xdist_worker_count() -> int:
     """How many xdist workers this run has.
 
     ``PYTEST_XDIST_WORKER_COUNT`` is set in each worker. Without xdist there
-    is one process, and the count is 1. pytest-xdist itself arrives in B2-04.
+    is one process, and the count is 1.
     """
     raw = os.environ.get("PYTEST_XDIST_WORKER_COUNT")
     if raw is None or raw == "":
@@ -67,9 +67,33 @@ def xdist_worker_count() -> int:
     return int(raw)
 
 
+#: Prefix of :func:`shared_client_name`. Private sockets do not use it, so a
+#: ``/connz`` count can ignore them. B2-05 moved behaviour tests off
+#: ``just test``; the filter stays so a private socket cannot flake the count.
+SHARED_CLIENT_PREFIX = "mftik-pytest-"
+
+
 def shared_client_name() -> str:
     """Client name ``/connz`` reports for this worker's shared connection."""
-    return f"mftik-pytest-{xdist_worker_id()}"
+    return f"{SHARED_CLIENT_PREFIX}{xdist_worker_id()}"
+
+
+def shared_client_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """``/connz`` rows whose name is a shared pytest client.
+
+    ``num_connections`` counts every socket, including the private ones
+    tests still open with :func:`a_broker`. Those are not the per-worker
+    shared connection, and under xdist they make that count flaky.
+    """
+    rows = report.get("connections") or []
+    if not isinstance(rows, list):
+        return []
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("name", "")).startswith(SHARED_CLIENT_PREFIX)
+    ]
 
 
 def unique_key_prefix(stem: str = "test") -> str:

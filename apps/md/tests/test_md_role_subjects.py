@@ -33,6 +33,11 @@ from mftik.protocol import (
 )
 from mftik_md import app as md_app
 
+# B2-05: borrows NATS to test MD role gating on ``run_rpc``. ``app.py``
+# wiring is B4-06 (#206). Placement in B8-02 (#239) replaces the role gate.
+# Not a direct handler call.
+pytestmark = pytest.mark.integration
+
 INSTANCE = "md-jp-1"
 
 #: An active instance to run beside the gated one, so the anycast pool has
@@ -82,6 +87,9 @@ async def _asks(broker: Broker, subject: str, *, timeout: float = 1.0) -> bool:
     return HealthStatus.model_validate(reply.payload).status == "ok"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_active_answers_its_own_name_and_the_shared_pool(
     broker: Broker,
@@ -94,6 +102,9 @@ async def test_active_answers_its_own_name_and_the_shared_pool(
         await _stop(stop, tasks)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_named_answers_its_own_name_and_leaves_the_pool_alone(
     broker: Broker,
@@ -116,6 +127,9 @@ async def test_named_answers_its_own_name_and_leaves_the_pool_alone(
         await _stop(stop, tasks)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_standby_answers_neither(broker: Broker) -> None:
     """Including its own name.

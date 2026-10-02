@@ -23,6 +23,9 @@ class Tiny(Strategy):
 _OK_YML = "td: {}\nmd: []\nsts: {}\n"
 _REAL_HTTPX = httpx.Client
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 
 @pytest.fixture(autouse=True)
 def config_file(tmp_path: Path, monkeypatch) -> Path:

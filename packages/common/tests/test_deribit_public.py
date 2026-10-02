@@ -26,6 +26,10 @@ from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.stream import SourceEnded
 from mftik.exchange.tickers import Category, UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SPOT = UniversalTicker.parse("Deribit_Spot_BTCUSDC")
 PERP = UniversalTicker.parse("Deribit_Perp_BTCUSDC")
 INVERSE = UniversalTicker.parse("Deribit_Inverse_BTCUSD")
@@ -220,6 +224,9 @@ def test_option_iv_is_a_decimal_fraction() -> None:
     ).to_greeks(PERP) is None
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_spot_ticker_prints_on_the_one_public_socket(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -246,6 +253,9 @@ async def test_a_spot_ticker_prints_on_the_one_public_socket(
     assert ticker.universal_ticker == "Deribit_Spot_BTCUSDC"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_v5_funding_and_oi_ride_the_ticker(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -275,6 +285,9 @@ async def test_v5_funding_and_oi_ride_the_ticker(
     assert deribit_public.subscribed == {ch.ticker("BTC_USDC-PERPETUAL")}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_option_ticker_oi_and_greeks_share_one_subscribe(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -302,6 +315,9 @@ async def test_option_ticker_oi_and_greeks_share_one_subscribe(
     assert deribit_public.subscribed == {ch.ticker("BTC-13SEP26-70000-C")}
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_option_quote_prints(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -329,6 +345,9 @@ async def test_option_quote_prints(
     assert quote.universal_ticker == str(OPTION)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_bestquote_and_trade_share_one_socket(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -460,6 +479,9 @@ def test_a_stale_book_will_not_fold_a_delta_as_a_snapshot() -> None:
     assert [level.price for level in book.snapshot().bids] == [Decimal("98")]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_book_gap_resubscribes_and_frees_the_ledger(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -545,6 +567,9 @@ def _fast(url: str, **kwargs: Any) -> DeribitPublicStream:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_an_oversized_full_book_is_dropped_and_other_feeds_stay(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -585,6 +610,9 @@ async def test_an_oversized_full_book_is_dropped_and_other_feeds_stay(
         assert deribit_public.connections == seen
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_depth_book_is_restored_after_one_oversize_frame(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -755,6 +783,9 @@ def test_greeks_follow_the_shared_convention_on_a_live_row() -> None:
     assert greeks.ts == pytest.approx(1790491080.526)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.parametrize("empty", [0.0, None])
 async def test_option_bestquote_pushes_when_the_bid_is_pulled(
     deribit_public: FakeDeribit, empty: float | None
@@ -810,6 +841,9 @@ def test_a_perp_quote_with_an_empty_side_is_still_skipped() -> None:
     assert quote.to_best_quote(INVERSE) is None
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_live_row_prints_ticker_and_greeks_on_one_subscribe(
     deribit_public: FakeDeribit,
 ) -> None:

@@ -23,6 +23,11 @@ from mftik.protocol import (
     Topics,
 )
 
+# B2-05: order refusals return with B6-02 (#220) and B6-08 (#226). What is
+# left opens a private socket to time out an unserved ``td.order`` subject,
+# so it stays integration until that rewrite.
+pytestmark = pytest.mark.integration
+
 API_ID = 42
 SESSION = "sts-rpc"
 
@@ -53,6 +58,9 @@ def _submit_envelope(**overrides: Any) -> Envelope[Any]:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_no_td_serving_times_out(broker: Broker) -> None:
     """Nothing is attached, so the request waits in the list and times out.
 

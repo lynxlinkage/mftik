@@ -12,20 +12,37 @@ that is the escape hatch, and it is the one that has to be typed twice.
 
 ``--no-follow`` never attaches, so it never stops anything either; it prints
 the session id and how to end it.
+
+``--wait`` / ``--no-wait`` are the F12 surface (IF-15). Passing either one
+prints that it is not implemented and exits 1, and does not deploy. Leaving
+both off keeps the behaviour above, so a person can still start a session
+the way they do today. The plan's default is ``--wait``: watch status until
+``running`` or ``failed``, then tail. ``--no-wait`` prints the session id
+and returns. B4-08 makes that true and is what flips the default.
+:func:`run_wait_action` is that decision, and it raises
+``NotImplementedError("IF-15")`` until then.
+
+**State authority (§3.3): this command holds none.** Session status belongs
+to the STS controller's Supervisor. Once ``--wait`` exists, this command
+reads that status and then tails a log. It does not write the status, and
+it does not store ``strategy_digest`` or ``env_generation`` (F39, IF-16).
 """
 
 from __future__ import annotations
 
 import argparse
+from typing import Literal
 
 from mftik.cli.client import (
+    DEFAULT_TIMEOUT_S,
     Client,
     CliError,
     NodeUnreachable,
     connected,
     is_environment_refusal,
 )
-from mftik.cli.exits import EXIT_INTERRUPTED
+from mftik.cli.exits import EXIT_ERROR, EXIT_INTERRUPTED
+from mftik.cli.output import fail
 from mftik.cli.push import push_tree, report_push
 from mftik.cli.sessions import follow_logs
 from mftik.cli.tree import inspect_tree, read_yaml, require_tree
@@ -37,11 +54,36 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 #: there is no live log to attach to.
 _LIVE = "live"
 
-#: How long to wait for the deploy's own answer. A fixed value because the
-#: deploy no longer starts the session inside the request (F12), so this is
-#: one HTTP hop rather than a budget estimated from the document. IF-15 (#193)
-#: settles the final value along with ``--wait`` / ``--no-wait``.
-_DEPLOY_HTTP_TIMEOUT_S = 30.0
+#: How long the deploy POST may take. IF-15 settles this as one ordinary
+#: HTTP hop, the same budget every other command uses. F12 makes deploy
+#: answer 202 once the session is accepted, so this is not a budget for
+#: ``on_start``. Watching until ``running`` or ``failed`` is ``--wait``,
+#: and that watch is not this timer (B4-08).
+_DEPLOY_HTTP_TIMEOUT_S = DEFAULT_TIMEOUT_S
+
+#: What :func:`run_wait_action` returns. ``wait`` means keep watching,
+#: ``tail`` means the session has reached ``running`` or ``failed``,
+#: ``return_id`` means ``--no-wait`` is done.
+RunWaitStep = Literal["wait", "tail", "return_id"]
+
+
+def run_wait_action(status: str, *, wait: bool) -> RunWaitStep:
+    """What ``mftik run`` does with one status snapshot (F12, §5.2).
+
+    * **W1.** ``wait`` true: ``running`` or ``failed`` → ``"tail"``.
+      ``pending``, ``starting`` and ``restarting`` → ``"wait"`` (keep
+      watching). The deploy's 202 is ``starting``; that is not the end
+      of the watch.
+    * **W2.** ``wait`` false (``--no-wait``): ``"return_id"`` for every
+      status. No tail.
+    * **W3.** This is not the deploy POST's timer. That timer is
+      :data:`_DEPLOY_HTTP_TIMEOUT_S`, one HTTP hop.
+
+    ``stopping`` and ``done`` are not decided here. Not implemented
+    (IF-15). B4-08 performs the watch.
+    """
+    del status, wait
+    raise NotImplementedError("IF-15")
 
 
 def _deploy_may_be_live(exc: BaseException) -> str:
@@ -53,6 +95,13 @@ def _deploy_may_be_live(exc: BaseException) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
+    # ``None`` means neither flag was passed. Today's deploy-and-follow
+    # stays on that path. Either explicit flag is the IF-15 surface: it
+    # does not deploy, because the watch it names is B4-08's.
+    if getattr(args, "wait", None) is not None:
+        fail("run --wait / --no-wait is not implemented (IF-15)")
+        return EXIT_ERROR
+
     root = require_tree(args.path)
     inspected = inspect_tree(root)
     yaml_text = read_yaml(args.cfg, root)

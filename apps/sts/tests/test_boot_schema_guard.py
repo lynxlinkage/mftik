@@ -23,6 +23,11 @@ from mftik_db.schema import SchemaTooOld
 from mftik_sts import app
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_schema_that_is_too_old_stops_the_process(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -36,6 +41,9 @@ async def test_a_schema_that_is_too_old_stops_the_process(
     assert "STS will not start" in caplog.text
 
 
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_database_that_is_not_up_yet_is_waited_for(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -57,6 +65,11 @@ async def test_a_database_that_is_not_up_yet_is_waited_for(
     assert "connection refused" in caplog.text
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_database_that_never_answers_stops_the_process(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -73,6 +86,9 @@ async def test_a_database_that_never_answers_stops_the_process(
     assert "could not be read" in caplog.text
 
 
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_migration_that_lands_mid_wait_is_picked_up(
     monkeypatch: pytest.MonkeyPatch
 ) -> None:

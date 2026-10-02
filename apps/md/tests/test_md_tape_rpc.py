@@ -19,6 +19,10 @@ from mftik.protocol import (
 from mftik_md.rpc.tape import TAPE_RPC_CHUNK, handle_tape_tail
 from mftik_md.tape_store import TapeStore
 
+# B2-05: borrows NATS to test ``md.tape.tail``. Direct handler call:
+# B7-04 (#236).
+pytestmark = pytest.mark.integration
+
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 FEED = Topics.md_feed("aggtrade", TICKER)
 
@@ -65,6 +69,9 @@ async def _record(store: TapeStore, trade_id: str, *, ms: int | None = None) -> 
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_tape_tail_is_chunked(broker: Broker, store: TapeStore) -> None:
     await store.mark_recording(FEED, since_ms=1, ttl_seconds=3600)
@@ -110,6 +117,9 @@ async def test_tape_tail_is_chunked(broker: Broker, store: TapeStore) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_unknown_feed_is_an_empty_slice(
     broker: Broker, store: TapeStore

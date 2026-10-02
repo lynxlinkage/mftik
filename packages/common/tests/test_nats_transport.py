@@ -26,6 +26,10 @@ from mftik.broker.transport.nats import (
 )
 from mftik.protocol import Envelope, Topics
 
+# §9.1 component (shared NATS client). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SUBJECT = "demo"
 
 
@@ -39,6 +43,9 @@ def _transport(broker: Broker) -> NatsTransport:
     return transport
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @session_loop
 async def test_a_request_is_answered_by_its_handler(broker: Broker) -> None:
     stop = asyncio.Event()
@@ -62,6 +69,9 @@ async def test_a_request_is_answered_by_its_handler(broker: Broker) -> None:
     assert reply.payload == {"pong": 7}
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @session_loop
 async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
     """Which is how ``probe`` leaves nothing behind, and it must stay true."""
@@ -72,6 +82,11 @@ async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
         await broker.request(subject, _envelope(), timeout=0.2)
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @session_loop
 async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     broker: Broker,
@@ -85,6 +100,9 @@ async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     assert "timed out after" not in str(caught.value)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @session_loop
 async def test_a_subscriber_that_does_not_answer_is_a_full_timeout(
     broker: Broker,
@@ -108,6 +126,9 @@ async def test_a_subscriber_that_does_not_answer_is_a_full_timeout(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @session_loop
 async def test_a_probe_does_not_wait_for_a_plane_to_turn_up(broker: Broker) -> None:
     started = asyncio.get_running_loop().time()
@@ -117,6 +138,11 @@ async def test_a_probe_does_not_wait_for_a_plane_to_turn_up(broker: Broker) -> N
     assert spent < _NO_RESPONDERS_CEILING_S
 
 
+# over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @session_loop
 async def test_a_request_waits_out_an_owner_that_is_still_arriving(
     broker: Broker,
@@ -176,6 +202,9 @@ async def test_every_subscriber_has_its_own_interest(broker: Broker) -> None:
     assert second == [1, 2]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @session_loop
 async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> None:
     stop = asyncio.Event()
@@ -199,6 +228,10 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
     assert seen == [2]
 
 
+# B2-05: broker semantics (a subscription on one socket is visible to
+# another). Component forbids a private socket (§9.1), so this case is
+# integration. It is not rewritten into a handler call.
+@pytest.mark.integration
 @session_loop
 async def test_a_cross_connection_subscribe_is_visible_before_publish(
     broker: Broker,
@@ -366,6 +399,9 @@ async def test_a_cancelled_plane_loop_leaves_nothing_pending(
     assert _leftovers(before) == frozenset()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @session_loop
 async def test_connect_does_not_need_jetstream(broker: Broker) -> None:
     """A NATS without ``-js`` is the production shape."""

@@ -22,6 +22,9 @@ from mftik.strategy.artifacts import (
 )
 from mftik.strategy.base import Strategy
 
+# disk IO; over the 50 ms unit call cap on ubuntu-latest
+pytestmark = pytest.mark.component
+
 
 def _store(tmp_path: Path) -> ArtifactStore:
     return ArtifactStore(tmp_path)
