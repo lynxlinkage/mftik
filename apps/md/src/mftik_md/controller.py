@@ -58,7 +58,8 @@ comparison is the connection worker's (IF-10). Minting the pair is
   lexicographically, so epoch 2 beats any seq of epoch 1. ``seq`` is
   the caller's; this object does not keep a counter. Every push carries
   the whole set for that connection, not a diff (P2, F18). The object
-  the worker is handed is :class:`ConnDesired`.
+  the worker is handed is :class:`ConnDesired`: which connection, plus
+  the connection module's :class:`~mftik_md.conn.Desired`.
 * **C7 — expiry is the listed settlement, not a re-derivation.** An
   instrument whose listed expiry has arrived leaves the desired set,
   and each owner who held it is told with ``md.feed.end``
@@ -89,14 +90,13 @@ and :func:`gc_owners` raise ``NotImplementedError("IF-09")``. The types
 around them are real, the way an atom's identity is real while its
 venue adapter is not.
 
-IF-10 already shipped its own :class:`mftik_md.conn.ConnId`,
+A connection's identity, its generation and the set pushed to one
+worker are the connection module's: :class:`mftik_md.conn.ConnId`,
 :class:`mftik_md.conn.Generation` and :class:`mftik_md.conn.Desired`.
-The copies here are :class:`ConnId`, :class:`Generation`,
-:class:`ConnView` and :class:`ConnDesired`. ``ConnId`` and
-``Generation`` have the same fields. ``ConnDesired`` also names the
-connection, because a placement result has many of them and a worker
-already knows which process it is. Which module should own the single
-definition is not settled here.
+This module imports those three. :class:`ConnDesired` is which
+connection a :class:`~mftik_md.conn.Desired` belongs to — a placement
+names many connections, and the worker already knows which process it
+is. :class:`ConnView` is the input :func:`place` reads.
 """
 
 from __future__ import annotations
@@ -108,6 +108,8 @@ from datetime import datetime
 from mftik.exchange.atoms import Atom, Capacity
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import IntentOwner
+
+from mftik_md.conn import ConnId, Desired, Generation
 
 #: What :func:`gc_owners` and its neighbours raise with. The ticket number
 #: is the whole of the common-acceptance rule; the rest names the batch
@@ -140,63 +142,9 @@ def _aware(name: str, value: datetime) -> None:
         raise ControllerError(f"{name} must be a timezone-aware datetime")
 
 
-@dataclass(frozen=True, order=True)
-class Generation:
-    """``(controller_epoch, seq)`` — the fencing token of one push (F18).
-
-    Order is lexicographic, and it is the order a worker uses: a value
-    is accepted only when it is strictly greater than the one already
-    held. Epoch 2 sequence 0 is newer than epoch 1 sequence 10**9, which
-    is the point of putting the epoch first. A restart mints a new epoch
-    in the database and may start ``seq`` again at 0.
-    """
-
-    controller_epoch: int
-    seq: int
-
-    def __post_init__(self) -> None:
-        _counter("controller_epoch", self.controller_epoch)
-        _counter("seq", self.seq)
-
-
-@dataclass(frozen=True, order=True)
-class ConnId:
-    """One connection worker: ``(venue, endpoint, n)`` (§3.1).
-
-    ``n`` distinguishes two connections to the same endpoint. It is not
-    a venue concept. The venue and the endpoint are the atom's, so a
-    connection only ever holds atoms of its own pair (C5).
-
-    Both are single tokens. The worker id the plan writes is
-    ``md/conn/{venue}/{endpoint}/{n}``, and that id is one NATS token, so
-    neither part may contain ``/``, ``.`` or ``:`` (the atom id's
-    separator). IF-10 declares its own :class:`mftik_md.conn.ConnId` with
-    the same three fields; this one is the controller's, and which module
-    should own the single copy is not settled by editing the other.
-    """
-
-    venue: str
-    endpoint: str
-    n: int
-
-    def __post_init__(self) -> None:
-        for name, value in (("venue", self.venue), ("endpoint", self.endpoint)):
-            if (
-                not isinstance(value, str)
-                or not value
-                or any(mark in value for mark in ":/.")
-            ):
-                raise ControllerError(
-                    f"invalid connection {name} {value!r}; it must be a "
-                    "non-empty token with no '/', '.' or ':'"
-                )
-        _counter("n", self.n)
-
-    def __str__(self) -> str:
-        return f"{self.venue}/{self.endpoint}/{self.n}"
-
-
 def _check_atoms(conn_id: ConnId, atoms: frozenset[Atom]) -> None:
+    if not isinstance(conn_id, ConnId):
+        raise TypeError(f"connection id must be a ConnId, got {conn_id!r}")
     if not isinstance(atoms, frozenset):
         raise TypeError(f"connection {conn_id} atoms must be a frozenset")
     if not atoms:
@@ -299,22 +247,26 @@ class Placement:
 
 @dataclass(frozen=True)
 class ConnDesired:
-    """What one connection worker is pushed, in full, every time (F18, C6).
+    """Which connection a :class:`~mftik_md.conn.Desired` is for (F18, C6).
 
-    ``atoms`` is the whole set, not the change since last time.
-    ``generation`` is the pair the worker compares with the one it holds.
-    IF-10's reconciler should take this rather than invent a parallel
-    shape. Nothing in this ticket builds or sends one.
+    ``desired`` is the connection module's object: the whole atom set,
+    not a diff, and the generation the worker compares with the one it
+    holds. ``id`` is only here because the controller names many
+    connections in one result. The worker already knows its own id, so
+    it is handed ``desired`` and not a second shape. Nothing in this
+    ticket builds or sends one.
+
+    An empty atom set is not a push. That worker has ended (C4). An atom
+    whose venue or endpoint is not ``id``'s cannot sit on it (C5).
     """
 
     id: ConnId
-    atoms: frozenset[Atom]
-    generation: Generation
+    desired: Desired
 
     def __post_init__(self) -> None:
-        _check_atoms(self.id, self.atoms)
-        if not isinstance(self.generation, Generation):
-            raise TypeError("generation must be a Generation")
+        if not isinstance(self.desired, Desired):
+            raise TypeError("desired must be the connection module's Desired")
+        _check_atoms(self.id, self.desired.atoms)
 
 
 @dataclass(frozen=True, order=True)
@@ -634,14 +586,12 @@ class MdOrchestrator:
 __all__ = [
     "ConnAssignment",
     "ConnDesired",
-    "ConnId",
     "ConnView",
     "ControllerError",
     "Demand",
     "Expiry",
     "ExpiryNotice",
     "FeedBinding",
-    "Generation",
     "MdOrchestrator",
     "Owner",
     "OwnerGc",

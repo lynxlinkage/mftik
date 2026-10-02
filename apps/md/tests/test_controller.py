@@ -20,16 +20,15 @@ import pytest
 from mftik.exchange.atoms import Atom, Capacity, UnknownEndpointError
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import IntentOwner
+from mftik_md.conn import ConnError, ConnId, Desired, Generation
 from mftik_md.controller import (
     ConnAssignment,
     ConnDesired,
-    ConnId,
     ConnView,
     ControllerError,
     Demand,
     ExpiryNotice,
     FeedBinding,
-    Generation,
     MdOrchestrator,
     Placement,
     StandingOwner,
@@ -71,9 +70,10 @@ def test_a_generation_orders_lexicographically() -> None:
 
 
 def test_a_generation_refuses_a_negative_or_a_bool() -> None:
-    with pytest.raises(ControllerError):
+    """The pair is the connection module's. Both bad parts are its error."""
+    with pytest.raises(ConnError):
         Generation(-1, 0)
-    with pytest.raises(TypeError):
+    with pytest.raises(ConnError):
         Generation(True, 0)  # type: ignore[arg-type]
 
 
@@ -119,12 +119,14 @@ def test_a_placement_refuses_what_cannot_be_placed() -> None:
                 ConnAssignment(here, frozenset({b})),
             )
         )
-    with pytest.raises(ControllerError):
+    with pytest.raises(ConnError):
         ConnId(DERIBIT, PUBLIC, -1)
-    with pytest.raises(ControllerError):
+    with pytest.raises(ConnError):
         ConnId("Binance.UM", PUBLIC, 0)
-    with pytest.raises(ControllerError):
+    with pytest.raises(ConnError):
         ConnId(DERIBIT, "public/main", 0)
+    with pytest.raises(ConnError):
+        ConnId(DERIBIT, "public:main", 0)
 
 
 def test_placement_lookup_and_an_empty_result() -> None:
@@ -157,12 +159,14 @@ def test_placement_lookup_and_an_empty_result() -> None:
 def test_a_pushed_set_cannot_be_empty_or_on_the_wrong_connection() -> None:
     """An empty push is not a desired set; that worker has ended (C4)."""
     with pytest.raises(ControllerError):
-        ConnDesired(ConnId(DERIBIT, PUBLIC, 0), frozenset(), Generation(1, 0))
+        ConnDesired(
+            ConnId(DERIBIT, PUBLIC, 0),
+            Desired(Generation(1, 0), frozenset()),
+        )
     with pytest.raises(ControllerError):
         ConnDesired(
             ConnId(DERIBIT, "market", 0),
-            frozenset({atom("a")}),
-            Generation(1, 0),
+            Desired(Generation(1, 0), frozenset({atom("a")})),
         )
 
 

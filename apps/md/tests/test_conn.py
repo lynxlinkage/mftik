@@ -85,11 +85,16 @@ def test_a_connection_id_is_one_subject_token() -> None:
 
 
 def test_a_connection_id_rejects_a_dot_or_a_negative_index() -> None:
-    """A dot would split ``md.w.*``. A negative index is not a socket."""
+    """A dot would split ``md.w.*``. ``:`` would split an atom id.
+
+    A negative index is not a socket.
+    """
     with pytest.raises(ConnError):
         ConnId("Deribit", "public.main", 0)
     with pytest.raises(ConnError):
         ConnId("Binance.UM", "public", 0)
+    with pytest.raises(ConnError):
+        ConnId("Deribit", "public:main", 0)
     with pytest.raises(ConnError):
         ConnId("Deribit", "public", -1)
 

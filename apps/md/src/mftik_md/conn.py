@@ -153,7 +153,9 @@ class ConnId:
     ``n`` numbers sockets on the same endpoint after placement has filled
     the previous one. It is not an atom, and it is not reused for a
     different venue. The worker id is one NATS token — slashes, no dots —
-    because it sits inside ``md.w.{instance}.{worker_id}``.
+    because it sits inside ``md.w.{instance}.{worker_id}``. ``:`` is the
+    atom id's separator, so a venue or an endpoint cannot contain one
+    either: an atom of that pair would not parse.
     """
 
     venue: str
@@ -162,10 +164,14 @@ class ConnId:
 
     def __post_init__(self) -> None:
         for name, value in (("venue", self.venue), ("endpoint", self.endpoint)):
-            if not isinstance(value, str) or not value or "/" in value or "." in value:
+            if (
+                not isinstance(value, str)
+                or not value
+                or any(mark in value for mark in "/.:")
+            ):
                 raise ConnError(
                     f"invalid {name} {value!r}; a connection id's {name} is a "
-                    "non-empty token without '/' or '.'"
+                    "non-empty token without '/', '.' or ':'"
                 )
         _count(self.n, "connection index")
 
