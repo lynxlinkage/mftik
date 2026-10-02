@@ -25,8 +25,8 @@ from mftik.protocol import (
 )
 from mftik.strategy.oms import StrategyOms
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test strategy OMS reads. Direct handler call:
+# B6-02 (#220).
 pytestmark = pytest.mark.integration
 
 

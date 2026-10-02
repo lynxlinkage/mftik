@@ -15,8 +15,8 @@ from mftik.broker import Broker
 from mftik.protocol import Envelope, TdBackfill, Topics
 from mftik_td.backfill.trigger import request_backfill
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test backfill triggers. Direct handler call:
+# B6-05 (#223).
 pytestmark = pytest.mark.integration
 
 API_ID = 42

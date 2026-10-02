@@ -16,6 +16,9 @@ from collections.abc import Callable, Mapping
 import pytest
 from broker_harness import server_address, server_is_up
 from db_harness import POSTGRES_URL_ENV, dialect_urls
+from nats_guard import arm as arm_nats
+from nats_guard import disarm as disarm_nats
+from nats_guard import install as install_nats
 from sleep_guard import arm, disarm, install
 from tier_budget import (
     annotation_lines,
@@ -29,6 +32,7 @@ from tier_budget import (
 # Before any test, including ones collected from a path that does not import
 # this module's helpers again. Idempotent if a plugin imports it twice.
 install()
+install_nats()
 
 #: Over-budget call phases seen by the process that prints the summary.
 #: xdist workers record the warning on the report; the controller collects
@@ -178,15 +182,20 @@ def pytest_terminal_summary(
 def pytest_runtest_protocol(
     item: pytest.Item, nextitem: pytest.Item | None
 ) -> object:
-    """Forbid ``asyncio.sleep(x > 0)`` in unit and component tests (§9.2).
+    """Arm the §9.2 guards for this test.
 
+    ``asyncio.sleep(x > 0)`` is forbidden in unit and component tests.
     integration and e2e are exempt. A unit or component test that still
     needs the wall clock opts out with ``@pytest.mark.real_sleep(reason=...)``.
-    The markers themselves belong to B2-04; they are registered so this
-    guard can see them.
+
+    A private NATS connection is forbidden in those same tiers (B2-05).
+    The shared ``mftik-pytest-<worker>`` client is not private. integration
+    and e2e may open their own socket.
     """
-    token = arm(item)
+    sleep_token = arm(item)
+    nats_token = arm_nats(item)
     try:
         return (yield)
     finally:
-        disarm(token)
+        disarm_nats(nats_token)
+        disarm(sleep_token)

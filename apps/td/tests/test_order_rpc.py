@@ -23,8 +23,9 @@ from mftik.protocol import (
     Topics,
 )
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: order refusals return with B6-02 (#220) and B6-08 (#226). What is
+# left opens a private socket to time out an unserved ``td.order`` subject,
+# so it stays integration until that rewrite.
 pytestmark = pytest.mark.integration
 
 API_ID = 42

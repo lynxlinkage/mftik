@@ -15,10 +15,14 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parents[1] / "packages" / "common" / "tests")
 )
 
-from tier_budget import wall_budget_failure  # noqa: E402
+from tier_budget import on_ci, wall_budget_failure  # noqa: E402
 
 
 def main(argv: list[str]) -> int:
+    # Same rule as the per-test gate. ``CI=false`` is not a CI job, so a
+    # local ``just test`` does not apply the 120s wall gate.
+    if not on_ci():
+        return 0
     if len(argv) != 2:
         print("usage: check_wall_budget.py ELAPSED_SECONDS", file=sys.stderr)
         return 2

@@ -11,6 +11,8 @@ the fixture clears that for the assertions that expect a failure.
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +27,7 @@ from tier_budget import (
     call_budget_failure,
     database_params,
     enforce_call_budget,
+    on_ci,
     tier_of,
     wall_budget_failure,
 )
@@ -254,3 +257,97 @@ def test_each_tier_receives_a_pytest_timeout() -> None:
     assert timeout_of(integration) == ((60.0,), "thread")
     assert timeout_of(e2e) == ((0.0,), "thread")
     assert preset.added == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("CI", "false", False),
+        ("CI", "FALSE", False),
+        ("CI", "False", False),
+        ("CI", "0", False),
+        ("CI", "", False),
+        ("CI", "  ", False),
+        ("CI", "no", False),
+        ("CI", "off", False),
+        ("CI", "true", True),
+        ("CI", "1", True),
+        ("GITHUB_ACTIONS", "true", True),
+        ("GITHUB_ACTIONS", "false", False),
+        ("GITHUB_ACTIONS", "0", False),
+    ],
+)
+def test_on_ci_treats_falsy_flags_as_not_ci(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, expected: bool
+) -> None:
+    """``CI=false`` is not CI. ``GITHUB_ACTIONS=true`` alone is."""
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.setenv(name, value)
+    assert on_ci() is expected
+
+
+@pytest.mark.parametrize("value", ["false", "0", ""])
+def test_a_falsy_ci_flag_keeps_the_local_call_gate(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The bug: any non-empty ``CI`` used to turn a 50 ms miss into a warning."""
+    monkeypatch.setenv("CI", value)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    report = _report("call", "passed", 0.08)
+    enforce_call_budget(_Item(), report)
+    assert report.outcome == "failed"
+    assert report.longrepr is not None
+    assert "50 ms" in report.longrepr
+    assert budget_warnings(report) == []
+
+
+def test_github_actions_alone_warns_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert on_ci() is True
+    report = _report("call", "passed", 0.08)
+    enforce_call_budget(_Item(), report)
+    assert report.outcome == "passed"
+    warnings = budget_warnings(report)
+    assert len(warnings) == 1
+    assert "50 ms" in warnings[0]
+
+
+def _wall_script():
+    path = Path(__file__).resolve().parents[3] / "scripts" / "check_wall_budget.py"
+    spec = importlib.util.spec_from_file_location("check_wall_budget", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_wall_gate_uses_on_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``just test`` asks ``on_ci()``. ``CI=false`` does not apply the 120s gate."""
+    script = _wall_script()
+    monkeypatch.setenv("CI", "false")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert script.main(["check_wall_budget.py", "999"]) == 0
+
+    monkeypatch.setenv("CI", "")
+    assert script.main(["check_wall_budget.py", "999"]) == 0
+
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert script.main(["check_wall_budget.py", "999"]) == 1
+
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert script.main(["check_wall_budget.py", "120"]) == 0
+    assert script.main(["check_wall_budget.py", "120.1"]) == 1
+
+
+def test_justfile_wall_gate_does_not_treat_any_ci_string_as_set() -> None:
+    """The recipe used to treat any non-empty ``CI`` as a CI job."""
+    text = Path(__file__).resolve().parents[3].joinpath("justfile").read_text()
+    recipe = text.split("test-int:", 1)[0]
+    assert '[ -n "${CI:-}" ]' not in recipe
+    assert "check_wall_budget.py" in recipe

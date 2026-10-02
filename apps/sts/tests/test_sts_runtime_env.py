@@ -43,8 +43,9 @@ from mftik_sts.runtime_env import (
     reset_for_tests,
 )
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: the RPC cases borrow NATS to test env sync. Direct handler call:
+# B5-10 (#276). Cases that never open NATS stay on this mark; the slow ones
+# miss the 50 ms unit cap, and B5-10 rewrites the module as one piece.
 pytestmark = pytest.mark.integration
 
 _NUMPY_STRAT = """\

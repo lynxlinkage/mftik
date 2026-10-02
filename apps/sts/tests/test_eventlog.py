@@ -38,8 +38,9 @@ from mftik_md.tape_store import TapeStore
 from mftik_sts.session.session import StsSession
 from tape_rpc import serve_tape
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: the session cases borrow NATS to test event-log recording. Direct
+# handler call: B5-02 (#211). File-format cases that never open NATS stay
+# on this mark; B5-02 rewrites the module as one piece.
 pytestmark = pytest.mark.integration
 
 

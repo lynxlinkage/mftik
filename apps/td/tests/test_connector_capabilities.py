@@ -21,8 +21,8 @@ from mftik.exchange.oms import Position
 from mftik.protocol import TD_POSITION_UPDATE, Topics, UntypedEnvelope
 from mftik_td.session.session import Session
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: borrows NATS to test connector capabilities. Direct handler call:
+# B6-02 (#220).
 pytestmark = pytest.mark.integration
 
 #: A contract instrument — the only kind that has positions.

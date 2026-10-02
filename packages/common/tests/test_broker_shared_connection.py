@@ -2,9 +2,9 @@
 
 F31. ``broker`` borrows the session connection; this file checks that borrow
 and the ``/connz`` count. The count is shared clients only
-(:func:`shared_client_rows`): private ``a_broker`` sockets are still opened
-by tests B2-05 has not moved, and under ``-n`` they are not this worker's
-connection.
+(:func:`shared_client_rows`). B2-05 moved behaviour tests off ``just test``;
+a private socket is still not this worker's connection, and the count
+keeps ignoring it.
 """
 
 from __future__ import annotations
@@ -102,10 +102,10 @@ async def test_one_nats_connection_per_xdist_worker(
 ) -> None:
     """This worker's shared client is on ``/connz``, and only one of them.
 
-    Private ``a_broker`` sockets are not named ``mftik-pytest-``, so they
-    cannot inflate the count. Other workers open a shared client only when
-    one of their tests asks for it, so the total is at most the worker
-    count rather than exactly it.
+    Private sockets are not named ``mftik-pytest-``, so they cannot inflate
+    the count. Other workers open a shared client only when one of their
+    tests asks for it, so the total is at most the worker count rather
+    than exactly it.
     """
     assert broker.transport.nc is nats_connection
     assert nats_connection.is_connected

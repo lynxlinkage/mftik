@@ -32,8 +32,9 @@ from mftik.protocol import (
     Topics,
 )
 
-# Integration until B2-05. These borrow a private NATS connection
-# to test behaviour, and the slow cases miss the 50 ms unit cap.
+# B2-05: wiring smoke (§9.2), one case per plane. It still opens a private
+# socket, so it stays out of component. ``app.py`` wiring is B4-02 (STS,
+# #202), B4-05 (TD, #205) and B4-06 (MD, #206). Not a direct handler call.
 pytestmark = pytest.mark.integration
 
 #: The planes with a named subject, and how to ask each one whether it is

@@ -105,14 +105,28 @@ def wall_budget_failure(elapsed_s: float) -> str | None:
     )
 
 
+#: Values that must not select the warn-only gate. ``CI=false`` and
+#: ``CI=0`` are how a local shell says "not CI"; treating any non-empty
+#: string as CI turned that gate off.
+_NOT_CI = frozenset({"", "0", "false", "no", "off"})
+
+
+def _env_means_ci(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in _NOT_CI
+
+
 def on_ci() -> bool:
     """True when this process is a CI job.
 
-    GitHub Actions sets both ``CI`` and ``GITHUB_ACTIONS`` on every step,
-    including the stdlib-loop pass. Either one selects the warn-only
-    call-phase gate. An empty value does not.
+    GitHub Actions sets both ``CI`` and ``GITHUB_ACTIONS`` to ``true`` on
+    every step, including the stdlib-loop pass. Either one selects the
+    warn-only call-phase gate. Unset, empty, and ``0`` / ``false`` /
+    ``no`` / ``off`` (any case, surrounding space ignored) are not CI.
     """
-    return bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    return _env_means_ci("CI") or _env_means_ci("GITHUB_ACTIONS")
 
 
 def enforce_call_budget(item: Any, report: Any) -> None:
