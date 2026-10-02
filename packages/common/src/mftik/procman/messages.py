@@ -86,7 +86,8 @@ def exit_record_tmp_path(work_dir: Path, worker_id: str) -> Path:
 def supervisor_state_path(work_dir: Path) -> Path:
     """``${WORK_DIR}/run/supervisor.json``, loaded synchronously on start (§4.4).
 
-    The bytes are B3-03's. The path is named here so both sides share it.
+    The supervisor writes the bytes (B3-03), atomically, and reads them
+    back on start. The path is named here so both sides share it.
     """
     return run_dir(work_dir) / "supervisor.json"
 

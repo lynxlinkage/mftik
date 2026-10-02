@@ -3,7 +3,8 @@
 ``observe_heartbeat`` is the S6 rule and is real (B3-01).
 :func:`classify_failure`, :func:`plan_restart` and
 :func:`count_restarts_in_window` are real (B3-02). :func:`reattach_action`
-still raises until B3-03.
+is the §4.4 table and is real (B3-03). :func:`previous_worker_gone` is the
+F36 pid-reuse rule and is real (B3-03).
 
 The state machine's edges are :data:`~mftik.procman.state.TRANSITIONS`.
 These functions choose an edge from an observation. They are pure: no
@@ -27,10 +28,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from mftik.procman._ticket import TICKET
 from mftik.procman.errors import InvalidWorkerSpec
 from mftik.procman.messages import WorkerHeartbeat
-from mftik.procman.spec import RESTART_MODES, Plane, RestartMode
+from mftik.procman.spec import PLANES, RESTART_MODES, Plane, RestartMode
 from mftik.procman.state import WorkerPhase
 
 #: How fast a ``BACKOFF`` delay grows with ``attempt``.
@@ -72,7 +72,7 @@ class ObservedWorker(StrEnum):
 
 
 class ReattachAction(StrEnum):
-    """What :func:`reattach_action` will return once B3-03 implements it.
+    """What :func:`reattach_action` returns for one cell of the §4.4 table.
 
     ``MARK_FAILED`` is the STS cell of the table: record the exit and do not
     spawn. It is not the state machine's ``FAILED`` phase.
@@ -260,6 +260,41 @@ def count_restarts_in_window(
     return count
 
 
+def previous_worker_gone(
+    *,
+    recorded_start_ticks: int | None,
+    live_start_ticks: int | None,
+) -> bool:
+    """Whether the recorded worker process is gone (F36, §7.1).
+
+    ``live_start_ticks`` is field 22 of ``/proc/<pid>/stat`` (clock ticks
+    since boot), or ``None`` when that pid is not a process. ``None`` means
+    the pid is gone. The same start time means the same process is still
+    alive, so a new incarnation must not be spawned. A different start time
+    is pid reuse: the recorded process is gone. A live pid whose start time
+    was never recorded is treated as still alive, because reuse cannot be
+    ruled out.
+
+    This does not read ``/proc`` and does not signal. :meth:`Supervisor.spawn`
+    reads the start time and refuses while this returns false.
+    """
+    recorded = _start_ticks(recorded_start_ticks, "recorded_start_ticks")
+    live = _start_ticks(live_start_ticks, "live_start_ticks")
+    if live is None:
+        return True
+    if recorded is None:
+        return False
+    return live != recorded
+
+
+def _start_ticks(value: int | None, name: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be an int >= 0 or None")
+    return value
+
+
 def reattach_action(
     *,
     plane: Plane,
@@ -278,11 +313,29 @@ def reattach_action(
     absent          anything else           ``NONE``
     ==============  ======================  ================================
 
-    ``close("detach")`` does not signal workers. ``close("stop")`` does.
-    Those are :meth:`Supervisor.close`, not rows of this table.
+    The supervisor does not read desired state and does not apply the
+    action. The orchestrator does, with :meth:`~mftik.procman.Supervisor.stop`,
+    :meth:`~mftik.procman.Supervisor.release_slot`,
+    :meth:`~mftik.procman.Supervisor.record_restart` and
+    :meth:`~mftik.procman.Supervisor.spawn`. ``close("detach")`` does not
+    signal workers. ``close("stop")`` does. Those are
+    :meth:`~mftik.procman.Supervisor.close`, not rows of this table.
     """
-    del plane, desired, observed
-    raise NotImplementedError(TICKET)
+    if plane not in PLANES:
+        raise ValueError(f"plane {plane!r} is not one of {', '.join(PLANES)}")
+    if not isinstance(desired, DesiredSlot):
+        raise TypeError("desired must be a DesiredSlot")
+    if not isinstance(observed, ObservedWorker):
+        raise TypeError("observed must be an ObservedWorker")
+    if desired is DesiredSlot.PRESENT and observed is ObservedWorker.RUNNING:
+        return ReattachAction.ADOPT
+    if desired is DesiredSlot.PRESENT:
+        if plane == "sts":
+            return ReattachAction.MARK_FAILED
+        return ReattachAction.APPLY_RESTART
+    if observed is ObservedWorker.RUNNING:
+        return ReattachAction.STOP_AND_RELEASE
+    return ReattachAction.NONE
 
 
 def observe_heartbeat(

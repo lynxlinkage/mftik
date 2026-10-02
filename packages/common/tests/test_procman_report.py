@@ -147,6 +147,24 @@ async def test_report_refuses_until_start_has_reconciled(tmp_path: Path) -> None
     assert supervisor._generation == 0
 
 
+async def test_report_opens_after_start_and_closes_with_the_supervisor(
+    tmp_path: Path,
+) -> None:
+    """B3-03 calls ``allow_reports`` only after reconcile, and ``close`` pauses."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    with pytest.raises(ProcmanError, match="until start finishes"):
+        await supervisor.report()
+    assert supervisor._generation == 0
+    await supervisor.start()
+    report = await supervisor.report()
+    assert report.generation == 1
+    assert report.workers == []
+    await supervisor.close(CloseMode.DETACH)
+    with pytest.raises(ProcmanError, match="closed"):
+        await supervisor.report()
+    assert supervisor._generation == 1
+
+
 async def test_close_pauses_and_an_unknown_mode_does_not(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     supervisor.allow_reports()
@@ -155,8 +173,7 @@ async def test_close_pauses_and_an_unknown_mode_does_not(tmp_path: Path) -> None
     report = await supervisor.report()
     assert report.generation == 1
 
-    with pytest.raises(NotImplementedError):
-        await supervisor.close(CloseMode.DETACH)
+    await supervisor.close(CloseMode.DETACH)
     with pytest.raises(ProcmanError, match="closed"):
         await supervisor.report()
     assert supervisor._generation == 1

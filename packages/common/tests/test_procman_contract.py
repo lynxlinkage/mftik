@@ -2,9 +2,7 @@
 
 S1–S7 spawn real processes and are ``integration``. B3-01 makes them
 pass. Failure classification, backoff and intensity pass as of B3-02.
-B3-03 still owns reattach and detach/stop, and those tests stay
-``xfail(strict=True)``. ``strict`` means a stub that starts passing fails
-the suite until its marker is removed.
+Reattach and detach/stop pass as of B3-03.
 """
 
 from __future__ import annotations
@@ -544,7 +542,6 @@ def _reattach_rows() -> list[tuple[str, DesiredSlot, ObservedWorker, ReattachAct
     return rows
 
 
-@pytest.mark.xfail(strict=True, reason="B3-03: reattach follows the §4.4 table")
 @pytest.mark.parametrize(("plane", "desired", "observed", "action"), _reattach_rows())
 def test_reattach_follows_the_section_4_4_table(
     plane: str, desired: DesiredSlot, observed: ObservedWorker, action: ReattachAction
@@ -555,41 +552,59 @@ def test_reattach_follows_the_section_4_4_table(
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-03: detach signals no worker")
 async def test_detach_leaves_the_worker_running(tmp_path: Path) -> None:
     """§4.4: ``close(detach)`` does not signal. The same pid answers after."""
     ready = tmp_path / "ready"
     spec = _spec(_argv(_CATCH_TERM, str(tmp_path / "caught"), str(ready)))
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
-    await supervisor.start()
-    await supervisor.spawn(spec)
-    _wait_for(ready.exists)
-    client = ShimClient(socket_path(tmp_path, spec.id))
-    before = client.status()
-    assert before.pid is not None and before.exit_code is None
-    await supervisor.close(CloseMode.DETACH)
-    after = client.status()
-    assert after.pid == before.pid
-    assert after.exit_code is None
-    assert _alive(before.pid)
-    client.signal(signal.SIGKILL)
-    client.release()
+    client: ShimClient | None = None
+    worker: int | None = None
+    try:
+        await supervisor.start()
+        await supervisor.spawn(spec)
+        _wait_for(ready.exists)
+        client = ShimClient(socket_path(tmp_path, spec.id))
+        before = client.status()
+        assert before.pid is not None and before.exit_code is None
+        worker = before.pid
+        await supervisor.close(CloseMode.DETACH)
+        after = client.status()
+        assert after.pid == before.pid
+        assert after.exit_code is None
+        assert _alive(before.pid)
+    finally:
+        if client is not None:
+            try:
+                client.signal(signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                client.release()
+            except OSError:
+                pass
+        if worker is not None:
+            _kill_tree(worker)
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(strict=True, reason="B3-03: stop ends workers")
 async def test_stop_ends_the_worker(tmp_path: Path) -> None:
     """§4.4: ``close(stop)`` is the close that signals workers."""
     ready = tmp_path / "ready"
     spec = _spec(_argv(_CATCH_TERM, str(tmp_path / "caught"), str(ready)))
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
-    await supervisor.start()
-    await supervisor.spawn(spec)
-    _wait_for(ready.exists)
-    pid = ShimClient(socket_path(tmp_path, spec.id)).status().pid
-    assert pid is not None
-    await supervisor.close(CloseMode.STOP)
-    _wait_for(lambda: not _alive(pid))
+    pid: int | None = None
+    try:
+        await supervisor.start()
+        await supervisor.spawn(spec)
+        _wait_for(ready.exists)
+        reported = ShimClient(socket_path(tmp_path, spec.id)).status().pid
+        assert reported is not None
+        pid = reported
+        await supervisor.close(CloseMode.STOP)
+        _wait_for(lambda: not _alive(pid))
+    finally:
+        if pid is not None:
+            _kill_tree(pid)
 
 
 # --- FAILED / CRASHED, backoff, intensity: B3-02 ---------------------------

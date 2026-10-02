@@ -51,11 +51,13 @@ parent (F6).
   ``CRASHED``. A shim that disappears while the worker was alive is
   ``LOST``.
 * **Reattach (§4.4).** ``close(detach)`` signals nothing. ``close(stop)``
-  stops every worker; it is the only close that does. On start, a desired
-  worker that is running is adopted. A desired STS worker that is gone,
-  exited or ``LOST`` is recorded from the exit file and is not spawned. A
-  desired MD or TD worker in that state follows the restart policy. A
-  running worker that is no longer desired is stopped and then released.
+  stops every worker; it is the only close that does. :meth:`Supervisor.start`
+  reports each worker it finds and does not itself adopt, stop or spawn.
+  The orchestrator calls :func:`reattach_action`: a desired worker that is
+  running is ``ADOPT``. A desired STS worker that is gone, exited or
+  ``LOST`` is ``MARK_FAILED`` (record the exit, do not spawn). A desired
+  MD or TD worker in that state is ``APPLY_RESTART``. A running worker
+  that is no longer desired is ``STOP_AND_RELEASE``.
 * **Spawn.** The intermediate process is ``subprocess.Popen``. It is not
   ``asyncio.create_subprocess_exec`` (§4.1): that transport kills the child
   when it is closed or collected. The shim applies ``oom_score_adj`` and
@@ -66,7 +68,7 @@ validation are real. The shim — spawn, the socket, the exit record — is
 real as of B3-01. Restart decisions and the live state machine (spawn,
 stop, status, heartbeat timeout) are real as of B3-02. The liveness
 report, its generation, and the worker-tree Pss are real as of B3-04.
-Reattach still raises ``NotImplementedError("IF-03")``.
+Reattach, ``supervisor.json`` and the F36 pid fence are real as of B3-03.
 """
 
 from mftik.procman._ticket import TICKET
@@ -82,6 +84,7 @@ from mftik.procman.decisions import (
     count_restarts_in_window,
     observe_heartbeat,
     plan_restart,
+    previous_worker_gone,
     reattach_action,
 )
 from mftik.procman.errors import (
@@ -140,7 +143,16 @@ from mftik.procman.state import (
     WorkerPhase,
     transition,
 )
-from mftik.procman.supervisor import CloseMode, Supervisor, WorkerStatus
+from mftik.procman.supervisor import (
+    CloseMode,
+    ReattachObservation,
+    Supervisor,
+    SupervisorRecord,
+    WorkerStatus,
+    decode_supervisor_state,
+    encode_supervisor_state,
+    load_supervisor_state,
+)
 
 __all__ = [
     "ALIVE_PHASES",
@@ -167,6 +179,7 @@ __all__ = [
     "Plane",
     "ProcmanError",
     "ReattachAction",
+    "ReattachObservation",
     "ReleaseCommand",
     "RestartDecision",
     "RestartIntensity",
@@ -178,6 +191,7 @@ __all__ = [
     "SpawnedShim",
     "StatusQuery",
     "Supervisor",
+    "SupervisorRecord",
     "Trigger",
     "WatchCommand",
     "WorkerHeartbeat",
@@ -190,17 +204,21 @@ __all__ = [
     "decode_exit",
     "decode_heartbeat",
     "decode_status",
+    "decode_supervisor_state",
     "dump_frame",
     "encode_command",
     "encode_exit",
     "encode_heartbeat",
     "encode_status",
+    "encode_supervisor_state",
     "exit_record_path",
     "exit_record_tmp_path",
     "load_frame",
+    "load_supervisor_state",
     "log_path",
     "observe_heartbeat",
     "plan_restart",
+    "previous_worker_gone",
     "publish_reports",
     "reattach_action",
     "run_dir",
