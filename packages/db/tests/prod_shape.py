@@ -439,14 +439,14 @@ def dropped_columns_are_defaults(connection: Connection) -> list[str]:
 
 
 def sequences_continue(connection: Connection) -> list[str]:
-    """A new id is the previous maximum plus one.
+    """The next id is past every existing id.
 
-    Postgres checks ``nextval`` of every serial column, and also inserts
+    Postgres reads ``nextval`` of every serial column, and also inserts
     one row into ``users``, ``td_sessions`` and ``md_sessions`` (then
-    deletes it) so the check is an insert and not only a sequence read.
-    ``nextval`` is not rolled back, so each serial sequence ends one
-    value ahead. Sqlite inserts and deletes the same three, and checks
-    ``sqlite_sequence`` for every other autoincrement table.
+    deletes it) so three of the checks are real inserts. Sqlite inserts
+    and deletes the same three, and reads ``sqlite_sequence`` for every
+    other autoincrement table. The bar is :func:`_id_continues`, not
+    equality with ``max(id) + 1``.
     """
     if connection.dialect.name == "postgresql":
         return _postgres_sequences(connection)
@@ -959,7 +959,14 @@ def _serial_columns(connection: Connection) -> list[tuple[str, str]]:
         column = next(
             item for item in inspector.get_columns(table) if item["name"] == pk[0]
         )
-        if column.get("autoincrement") not in (True, "auto"):
+        # A reflected sqlite INTEGER PRIMARY KEY reports autoincrement
+        # None, including tables declared AUTOINCREMENT. It is still the
+        # rowid sqlite assigns. Postgres only counts a real serial.
+        auto = column.get("autoincrement")
+        if connection.dialect.name == "sqlite":
+            if auto is False:
+                continue
+        elif auto not in (True, "auto"):
             continue
         if not isinstance(column["type"], _INT):
             continue
@@ -980,9 +987,30 @@ def _max_id(connection: Connection, table: str, column: str) -> int | None:
     return None if value is None else int(value)
 
 
+def _id_continues(new_id: int, current: int | None) -> bool:
+    """True when ``new_id`` will not collide with a row already stored.
+
+    Do not require ``new_id == max(id) + 1``. A restore can already sit
+    past that point: ``fills`` and ``orders`` did, and 0037 does not
+    rewrite sequences. ``nextval`` then consumes one value, and that
+    move is not rolled back, so a second check of the same database is
+    one further ahead. The next insert is safe when its id is past
+    every existing row. An empty table has no maximum; any id at least
+    1 can open it.
+    """
+    if current is None:
+        return new_id >= 1
+    return new_id > current
+
+
+def _sequence_problem(table: str, column: str) -> str:
+    return f"{table}.{column} next value is not past max(id)"
+
+
 def _postgres_sequences(connection: Connection) -> list[str]:
     # The three inserts consume those sequences. Every other serial is
-    # checked with nextval, which is the id the next insert would take.
+    # checked with nextval: the id the next insert would take, and one
+    # the sequence will not hand out again.
     problems = _insert_probes(connection)
     for table, column in _serial_columns(connection):
         if table in {"users", "td_sessions", "md_sessions"}:
@@ -995,36 +1023,50 @@ def _postgres_sequences(connection: Connection) -> list[str]:
             problems.append(f"{table}.{column} has no sequence")
             continue
         current = _max_id(connection, table, column)
-        expected = 1 if current is None else current + 1
         nxt = connection.execute(
             text("SELECT nextval(:seq)"), {"seq": seq}
         ).scalar()
-        if int(nxt) != expected:
-            problems.append(f"{table}.{column} next value is not max+1")
+        if not _id_continues(int(nxt), current):
+            problems.append(_sequence_problem(table, column))
     return problems
+
+
+def _sqlite_next(seq: int | None, current: int | None) -> int:
+    """The rowid the next sqlite insert would take.
+
+    ``sqlite_sequence.seq`` is the last id handed out, and reading it
+    does not move it. The next rowid is one past the larger of that
+    counter and the highest id still in the table: a counter left
+    behind ``max(id)`` does not make sqlite reuse an id. A table that
+    has never allocated an id has no sequence row and starts at 1, or
+    at ``max(id) + 1`` once rows exist. That value is what
+    :func:`_id_continues` compares, the same rule as Postgres
+    ``nextval``.
+    """
+    if seq is None:
+        return 1 if current is None else current + 1
+    if current is None:
+        return seq + 1
+    return max(seq, current) + 1
 
 
 def _sqlite_sequences(connection: Connection) -> list[str]:
     problems = _insert_probes(connection)
-    names = {
-        row[0]
-        for row in connection.execute(text("SELECT name FROM sqlite_sequence")).all()
-    } if _has_sqlite_sequence(connection) else set()
+    stored: dict[str, int] = {}
+    if _has_sqlite_sequence(connection):
+        stored = {
+            str(name): int(seq)
+            for name, seq in connection.execute(
+                text("SELECT name, seq FROM sqlite_sequence")
+            ).all()
+        }
     for table, column in _serial_columns(connection):
         if table in {"users", "td_sessions", "md_sessions"}:
             continue
         current = _max_id(connection, table, column)
-        if current is None:
-            continue
-        if table not in names:
-            problems.append(f"{table} is missing from sqlite_sequence")
-            continue
-        seq = connection.execute(
-            text("SELECT seq FROM sqlite_sequence WHERE name = :name"),
-            {"name": table},
-        ).scalar()
-        if int(seq) != current:
-            problems.append(f"{table}.{column} sqlite_sequence is not max(id)")
+        nxt = _sqlite_next(stored.get(table), current)
+        if not _id_continues(nxt, current):
+            problems.append(_sequence_problem(table, column))
     return problems
 
 
@@ -1052,8 +1094,8 @@ def _insert_probes(connection: Connection) -> list[str]:
             "RETURNING id"
         )
     ).scalar()
-    if int(user_id) != (1 if user_max is None else user_max + 1):
-        problems.append("users insert did not get the next id")
+    if not _id_continues(int(user_id), user_max):
+        problems.append(_sequence_problem("users", "id"))
     owner = connection.execute(
         text("SELECT id FROM users ORDER BY id LIMIT 1")
     ).scalar()
@@ -1075,8 +1117,8 @@ def _insert_probes(connection: Connection) -> list[str]:
     ):
         before = _max_id(connection, table, "id")
         new_id = connection.execute(text(sql), {"owner": owner}).scalar()
-        if int(new_id) != (1 if before is None else before + 1):
-            problems.append(f"{table} insert did not get the next id")
+        if not _id_continues(int(new_id), before):
+            problems.append(_sequence_problem(table, "id"))
         connection.execute(
             text(f"DELETE FROM {_ident(table)} WHERE id = :id"),
             {"id": new_id},

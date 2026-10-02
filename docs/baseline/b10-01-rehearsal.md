@@ -2,6 +2,8 @@
 
 這份步驟由 Yi Te 在**拋棄的** Postgres 16 還原庫上自己跑。不要對正式庫執行，不要對 compose 的 postgres 執行。
 
+演練用的是 Postgres 16，正式環境是 15.15；0037 只有 DROP COLUMN，兩個版本行為相同。
+
 stdout 和 PR 留言只留 pass/fail、耗時、列數。不要貼 dump、列值、主鍵、URL、主機名稱，也不要附上快照檔。快照檔留在本機。
 
 `<scratch-url>` 是同步 URL，驅動程式用 `postgresql+psycopg`。`<db>` 必須等於 URL 裡的資料庫名稱。腳本拒絕從 `DATABASE_URL`、`DATABASE_URL_SYNC` 或 `.env` 讀位址。
@@ -132,7 +134,7 @@ uv run --all-packages python scripts/b10_01_rehearse.py verify \
 
 在 `0037_drop_rebuild_facts` 上，verify 檢查：存活欄的 digest 與列數不變、`rebuild_count` 與 `st_facts` 已不在、`alembic check` 乾淨、`sts_sessions` / `td_sessions` / `md_sessions` 都能走現在的 repository 讀取。
 
-它也會確認序號還接得下去：對 `users`、`td_sessions`、`md_sessions` 各插入一列再刪掉，其餘 serial 各呼叫一次 `nextval`。Postgres 的 `nextval` 不跟著交易回滾，所以演練庫的序號會往前一號。這是拋棄的還原庫。不要對正式庫跑。
+它也會確認下一個 id 不會撞上現有列：`nextval > max(id)`，沒有資料時 `nextval >= 1`。不要求等於 `max(id)+1`。還原庫的序號可以本來就超前，而且 `nextval` 會把序號往前推、不跟著交易回滾，所以連續兩次 verify 都應通過。檢查仍會對 `users`、`td_sessions`、`md_sessions` 各插入一列再刪掉，其餘 serial 各 `nextval` 一次。這是拋棄的還原庫。不要對正式庫跑。
 
 預期：第一行 `pass`，`revision=0037_drop_rebuild_facts`，`rows=` 與第 5 步相同。`fail` 或 `error=withheld` 都是失敗。`error=withheld` 表示例外文字可能含列值，所以腳本不印；不要為了貼 PR 而把 traceback 貼出來。
 
