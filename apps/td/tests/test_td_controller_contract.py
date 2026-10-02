@@ -20,11 +20,16 @@ import pytest
 from mftik.procman import (
     CloseMode,
     DesiredSlot,
+    ExitRecord,
     ObservedWorker,
+    ReattachAction,
+    ReattachObservation,
     RestartIntensity,
+    ShimStatus,
     Supervisor,
     WorkerPhase,
     plan_restart,
+    previous_worker_gone,
     reattach_action,
 )
 from mftik.protocol import IntentOwner, TdIntentDelete, TdIntentPut
@@ -36,10 +41,13 @@ from mftik_td.controller import (
     OrchestratorAction,
     TdOrchestrator,
     TradingDesired,
+    account_pid_gone,
     apply_delete,
     apply_put,
     close_actions,
     desired_accounts,
+    observation_view,
+    release_named,
     spawn_allowed,
     td_reattach,
     trading_active,
@@ -91,12 +99,14 @@ def _view(
     *,
     pid_gone: bool = False,
     incarnation: int | None = 1,
+    shim_waiting: bool = False,
 ) -> AccountView:
     return AccountView(
         api_id=api_id,
         observed=observed,
         pid_gone=pid_gone,
         incarnation=incarnation,
+        shim_waiting=shim_waiting,
     )
 
 
@@ -206,6 +216,99 @@ def test_spawn_allowed_requires_the_old_pid_to_be_gone() -> None:
     assert spawn_allowed(previous=False, pid_gone=True) is True
 
 
+def test_account_pid_gone_is_previous_worker_gone() -> None:
+    """``AccountView.pid_gone`` is the F36 rule. This layer does not read ``/proc``."""
+    cases = (
+        (10, None),
+        (None, None),
+        (10, 10),
+        (10, 11),
+        (None, 11),
+    )
+    for recorded, live in cases:
+        assert account_pid_gone(
+            recorded_start_ticks=recorded, live_start_ticks=live
+        ) is previous_worker_gone(
+            recorded_start_ticks=recorded, live_start_ticks=live
+        )
+
+
+def test_release_is_mark_failed_or_a_shim_still_waiting() -> None:
+    """``release_slot``. Spawn and stop are the other cells."""
+    assert release_named(ReattachAction.MARK_FAILED, shim_waiting=False) is True
+    assert release_named(ReattachAction.MARK_FAILED, shim_waiting=True) is True
+    assert release_named(ReattachAction.NONE, shim_waiting=True) is True
+    assert release_named(ReattachAction.NONE, shim_waiting=False) is False
+    for cell in (
+        ReattachAction.ADOPT,
+        ReattachAction.APPLY_RESTART,
+        ReattachAction.STOP_AND_RELEASE,
+    ):
+        assert release_named(cell, shim_waiting=True) is False
+        assert release_named(cell, shim_waiting=False) is False
+
+
+def _observation(
+    observed: ObservedWorker,
+    *,
+    status: ShimStatus | None = None,
+    exit_record: ExitRecord | None = None,
+) -> ReattachObservation:
+    return ReattachObservation(
+        id="td/account/7",
+        observed=observed,
+        spec=None,
+        incarnation=2,
+        status=status,
+        exit_record=exit_record,
+    )
+
+
+def test_observation_view_stores_the_pid_rule_and_a_waiting_shim() -> None:
+    waiting = ShimStatus(
+        id="td/account/7",
+        incarnation=2,
+        pid=40,
+        ready=True,
+        exit_code=1,
+    )
+    view = observation_view(
+        7,
+        _observation(ObservedWorker.EXITED, status=waiting),
+        recorded_start_ticks=10,
+        live_start_ticks=None,
+    )
+    assert view.pid_gone is True
+    assert view.shim_waiting is True
+    assert view.observed is ObservedWorker.EXITED
+    assert view.incarnation == 2
+    alive = ShimStatus(id="td/account/7", incarnation=2, pid=40, ready=True)
+    running = observation_view(
+        7,
+        _observation(ObservedWorker.RUNNING, status=alive),
+        recorded_start_ticks=10,
+        live_start_ticks=10,
+    )
+    assert running.pid_gone is False
+    assert running.shim_waiting is False
+    filed = ExitRecord(
+        id="td/account/7",
+        incarnation=2,
+        pid=40,
+        exit_code=1,
+        signal=None,
+        ready=True,
+    )
+    gone = observation_view(
+        7,
+        _observation(ObservedWorker.EXITED, exit_record=filed),
+        recorded_start_ticks=None,
+        live_start_ticks=11,
+    )
+    assert gone.shim_waiting is False
+    assert gone.pid_gone is False
+
+
 @pytest.mark.parametrize(
     ("desired", "observed"),
     [
@@ -266,6 +369,35 @@ def test_a_running_account_is_not_spawned_beside_itself(tmp_path: Path) -> None:
     actions = _orch(tmp_path).reconcile((_account(),), (), (view,))
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
     assert all(action.kind is not ActionKind.STOP for action in actions)
+
+
+def test_a_waiting_shim_on_an_undesired_account_is_released(tmp_path: Path) -> None:
+    """``NONE`` does not stop or spawn. The shim still has to be released (S3)."""
+    view = _view(observed=ObservedWorker.EXITED, shim_waiting=True, incarnation=2)
+    actions = _orch(tmp_path).reconcile((), (), (view,))
+    assert actions == (OrchestratorAction(kind=ActionKind.RELEASE, api_id=7),)
+
+
+def test_an_exit_file_with_no_shim_names_nothing(tmp_path: Path) -> None:
+    """``NONE`` without a waiting shim is the blank cell."""
+    view = _view(observed=ObservedWorker.EXITED, shim_waiting=False, incarnation=2)
+    assert _orch(tmp_path).reconcile((), (), (view,)) == ()
+
+
+def test_a_desired_restart_does_not_release_the_slot_itself(tmp_path: Path) -> None:
+    """``APPLY_RESTART`` names ``SPAWN``. Spawn replaces the held slot."""
+    view = _view(
+        observed=ObservedWorker.EXITED,
+        pid_gone=True,
+        incarnation=1,
+        shim_waiting=True,
+    )
+    actions = _orch(tmp_path).reconcile((_account(),), (), (view,))
+    assert OrchestratorAction(kind=ActionKind.RELEASE, api_id=7) not in actions
+    spawns = [action for action in actions if action.kind is ActionKind.SPAWN]
+    assert spawns == [
+        OrchestratorAction(kind=ActionKind.SPAWN, api_id=7, incarnation=2)
+    ]
 
 
 def test_an_account_that_is_no_longer_desired_is_stopped(tmp_path: Path) -> None:

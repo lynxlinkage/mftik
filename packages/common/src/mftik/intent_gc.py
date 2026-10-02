@@ -24,7 +24,9 @@ held set. It does not write ``released_at``.
   is released. The first miss only records them in ``absent``.
 * An equal ``generation`` is a replay. It is not a second sample.
 * ``generation`` is per publishing process and is not durable (B3-04).
-  A value lower than the previous one from that instance is a new
+  A process's first publication is generation 1. ``close`` and a later
+  ``start`` do not reset the counter; a new process starts at 1 again.
+  A value lower than the previous one from that instance is that new
   publisher. :func:`on_sts_report` resets that instance's cursor — no
   previous generation, empty ``absent`` — and then samples, so a
   release needs two consecutive reports from the new process.

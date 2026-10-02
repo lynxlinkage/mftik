@@ -7,10 +7,13 @@ module does not restate either.
   ``plane="td"``. B3-03 implements that table. B4-07 makes this function
   call it.
 * :func:`spawn_allowed` is the gate in front of
-  :meth:`mftik.procman.Supervisor.spawn`. The supervisor's spawn is the
-  fence that waits for the pid (F36, B3-03). This function does not read
-  ``/proc``. Reconcile names a spawn only when the gate is open, so a
-  caller cannot start an incarnation early.
+  :meth:`mftik.procman.Supervisor.spawn`. ``pid_gone`` is
+  :func:`mftik.procman.previous_worker_gone` (F36). This function does
+  not read ``/proc`` and does not change ``spawn``. Reconcile names a
+  spawn only when the gate is open.
+* :func:`release_named` is the ``release_slot`` rule.
+  ``MARK_FAILED`` names a release. ``NONE`` names one only while the
+  shim is still waiting (S3).
 * :func:`plan_account_restart` is :func:`mftik.procman.plan_restart` with
   ``restart="on_failure"`` and the intensity the caller supplied.
   Restart-intensity numbers for MD and TD are not decided (issue #286).
@@ -31,18 +34,22 @@ from mftik.procman import (
     DesiredSlot,
     ObservedWorker,
     ReattachAction,
+    ReattachObservation,
     RestartDecision,
     RestartIntensity,
     WorkerPhase,
     plan_restart,
+    previous_worker_gone,
     reattach_action,
 )
 from mftik.protocol import TdIntentDelete, TdIntentPut
 
 from mftik_td.controller.types import (
+    AccountView,
     BoundAccount,
     OrchestratorAction,
     TradingDesired,
+    account_worker_id,
     positive_api_id,
 )
 
@@ -239,19 +246,100 @@ def td_reattach(
     )
 
 
+def account_pid_gone(
+    *,
+    recorded_start_ticks: int | None,
+    live_start_ticks: int | None,
+) -> bool:
+    """``AccountView.pid_gone`` (F36).
+
+    The body is :func:`mftik.procman.previous_worker_gone` and nothing
+    else. A live pid with no recorded start time stays "not gone",
+    because reuse cannot be ruled out. This does not read ``/proc``.
+    """
+    return previous_worker_gone(
+        recorded_start_ticks=recorded_start_ticks,
+        live_start_ticks=live_start_ticks,
+    )
+
+
+def _shim_waiting(observation: ReattachObservation) -> bool:
+    """True when the socket answered and the worker has already exited (S3)."""
+    status = observation.status
+    if status is None:
+        return False
+    return status.exit_code is not None or status.signal is not None
+
+
+def observation_view(
+    api_id: int,
+    observation: ReattachObservation,
+    *,
+    recorded_start_ticks: int | None,
+    live_start_ticks: int | None,
+) -> AccountView:
+    """One row of :meth:`mftik.procman.Supervisor.start` as an account view.
+
+    ``start`` returns the observations and opens the report itself.
+    This function does not call it, does not call ``allow_reports``,
+    and does not read ``/proc``. ``pid_gone`` is :func:`account_pid_gone`.
+    ``shim_waiting`` is the socket that is still up after the worker
+    exited. An exit file alone is not that: the socket did not answer.
+    """
+    if not isinstance(observation, ReattachObservation):
+        raise TypeError("observation must be a ReattachObservation")
+    worker_id = account_worker_id(api_id)
+    if observation.id != worker_id:
+        raise ValueError(f"observation {observation.id} is not {worker_id}")
+    return AccountView(
+        api_id=api_id,
+        observed=observation.observed,
+        pid_gone=account_pid_gone(
+            recorded_start_ticks=recorded_start_ticks,
+            live_start_ticks=live_start_ticks,
+        ),
+        incarnation=observation.incarnation,
+        shim_waiting=_shim_waiting(observation),
+    )
+
+
+def release_named(cell: ReattachAction, *, shim_waiting: bool) -> bool:
+    """Whether reconcile names ``RELEASE`` for this §4.4 cell.
+
+    Applied with :meth:`mftik.procman.Supervisor.release_slot`, not with
+    ``spawn``. ``MARK_FAILED`` always does: the exit is already on the
+    observation and nothing is spawned. ``NONE`` does when
+    ``shim_waiting`` is true. The table's ``NONE`` does not spawn or
+    stop, and a shim that has reaped its worker still waits for
+    ``release`` (S3). ``ADOPT``, ``APPLY_RESTART`` and
+    ``STOP_AND_RELEASE`` do not: spawn replaces a held slot, and stop
+    releases the shim when the worker reaches ``STOPPED``.
+
+    B4-07 names the action. It does not call ``release_slot``.
+    """
+    if not isinstance(cell, ReattachAction):
+        raise TypeError("cell must be a ReattachAction")
+    _bool(shim_waiting, "shim_waiting")
+    if cell is ReattachAction.MARK_FAILED:
+        return True
+    if cell is ReattachAction.NONE:
+        return shim_waiting
+    return False
+
+
 def spawn_allowed(*, previous: bool, pid_gone: bool) -> bool:
     """Whether reconcile may name a new incarnation (F36, N1).
 
     ``previous`` is false when the supervisor holds no incarnation for
     this account. The first spawn does not wait. ``previous`` true
-    requires ``pid_gone``: the supervisor has seen the old pid leave.
-    A live pid means this returns false, and reconcile does not name
-    ``SPAWN``.
+    requires ``pid_gone``, which is :func:`account_pid_gone`: the
+    supervisor has seen the old pid leave. A live pid means this
+    returns false, and reconcile does not name ``SPAWN``.
 
     This is the gate in front of :meth:`mftik.procman.Supervisor.spawn`.
-    That call is the fence that waits (B3-03). This function does not
-    open ``/proc`` and it does not start a process. ``ADOPT`` does not
-    consult it: a running worker is not a new incarnation.
+    That call is the fence. This function does not open ``/proc``, does
+    not start a process, and does not change ``spawn``. ``ADOPT`` does
+    not consult it: a running worker is not a new incarnation.
 
     B4-07.
     """
