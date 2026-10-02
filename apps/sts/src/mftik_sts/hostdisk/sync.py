@@ -35,7 +35,12 @@ from mftik.registry.files import normalize_files, read_tree
 from mftik.registry.qualify import qualify
 
 from mftik_sts.hostdisk.probe import REASON_ABSENT, probe
-from mftik_sts.hostdisk.replica import INDEX_NAME, TREES_DIRNAME, TreeReplica
+from mftik_sts.hostdisk.replica import (
+    INDEX_NAME,
+    TREES_DIRNAME,
+    TreeReplica,
+    require_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +74,36 @@ def adopt_legacy(replica: TreeReplica) -> bool:
                 "legacy registry directory %s was not copied: %s", path, exc
             )
     return ok
+
+
+def materialize_legacy_digest(replica: TreeReplica, digest: str) -> bool:
+    """Copy one legacy tree into ``trees/<digest>`` when that is its hash.
+
+    A pin can name bytes that still live only under ``<origin>/<name>/``:
+    the API store on a shared ``MFTIK_DATA``, or a tree nobody has synced
+    into the digest layout yet. This does not bind the name, so an index
+    that already points at a newer digest stays there, and it does not
+    delete the directory.
+    """
+    try:
+        require_digest(digest)
+    except ValueError:
+        return False
+    if replica.path_of(digest) is not None:
+        return True
+    for _origin, _name, path in _legacy_trees(replica):
+        try:
+            normalised = normalize_files(read_tree(path))
+        except (RegistryError, OSError, ValueError):
+            continue
+        if digest_files(normalised) != digest:
+            continue
+        try:
+            replica.put(digest, normalised)
+        except (RegistryError, OSError):
+            return False
+        return replica.path_of(digest) is not None
+    return False
 
 
 def apply_registry_sync(

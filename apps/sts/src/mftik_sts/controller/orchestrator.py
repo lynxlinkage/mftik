@@ -806,15 +806,25 @@ class StsOrchestrator:
         """Refuse a spawn whose pinned tree or generation is not runnable.
 
         A built-in strategy (no digest) skips ``requires_mftik``. A
-        missing pinned tree stays ``alert=False`` and still publishes
-        the same error line a crash does, so the alert pipeline can
-        match it. This does not import the tree.
+        digest that exists only as a legacy name directory is copied
+        into ``trees/`` first; that directory is not deleted and the
+        index is not rebound. A missing pinned tree stays
+        ``alert=False`` and still publishes the same error line a crash
+        does, so the alert pipeline can match it. This does not import
+        the tree.
         """
         spec = held.spec
         if spec.strategy_digest is None and spec.env_generation is None:
             return None
         replica = TreeReplica(NodeEnv.from_env().data_dir)
         if spec.strategy_digest is not None:
+            # The pin may still be only a name directory (shared volume,
+            # or no sync yet). Copy those bytes into trees/<digest>.
+            # Do not bind and do not delete the directory.
+            if replica.path_of(spec.strategy_digest) is None:
+                from mftik_sts.hostdisk.sync import materialize_legacy_digest
+
+                materialize_legacy_digest(replica, spec.strategy_digest)
             code = rehang_code(
                 spec, replica=replica, release=installed_release()
             )

@@ -31,7 +31,12 @@ from mftik_sts.hostdisk import (
     pinned_code,
     rehang_code,
 )
-from mftik_sts.hostdisk.sync import apply_registry_sync, prepare_disk
+from mftik_sts.hostdisk.checks import MFTIK_DEV_RELEASE
+from mftik_sts.hostdisk.sync import (
+    apply_registry_sync,
+    materialize_legacy_digest,
+    prepare_disk,
+)
 
 pytestmark = pytest.mark.component
 
@@ -245,6 +250,47 @@ def test_deployable_checks_the_disk_and_does_not_import(tmp_path: Path) -> None:
     assert refused.ok is False
     assert refused.reason == "requires: numpy"
     assert _modules("_mftik_reg_") == before
+
+
+def test_materialize_copies_one_digest_and_does_not_bind(
+    tmp_path: Path,
+) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    replica = TreeReplica(tmp_path)
+    assert replica.path_of(added.digest) is None
+    assert materialize_legacy_digest(replica, added.digest)
+    assert replica.path_of(added.digest) is not None
+    assert replica.current(qualify(added.origin, added.type)) is None
+    assert Path(added.path).is_dir()
+
+
+async def test_a_spawn_guard_copies_a_name_directory_before_it_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pin whose bytes are only in the API store is runnable, and stays there."""
+    from types import SimpleNamespace
+
+    from mftik.procman import Supervisor
+    from mftik_sts.controller import StsOrchestrator
+
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
+    monkeypatch.setenv(MFTIK_DEV_RELEASE, "1")
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    orch = StsOrchestrator(
+        Supervisor(tmp_path / "work", plane="sts", instance="sts")
+    )
+    spec = SessionSpec(
+        session_id="abc123",
+        instance="sts",
+        strategy=qualify(added.origin, added.type),
+        strategy_digest=added.digest,
+    )
+    assert await orch._code_guard(SimpleNamespace(spec=spec)) is None  # noqa: SLF001
+    assert TreeReplica(tmp_path).path_of(added.digest) is not None
+    assert Path(added.path).is_dir()
+    assert (
+        TreeReplica(tmp_path).current(qualify(added.origin, added.type)) is None
+    )
 
 
 def test_prepare_disk_copies_a_legacy_tree_and_leaves_it(tmp_path: Path) -> None:
