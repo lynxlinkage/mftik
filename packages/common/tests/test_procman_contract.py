@@ -94,21 +94,58 @@ def _wait_for(predicate, timeout_s: float = 3.0) -> None:
     raise AssertionError(f"condition was still false after {timeout_s}s")
 
 
+def _children(pid: int) -> list[int]:
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / "status").read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("PPid:"):
+                if int(line.split()[1]) == pid:
+                    found.append(int(entry.name))
+                break
+    return found
+
+
+def _kill_tree(pid: int) -> None:
+    """SIGKILL ``pid`` and everything reparented onto it (S1's grandchild)."""
+    if pid <= 1 or pid == os.getpid():
+        return
+    for child in _children(pid):
+        _kill_tree(child)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def _cleanup(spawned: SpawnedShim) -> None:
+    witness: int | None = None
+    if _alive(spawned.pid):
+        try:
+            witness = _ppid(spawned.pid)
+        except OSError:
+            witness = None
     client = ShimClient(spawned.socket)
     try:
         client.signal(signal.SIGKILL)
     except Exception:
         pass
+    # A setsid grandchild is not in the worker's group, so killpg misses it.
+    # It is the shim's child once the intermediate has exited.
+    for child in _children(spawned.pid):
+        _kill_tree(child)
     try:
         client.release()
     except Exception:
         pass
-    if spawned.pid > 1:
-        try:
-            os.kill(spawned.pid, signal.SIGKILL)
-        except OSError:
-            pass
+    _kill_tree(spawned.pid)
+    if witness is not None:
+        _kill_tree(witness)
 
 
 @contextmanager
@@ -132,8 +169,13 @@ if intermediate == 0:
     os.setsid()
     grandchild = os.fork()
     if grandchild == 0:
+        # The intermediate exits immediately. If this process is scheduled
+        # after that exit, the first getppid() is already the shim and a
+        # loop that waits for a change never ends. Bound the wait, then
+        # record whoever the parent is: the assertion still requires the shim.
         parent = os.getppid()
-        while os.getppid() == parent:
+        deadline = time.monotonic() + 0.5
+        while os.getppid() == parent and time.monotonic() < deadline:
             time.sleep(0.01)
         with open(marker, "w") as handle:
             handle.write(f"{os.getpid()} {os.getppid()}")
