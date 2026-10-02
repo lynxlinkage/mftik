@@ -1,17 +1,23 @@
 """Decisions the supervisor will make.
 
-``observe_heartbeat`` is the S6 rule and is real (B3-01). Restart,
-failure classification and reattach still raise until B3-02 and B3-03.
+``observe_heartbeat`` is the S6 rule and is real (B3-01).
+:func:`classify_failure`, :func:`plan_restart` and
+:func:`count_restarts_in_window` are real (B3-02). :func:`reattach_action`
+still raises until B3-03.
 
 The state machine's edges are :data:`~mftik.procman.state.TRANSITIONS`.
 These functions choose an edge from an observation. They are pure: no
 socket, no clock of their own, no plane vocabulary beyond the ``plane``
-argument :func:`reattach_action` takes from §4.4's table.
+argument :func:`reattach_action` takes from §4.4's table. Crash class
+(A/B/C) is not an argument (P6).
 
 Restart intensity numbers are the caller's. STS deploy defaults (5 restarts
 inside 600 seconds, F11) live on the STS orchestrator (IF-04). MD and TD
 are described as exponential backoff plus a restart intensity (§4.3) and
 the plan does not give them numbers, so this layer does not invent any.
+The supervisor does not apply :func:`plan_restart` itself. The orchestrator
+does, then waits ``delay_s`` and calls :meth:`~mftik.procman.Supervisor.spawn`
+for the next incarnation.
 """
 
 from __future__ import annotations
@@ -23,8 +29,18 @@ from enum import StrEnum
 from mftik.procman._ticket import TICKET
 from mftik.procman.errors import InvalidWorkerSpec
 from mftik.procman.messages import WorkerHeartbeat
-from mftik.procman.spec import Plane, RestartMode
+from mftik.procman.spec import RESTART_MODES, Plane, RestartMode
 from mftik.procman.state import WorkerPhase
+
+#: How fast a ``BACKOFF`` delay grows with ``attempt``.
+#:
+#: Attempt 1 waits ``min_backoff_s``. Attempt ``n`` (``n >= 1``) waits
+#: ``min_backoff_s * BACKOFF_RATIO ** (n - 1)``. There is no cap, and this
+#: module does not reset ``attempt``: both are the caller's, and issue #286
+#: leaves the multiplier open. A floor of 0 stays 0, because the curve
+#: multiplies the floor; callers that need a growing delay pass a positive
+#: floor (F11's STS floor is 1 second).
+BACKOFF_RATIO = 2.0
 
 
 class FailureCause(StrEnum):
@@ -83,9 +99,10 @@ class RestartIntensity:
     With ``max_restarts=5``, four prior restarts still back off (the fifth
     is allowed) and five prior restarts are ``FATAL`` (a sixth would exceed).
 
-    ``min_backoff_s`` is the floor of the exponential delay. The ratio is
-    not fixed here; :func:`plan_restart` only has to grow with ``attempt``
-    and stay at or above this floor.
+    ``min_backoff_s`` is the floor of the delay. :data:`BACKOFF_RATIO` is
+    the multiplier :func:`plan_restart` applies. The plan does not fix that
+    ratio (issue #286); the constant is the value this layer uses until it
+    does.
     """
 
     max_restarts: int
@@ -125,10 +142,23 @@ def classify_failure(*, ready: bool, cause: FailureCause) -> WorkerPhase:
     ``FAILED`` is not restarted. ``CRASHED`` is restarted only when the spec
     says ``on_failure`` and :func:`plan_restart` still has room in the
     window (§4.3). ``cause`` names which timer or wait status fired;
-    ``ready`` is the distinction.
+    ``ready`` is the distinction. The cause does not change the phase.
     """
-    del ready, cause
-    raise NotImplementedError(TICKET)
+    if type(ready) is not bool:
+        raise TypeError("ready must be a bool")
+    if not isinstance(cause, FailureCause):
+        raise TypeError("cause must be a FailureCause")
+    if ready:
+        return WorkerPhase.CRASHED
+    return WorkerPhase.FAILED
+
+
+def _backoff_delay_s(*, attempt: int, min_backoff_s: float) -> float:
+    """``min_backoff_s * BACKOFF_RATIO ** (attempt - 1)``, and at least the floor."""
+    delay = min_backoff_s * BACKOFF_RATIO ** (attempt - 1)
+    if delay < min_backoff_s:
+        return min_backoff_s
+    return delay
 
 
 def plan_restart(
@@ -149,11 +179,48 @@ def plan_restart(
     input to the backoff curve only; it does not decide ``FATAL``.
 
     The delay is at least ``intensity.min_backoff_s`` and is strictly
-    increasing in ``attempt``. Crash class (A/B/C) is not an argument:
+    increasing in ``attempt`` when that floor is positive
+    (:data:`BACKOFF_RATIO`). Crash class (A/B/C) is not an argument:
     procman does not know why a process died (P6).
+
+    The supervisor does not call this and does not wait the delay. The
+    orchestrator does both, then :meth:`~mftik.procman.Supervisor.spawn`.
     """
-    del phase, restart, restarts_in_window, intensity, attempt
-    raise NotImplementedError(TICKET)
+    if not isinstance(intensity, RestartIntensity):
+        raise TypeError(
+            "intensity must be a RestartIntensity; "
+            "this layer does not choose the numbers"
+        )
+    try:
+        named = WorkerPhase(phase)
+    except ValueError as exc:
+        raise ValueError(f"unknown phase {phase!r}") from exc
+    if restart not in RESTART_MODES:
+        raise ValueError(
+            f"restart {restart!r} is not one of {', '.join(RESTART_MODES)}"
+        )
+    if type(restarts_in_window) is not int or restarts_in_window < 0:
+        raise ValueError("restarts_in_window must be an int >= 0")
+    if type(attempt) is not int or attempt < 1:
+        raise ValueError("attempt starts at 1")
+    if named is WorkerPhase.FAILED:
+        return RestartDecision(phase=WorkerPhase.FAILED, delay_s=None)
+    if named is not WorkerPhase.CRASHED:
+        raise ValueError(
+            f"plan_restart applies to FAILED or CRASHED, not {named}"
+        )
+    if restart == "never":
+        return RestartDecision(phase=WorkerPhase.CRASHED, delay_s=None)
+    # ``>=`` so max_restarts already-started restarts fill the window.
+    # The crash in hand would be one more. ``attempt`` is not consulted.
+    if restarts_in_window >= intensity.max_restarts:
+        return RestartDecision(phase=WorkerPhase.FATAL, delay_s=None)
+    return RestartDecision(
+        phase=WorkerPhase.BACKOFF,
+        delay_s=_backoff_delay_s(
+            attempt=attempt, min_backoff_s=intensity.min_backoff_s
+        ),
+    )
 
 
 def count_restarts_in_window(
@@ -167,8 +234,19 @@ def count_restarts_in_window(
     A sample counts when ``now_s - at <= window_s`` (the edge is inside).
     Older samples do not. Times are the caller's monotonic seconds.
     """
-    del restarted_at_s, now_s, window_s
-    raise NotImplementedError(TICKET)
+    if isinstance(restarted_at_s, str) or not isinstance(restarted_at_s, Sequence):
+        raise TypeError("restarted_at_s must be a sequence of times")
+    if type(now_s) is bool or not isinstance(now_s, int | float):
+        raise TypeError("now_s must be a number")
+    if type(window_s) is bool or not isinstance(window_s, int | float):
+        raise TypeError("window_s must be a number")
+    count = 0
+    for at in restarted_at_s:
+        if type(at) is bool or not isinstance(at, int | float):
+            raise TypeError("a restart time must be a number")
+        if now_s - float(at) <= window_s:
+            count += 1
+    return count
 
 
 def reattach_action(

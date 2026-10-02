@@ -2,7 +2,9 @@
 
 The diagram, as a table. Reading it is real. Choosing an edge from a live
 worker — ready or not, restart or not, window full or not — is
-:mod:`mftik.procman.decisions`, and that raises until B3-02.
+:mod:`mftik.procman.decisions`. Failure classification and the restart
+plan are real (B3-02). The supervisor applies those edges; it does not
+time ``BACKOFF`` itself. Reattach still raises until B3-03.
 
 ::
 
@@ -15,7 +17,7 @@ worker — ready or not, restart or not, window full or not — is
 
 ``SIGTERM`` is drawn from ``RUNNING``. :meth:`Supervisor.stop` can also
 arrive while the worker is still ``STARTING``, so the table has that edge
-too: same signal, earlier phase.
+too: same signal, earlier phase. There is no edge out of ``LOST``.
 """
 
 from __future__ import annotations

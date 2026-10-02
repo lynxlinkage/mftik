@@ -1,10 +1,10 @@
 """What B3 has to make true of procman, written before it exists.
 
 S1–S7 spawn real processes and are ``integration``. B3-01 makes them
-pass. The rest of this file is still ``xfail(strict=True)``: B3-02 owns
-failure classification, backoff and intensity; B3-03 owns reattach and
-detach/stop. ``strict`` means a stub that starts passing fails the suite
-until its marker is removed.
+pass. Failure classification, backoff and intensity pass as of B3-02.
+B3-03 still owns reattach and detach/stop, and those tests stay
+``xfail(strict=True)``. ``strict`` means a stub that starts passing fails
+the suite until its marker is removed.
 """
 
 from __future__ import annotations
@@ -466,6 +466,7 @@ def test_s6_a_heartbeat_makes_status_ready(tmp_path: Path) -> None:
         _wait_for(marker.exists)
         status = ShimClient(spawned.socket).status()
         assert status.ready is True
+        assert status.beats == 1
 
 
 @pytest.mark.parametrize(
@@ -590,7 +591,6 @@ async def test_stop_ends_the_worker(tmp_path: Path) -> None:
 # --- FAILED / CRASHED, backoff, intensity: B3-02 ---------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: ready distinguishes FAILED from CRASHED")
 @pytest.mark.parametrize(
     ("ready", "cause", "phase"),
     [
@@ -606,7 +606,6 @@ def test_failure_before_ready_is_failed_and_after_ready_is_crashed(
     assert classify_failure(ready=ready, cause=cause) is phase
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: FAILED is not restarted")
 def test_a_failure_before_ready_is_not_restarted() -> None:
     phase = classify_failure(ready=False, cause=FailureCause.DEATH)
     assert phase is WorkerPhase.FAILED
@@ -621,7 +620,6 @@ def test_a_failure_before_ready_is_not_restarted() -> None:
     assert decision.delay_s is None
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: restart=never does not restart a crash")
 def test_never_leaves_a_crash_where_it_is() -> None:
     decision = plan_restart(
         phase=WorkerPhase.CRASHED,
@@ -634,7 +632,6 @@ def test_never_leaves_a_crash_where_it_is() -> None:
     assert decision.delay_s is None
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: on_failure backs off inside the window")
 def test_four_restarts_in_the_window_still_back_off() -> None:
     """``max_restarts=5`` allows a fifth restart. Four already done, so this
     one still backs off."""
@@ -650,7 +647,6 @@ def test_four_restarts_in_the_window_still_back_off() -> None:
     assert decision.delay_s >= _INTENSITY.min_backoff_s
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: the restart past max_restarts is FATAL")
 def test_the_restart_past_max_restarts_is_fatal() -> None:
     """Five already done fills the window. ``attempt`` does not reopen it."""
     decision = plan_restart(
@@ -664,7 +660,6 @@ def test_the_restart_past_max_restarts_is_fatal() -> None:
     assert decision.delay_s is None
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: backoff grows and respects its floor")
 def test_backoff_grows_and_respects_the_minimum() -> None:
     delays: list[float] = []
     for attempt in range(1, 5):
@@ -683,7 +678,6 @@ def test_backoff_grows_and_respects_the_minimum() -> None:
     assert delays[-1] > delays[0]
 
 
-@pytest.mark.xfail(strict=True, reason="B3-02: the restart window is inclusive")
 def test_restarts_outside_the_window_do_not_count() -> None:
     """Age ``== window_s`` is inside. Anything older is not."""
     assert (
