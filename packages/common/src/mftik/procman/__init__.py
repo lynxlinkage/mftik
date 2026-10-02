@@ -1,9 +1,13 @@
 """Process supervision: the spec, the shim protocol, and the state machine.
 
 One library, embedded in each plane's controller (§4.1). The planes differ
-by :class:`WorkerSpec` and by the restart policy they pass in (§4.3). The
-shim is the worker's parent. The supervisor talks to it over a unix-socket
-NDJSON protocol and is not that parent (F6).
+by :class:`WorkerSpec`. The restart policy is the orchestrator's: it calls
+:func:`plan_restart` with its own intensity, waits, and calls
+:meth:`Supervisor.spawn` for the next incarnation. The supervisor classifies
+the failure and holds the slot. It does not restart on its own and it does
+not take a restart intensity (§4.3). The shim is the worker's parent. The
+supervisor talks to it over a unix-socket NDJSON protocol and is not that
+parent (F6).
 
 **State authority (§3.3).**
 
@@ -58,12 +62,14 @@ NDJSON protocol and is not that parent (F6).
 
 Framing, path names, the transition table and :class:`WorkerSpec`
 validation are real. The shim — spawn, the socket, the exit record — is
-real as of B3-01. Restart decisions, reattach and publishing a report
-still raise ``NotImplementedError("IF-03")``.
+real as of B3-01. Restart decisions and the live state machine (spawn,
+stop, status, heartbeat timeout) are real as of B3-02. Reattach and
+publishing a report still raise ``NotImplementedError("IF-03")``.
 """
 
 from mftik.procman._ticket import TICKET
 from mftik.procman.decisions import (
+    BACKOFF_RATIO,
     DesiredSlot,
     FailureCause,
     ObservedWorker,
@@ -142,6 +148,7 @@ from mftik.procman.supervisor import CloseMode, Supervisor, WorkerStatus
 
 __all__ = [
     "ALIVE_PHASES",
+    "BACKOFF_RATIO",
     "CONTROLLER_OOM_SCORE_ADJ",
     "OOM_SCORE_ADJ",
     "PIPE_BUF",

@@ -157,6 +157,13 @@ def _pid(value: object, *, allow_none: bool) -> int | None:
     return pid
 
 
+def _beats(value: object) -> int:
+    beats = _as_int(value, "beats")
+    if beats < 0:
+        raise MessageError("beats must be >= 0")
+    return beats
+
+
 def _rss(value: object) -> int | None:
     if value is None:
         return None
@@ -214,7 +221,15 @@ class ShimStatus:
     exit carries the code, a signal death carries the signal. ``ready`` is
     the last status-pipe snapshot, or ``False`` when none has arrived.
     ``rss_bytes`` is the worker's process tree, not the shim (§4.7); ``None``
-    when the shim has not read it yet.
+    when the shim has not read it yet. B3-04 fills it; the shim leaves it
+    ``None``.
+
+    ``beats`` is how many valid status-pipe heartbeats the shim has
+    decoded. A torn, oversized or undecodable line does not count. A beat
+    counts even when ``ready`` does not change. ``0`` before the first
+    valid beat. The shim does not turn this into a timeout and does not
+    kill on a missed beat; the supervisor decides ``HEARTBEAT_TIMEOUT``
+    from the counter (B3-02).
     """
 
     id: str
@@ -224,6 +239,7 @@ class ShimStatus:
     exit_code: int | None = None
     signal: int | None = None
     rss_bytes: int | None = None
+    beats: int = 0
     op: Literal["status"] = "status"
 
     def __post_init__(self) -> None:
@@ -235,6 +251,7 @@ class ShimStatus:
         object.__setattr__(self, "pid", _pid(self.pid, allow_none=True))
         object.__setattr__(self, "ready", _as_bool(self.ready, "ready"))
         object.__setattr__(self, "rss_bytes", _rss(self.rss_bytes))
+        object.__setattr__(self, "beats", _beats(self.beats))
         _check_exit_pair(self.exit_code, self.signal, allow_neither=True)
         if self.exit_code is not None:
             object.__setattr__(self, "exit_code", _exit_code(self.exit_code))
@@ -349,6 +366,7 @@ _STATUS_KEYS = {
     "exit_code",
     "signal",
     "rss_bytes",
+    "beats",
 }
 
 
@@ -366,6 +384,7 @@ def encode_status(status: ShimStatus) -> bytes:
             "exit_code": status.exit_code,
             "signal": status.signal,
             "rss_bytes": status.rss_bytes,
+            "beats": status.beats,
         }
     )
 
@@ -384,6 +403,7 @@ def decode_status(line: bytes) -> ShimStatus:
         exit_code=payload["exit_code"],
         signal=payload["signal"],
         rss_bytes=payload["rss_bytes"],
+        beats=payload["beats"],
     )
 
 

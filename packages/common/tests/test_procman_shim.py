@@ -37,6 +37,23 @@ with open(sys.argv[1], "w") as handle:
 time.sleep(30)
 """
 
+# Three valid beats (the second does not change ready), one undecodable
+# line, and one line over PIPE_BUF. The counter must stay at 3.
+_BEATS = """
+import os, sys, time
+fd = int(os.environ["MFTIK_STATUS_FD"])
+marker = sys.argv[1]
+os.write(fd, b'{"ready":false}\\n')
+os.write(fd, b'not-json\\n')
+os.write(fd, b'{"ready":false}\\n')
+os.write(fd, b'{"ready":true}\\n')
+pad = b"x" * 5000
+os.write(fd, b'{"ready":true,"pad":"' + pad + b'"}\\n')
+with open(marker, "w") as handle:
+    handle.write("sent")
+time.sleep(30)
+"""
+
 
 def _argv(source: str, *args: str) -> tuple[str, ...]:
     return (sys.executable, "-c", textwrap.dedent(source).strip(), *args)
@@ -145,6 +162,34 @@ def test_oom_score_adj_and_rlimit_are_applied_before_exec(tmp_path: Path) -> Non
         assert "50000000" in data
         shim_oom = Path(f"/proc/{spawned.pid}/oom_score_adj").read_text().strip()
         assert shim_oom == "0"
+    finally:
+        _stop(spawned)
+
+
+@pytest.mark.integration
+def test_status_counts_valid_heartbeats_only(tmp_path: Path) -> None:
+    """B3-02: a beat counts even when ``ready`` does not change. A torn,
+    undecodable or oversized line does not. Counting does not kill the
+    worker; the shim does not enforce ``hb_timeout_s``."""
+    marker = tmp_path / "sent"
+    spec = _spec(_argv(_BEATS, str(marker)))
+    spawned = spawn_shim(spec, work_dir=tmp_path)
+    try:
+        _wait_for(marker.exists)
+
+        def _counted() -> bool:
+            status = ShimClient(spawned.socket).status()
+            return status.ready is True and status.beats == 3
+
+        _wait_for(_counted)
+        status = ShimClient(spawned.socket).status()
+        assert status.beats == 3
+        assert status.ready is True
+        assert status.rss_bytes is None
+        assert status.exit_code is None
+        assert status.signal is None
+        assert status.pid is not None
+        assert Path(f"/proc/{status.pid}").exists()
     finally:
         _stop(spawned)
 

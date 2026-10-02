@@ -1,13 +1,12 @@
 """The procman interface IF-03 defines, and what B3 still has to decide.
 
-Two things are pinned here. The shape is real: ``WorkerSpec`` is §4.3, the
-transition table is the diagram, the NDJSON frames round-trip, and the
-report payload has the fields §3.3 and §4.7 name. The shim is real as of
-B3-01. Classifying a death, planning a restart, reattaching and publishing
-a report still raise ``NotImplementedError("IF-03")``.
+The shape is real: ``WorkerSpec`` is §4.3, the transition table is the
+diagram, the NDJSON frames round-trip, and the report payload has the
+fields §3.3 and §4.7 name. The shim is real as of B3-01. Classifying a
+death and planning a restart are real as of B3-02. Reattaching and
+publishing a report still raise ``NotImplementedError("IF-03")``.
 
-What B3-02 and B3-03 have to make true is in ``test_procman_contract.py``,
-as xfail.
+What B3-03 has to make true is in ``test_procman_contract.py``, as xfail.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from mftik.procman import (
     TRANSITIONS,
     CloseMode,
     ExitRecord,
-    FailureCause,
     InvalidTransition,
     InvalidWorkerId,
     InvalidWorkerSpec,
@@ -37,7 +35,6 @@ from mftik.procman import (
     ProcmanReport,
     ReleaseCommand,
     ReportedWorker,
-    RestartIntensity,
     ShimStatus,
     SignalCommand,
     StatusQuery,
@@ -47,8 +44,6 @@ from mftik.procman import (
     WorkerHeartbeat,
     WorkerPhase,
     WorkerSpec,
-    classify_failure,
-    count_restarts_in_window,
     decode_command,
     decode_exit,
     decode_heartbeat,
@@ -63,7 +58,6 @@ from mftik.procman import (
     exit_record_path,
     exit_record_tmp_path,
     load_frame,
-    plan_restart,
     reattach_action,
     report_subject,
     socket_path,
@@ -291,6 +285,7 @@ def test_status_and_exit_records_round_trip() -> None:
         pid=100,
         ready=True,
         rss_bytes=4096,
+        beats=3,
     )
     assert decode_status(encode_status(alive)) == alive
     dead = ShimStatus(
@@ -300,6 +295,7 @@ def test_status_and_exit_records_round_trip() -> None:
         ready=False,
         exit_code=None,
         signal=signal.SIGKILL,
+        beats=1,
     )
     assert decode_status(encode_status(dead)) == dead
     record = ExitRecord(
@@ -311,6 +307,28 @@ def test_status_and_exit_records_round_trip() -> None:
         ready=False,
     )
     assert decode_exit(encode_exit(record)) == record
+    missing_beats = dump_frame(
+        {
+            "op": "status",
+            "id": "td/account/42",
+            "incarnation": 1,
+            "pid": 100,
+            "ready": False,
+            "exit_code": None,
+            "signal": None,
+            "rss_bytes": None,
+        }
+    )
+    with pytest.raises(MessageError):
+        decode_status(missing_beats)
+    with pytest.raises(MessageError):
+        ShimStatus(
+            id="td/account/42",
+            incarnation=1,
+            pid=100,
+            ready=False,
+            beats=-1,
+        )
 
 
 def test_an_exit_record_has_exactly_one_of_code_and_signal() -> None:
@@ -406,14 +424,12 @@ def test_a_report_refuses_a_second_copy_of_the_same_worker() -> None:
 
 async def test_supervisor_methods_raise_the_ticket(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
-    spec = _spec()
+    # spawn, stop and status are real (B3-02). start, close and report
+    # stay with B3-03 and B3-04.
     calls = (
         supervisor.start(),
         supervisor.close(CloseMode.DETACH),
         supervisor.close("stop"),
-        supervisor.spawn(spec),
-        supervisor.stop(spec.id),
-        supervisor.status(spec.id),
         supervisor.report(),
     )
     for call in calls:
@@ -447,17 +463,9 @@ async def test_stop_refuses_an_id_that_escapes_run(tmp_path: Path) -> None:
 
 
 def test_decisions_raise_the_ticket() -> None:
-    intensity = RestartIntensity(max_restarts=5, window_s=600, min_backoff_s=1)
+    # classify_failure, plan_restart and count_restarts_in_window are real
+    # (B3-02). reattach_action stays until B3-03.
     calls = (
-        lambda: classify_failure(ready=True, cause=FailureCause.DEATH),
-        lambda: plan_restart(
-            phase=WorkerPhase.CRASHED,
-            restart="on_failure",
-            restarts_in_window=0,
-            intensity=intensity,
-            attempt=1,
-        ),
-        lambda: count_restarts_in_window((0.0,), now_s=1.0, window_s=600),
         lambda: reattach_action(
             plane="sts",
             desired=DesiredSlot.PRESENT,

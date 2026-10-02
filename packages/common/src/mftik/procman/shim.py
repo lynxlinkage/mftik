@@ -15,7 +15,8 @@ without executing that package init, so the shim process stays on the
 standard library (F29).
 
 ``ShimStatus.rss_bytes`` stays ``None``. The worker's process-tree RSS is
-B3-04.
+B3-04. ``ShimStatus.beats`` counts valid heartbeats. The shim does not
+read ``hb_timeout_s`` and does not kill on a missed beat (S6, B3-02).
 
 S2 kills the shim with ``SIGKILL``. The worker then stops on
 ``PDEATHSIG`` or a status-pipe ``EPIPE``. Nothing writes
@@ -638,6 +639,8 @@ class _WorkerState:
     signal: int | None = None
     released: bool = False
     record_written: bool = False
+    #: Valid heartbeats decoded. A dropped line does not move this.
+    beats: int = 0
 
     @property
     def alive(self) -> bool:
@@ -722,12 +725,15 @@ class _Server:
         try:
             while not (self.state.released and self.state.record_written):
                 self.poller.poll(1000)
+                # A beat already in the pipe was written before the worker
+                # exited. Read it before reaping so the exit record's
+                # ``ready`` is that beat, not the snapshot from before it.
+                self._drain_wake()
+                self._drain_pipes()
                 self._reap()
                 if _Flags.term:
                     _Flags.term = False
                     self._forward(signal.SIGTERM)
-                self._drain_wake()
-                self._drain_pipes()
                 self._accept()
                 self._read_clients()
                 self._reap()
@@ -745,6 +751,7 @@ class _Server:
             exit_code=self.state.exit_code,
             signal=self.state.signal,
             rss_bytes=None,
+            beats=self.state.beats,
         )
 
     def _reap(self) -> None:
@@ -842,14 +849,21 @@ class _Server:
         return True
 
     def _apply_heartbeat(self, line: bytes) -> None:
-        # A torn or over-long frame is dropped. The next heartbeat is a
-        # full snapshot, so the previous ``ready`` stands (S6).
+        # A torn, over-long or undecodable frame is dropped and does not
+        # count. The next heartbeat is a full snapshot, so the previous
+        # ``ready`` stands (S6). Every valid beat counts, including one
+        # that does not change ``ready``. ``watch`` is not pushed for a
+        # beat that only moves the counter: ``_note_ready`` fans out when
+        # ``ready`` changes, and the exit path fans out on its own. The
+        # supervisor polls ``status`` for the counter. This process does
+        # not read ``hb_timeout_s`` and does not kill on a missed beat.
         if len(line) > PIPE_BUF:
             return
         try:
             beat = decode_heartbeat(line)
         except MessageError:
             return
+        self.state.beats += 1
         self._note_ready(beat.ready)
 
     def _accept(self) -> None:
