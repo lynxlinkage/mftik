@@ -463,3 +463,28 @@ def test_admission_names_are_exported() -> None:
     text = " ".join((procman.__doc__ or "").split())
     assert "Admission control is B3-05." not in text
     assert "capacity_exceeded" in text
+
+
+def test_release_names_are_exported() -> None:
+    """B3-07's names are on ``mftik.procman.__all__``."""
+    from mftik.procman import (
+        PINNED_PHASES,
+        current_release,
+        pinned_releases,
+        pinned_releases_path,
+        write_pinned_releases,
+    )
+
+    exported = {
+        "PINNED_PHASES": PINNED_PHASES,
+        "current_release": current_release,
+        "pinned_releases": pinned_releases,
+        "pinned_releases_path": pinned_releases_path,
+        "write_pinned_releases": write_pinned_releases,
+    }
+    for name, value in exported.items():
+        assert name in procman.__all__
+        assert getattr(procman, name) is value
+    text = " ".join((procman.__doc__ or "").split())
+    assert "v0.9.5" in text
+    assert "0.9.5" in text

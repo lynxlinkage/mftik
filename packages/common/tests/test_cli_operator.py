@@ -1,17 +1,24 @@
 """IF-15's CLI surface, as it behaves today.
 
-The new commands parse and then refuse. ``mftik run`` grows ``--wait`` /
-``--no-wait`` without taking them: passing either one refuses before a
-deploy, and passing neither keeps the command that already exists.
-``mftik --help`` lists the new commands because they are rows in the same
-table the dispatch reads.
+The new commands parse and then refuse, except ``mftik workers`` without
+``--stale``, which lists each worker's release (B3-07). ``mftik run``
+grows ``--wait`` / ``--no-wait`` without taking them: passing either one
+refuses before a deploy, and passing neither keeps the command that
+already exists. ``mftik --help`` lists the new commands because they are
+rows in the same table the dispatch reads.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import httpx
 import pytest
+from mftik.cli import client as client_module
+from mftik.cli import config
 from mftik.cli.app import EXIT_ERROR, build_parser, main
-from mftik.cli.client import DEFAULT_TIMEOUT_S
+from mftik.cli.client import DEFAULT_TIMEOUT_S, Client
+from mftik.cli.config import Profile
 from mftik.cli.operator import (
     IntentGc,
     MdRestart,
@@ -71,7 +78,6 @@ def test_workers_help_lists_stale(capsys) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["workers"],
         ["workers", "--stale"],
         ["md", "restart", "binance-um-1"],
         ["td", "drain", "7"],
@@ -170,6 +176,91 @@ def test_a_result_names_one_target() -> None:
     assert set(MdRestart.__dataclass_fields__) == {"conn"}
     assert set(TdDrain.__dataclass_fields__) == {"api_id"}
     assert set(IntentGc.__dataclass_fields__) == {"instance"}
+
+
+def _connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "config.toml"
+    monkeypatch.setenv(config.CONFIG_ENV, str(path))
+    monkeypatch.delenv(config.PROFILE_ENV, raising=False)
+    config.put(Profile(name="local", url="http://node.test", token="mftik_ak_t"))
+
+
+def _stub_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # noqa: ANN001
+    real = httpx.Client
+
+    def build(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        kwargs.pop("transport", None)
+        return real(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", build)
+    monkeypatch.setattr(client_module, "Client", Client)
+
+
+def test_workers_prints_each_release_from_the_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """O1. The table is ``GET /workers``, including an old release."""
+    _connect(tmp_path, monkeypatch)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/workers":
+            return httpx.Response(
+                200,
+                json={
+                    "workers": [
+                        {
+                            "plane": "md",
+                            "instance": "md-1",
+                            "id": "md/conn/a",
+                            "incarnation": 2,
+                            "phase": "running",
+                            "ready": True,
+                            "code_ref": "1.4.0",
+                            "rss_bytes": 10,
+                            "age_s": 1.5,
+                        },
+                        {
+                            "plane": "td",
+                            "instance": "td-1",
+                            "id": "td/account/7",
+                            "incarnation": 1,
+                            "phase": "starting",
+                            "ready": False,
+                            "code_ref": "1.5.0",
+                            "rss_bytes": None,
+                            "age_s": 1.5,
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"detail": "nope"})
+
+    _stub_client(monkeypatch, handler)
+    assert main(["workers"]) == 0
+    out = capsys.readouterr().out
+    assert seen == ["/workers"]
+    assert out.index("1.4.0") < out.index("1.5.0")
+    assert "md/conn/a" in out
+    assert "td/account/7" in out
+    assert "md-1" in out
+    assert "RELEASE" in out
+
+
+def test_workers_with_nothing_reported_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _connect(tmp_path, monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/workers":
+            return httpx.Response(200, json={"workers": []})
+        return httpx.Response(404, json={"detail": "nope"})
+
+    _stub_client(monkeypatch, handler)
+    assert main(["workers"]) == 0
+    assert "no workers" in capsys.readouterr().out
 
 
 def test_decisions_raise_not_implemented() -> None:

@@ -865,3 +865,27 @@ class ArtifactListResponse(BaseModel):
     #: Declared STS processes that did not answer. Their silence is not an
     #: empty store.
     unanswered: list[str] = Field(default_factory=list)
+
+
+class WorkerOut(BaseModel):
+    """One worker from the latest ``procman.report`` of one plane instance.
+
+    ``age_s`` is seconds since that report arrived. A plane that stops
+    publishing stays in the list; the age grows instead of the row
+    disappearing (F32). ``code_ref`` is the platform release the worker
+    was spawned from. B10-03 builds the MD and TD pages from this row.
+    """
+
+    plane: str
+    instance: str
+    id: str
+    incarnation: int
+    phase: str
+    ready: bool
+    code_ref: str
+    rss_bytes: int | None = None
+    age_s: float
+
+
+class WorkerListResponse(BaseModel):
+    workers: list[WorkerOut] = Field(default_factory=list)

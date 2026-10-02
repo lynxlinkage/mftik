@@ -3660,6 +3660,28 @@
           }
         }
       }
+    },
+    "/workers": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "List Workers",
+        "description": "Every worker in the latest ``procman.report`` of each plane instance.\n\n``age_s`` is how long ago that instance's report arrived. An instance\nthat stops publishing stays, and the age grows. The list is not a\nreason to reclaim intents (F32).",
+        "operationId": "list_workers_workers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -7504,6 +7526,79 @@
         ],
         "title": "VenueOut",
         "description": "A venue credentials can be registered against."
+      },
+      "WorkerListResponse": {
+        "properties": {
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerOut"
+            },
+            "type": "array",
+            "title": "Workers"
+          }
+        },
+        "type": "object",
+        "title": "WorkerListResponse"
+      },
+      "WorkerOut": {
+        "properties": {
+          "plane": {
+            "type": "string",
+            "title": "Plane"
+          },
+          "instance": {
+            "type": "string",
+            "title": "Instance"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "incarnation": {
+            "type": "integer",
+            "title": "Incarnation"
+          },
+          "phase": {
+            "type": "string",
+            "title": "Phase"
+          },
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "code_ref": {
+            "type": "string",
+            "title": "Code Ref"
+          },
+          "rss_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rss Bytes"
+          },
+          "age_s": {
+            "type": "number",
+            "title": "Age S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "plane",
+          "instance",
+          "id",
+          "incarnation",
+          "phase",
+          "ready",
+          "code_ref",
+          "age_s"
+        ],
+        "title": "WorkerOut",
+        "description": "One worker from the latest ``procman.report`` of one plane instance.\n\n``age_s`` is seconds since that report arrived. A plane that stops\npublishing stays in the list; the age grows instead of the row\ndisappearing (F32). ``code_ref`` is the platform release the worker\nwas spawned from. B10-03 builds the MD and TD pages from this row."
       }
     }
   }

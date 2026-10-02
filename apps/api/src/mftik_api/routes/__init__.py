@@ -15,6 +15,7 @@ from mftik_api.routes.stats import router as stats_router
 from mftik_api.routes.sts import router as sts_router
 from mftik_api.routes.sym import router as sym_router
 from mftik_api.routes.td import router as td_router
+from mftik_api.routes.workers import router as workers_router
 
 __all__ = [
     "alerts_router",
@@ -32,4 +33,5 @@ __all__ = [
     "sts_router",
     "sym_router",
     "td_router",
+    "workers_router",
 ]

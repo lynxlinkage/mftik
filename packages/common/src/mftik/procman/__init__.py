@@ -22,7 +22,15 @@ parent (F6).
   list. While publication is stopped, the absence is not an observation:
   consumers reclaim nothing (F32, P7).
 * ``code_ref`` is the release version of the controller that spawned the
-  worker (§4.5).
+  worker (§4.5). Planes pass :func:`current_release`:
+  ``STRATEGON_RELEASE_VERSION`` when that variable is set (the tag,
+  ``v0.9.5``), otherwise the installed distribution version (``0.9.5``).
+  The spellings differ, so ``mftik workers --stale`` (B8-06) compares
+  with :func:`current_release` on both sides. Nothing else reads the
+  variable. The S-2 pin file is optional. :class:`Supervisor` takes
+  ``pin_path`` (default ``None``). :func:`pinned_releases_path` is that
+  path only when the variable is set, and ``None`` while Strategon
+  scans ``/proc`` and does not read a pin file.
 
 **Invariants.**
 
@@ -75,7 +83,8 @@ real as of B3-01. Restart decisions and the live state machine (spawn,
 stop, status, heartbeat timeout) are real as of B3-02. The liveness
 report, its generation, and the worker-tree Pss are real as of B3-04.
 Reattach, ``supervisor.json`` and the F36 pid fence are real as of B3-03.
-Admission is real as of B3-05.
+Admission is real as of B3-05. The release identity and the S-2 pin
+file are real as of B3-07.
 """
 
 from mftik.procman._ticket import TICKET
@@ -137,6 +146,13 @@ from mftik.procman.messages import (
     supervisor_state_path,
 )
 from mftik.procman.publish import REPORT_PERIOD_S, publish_reports
+from mftik.procman.release import (
+    PINNED_PHASES,
+    current_release,
+    pinned_releases,
+    pinned_releases_path,
+    write_pinned_releases,
+)
 from mftik.procman.shim import ShimClient, SpawnedShim, spawn_shim
 from mftik.procman.shim import main as shim_main
 from mftik.procman.spec import (
@@ -177,6 +193,7 @@ __all__ = [
     "BACKOFF_RATIO",
     "CONTROLLER_OOM_SCORE_ADJ",
     "OOM_SCORE_ADJ",
+    "PINNED_PHASES",
     "PIPE_BUF",
     "PLANES",
     "REPORT_PERIOD_S",
@@ -220,6 +237,7 @@ __all__ = [
     "WorkerStatus",
     "classify_failure",
     "count_restarts_in_window",
+    "current_release",
     "decide_admission",
     "decode_command",
     "decode_exit",
@@ -238,6 +256,8 @@ __all__ = [
     "load_supervisor_state",
     "log_path",
     "observe_heartbeat",
+    "pinned_releases",
+    "pinned_releases_path",
     "plan_restart",
     "previous_worker_gone",
     "publish_reports",
@@ -249,4 +269,5 @@ __all__ = [
     "supervisor_state_path",
     "transition",
     "validate_worker_id",
+    "write_pinned_releases",
 ]
