@@ -140,7 +140,12 @@ def apply_timeouts(items: list[pytest.Item]) -> None:
 
 def _format_seconds(seconds: float) -> str:
     if seconds < 1:
-        return f"{seconds * 1000:.0f} ms"
+        ms = seconds * 1000
+        nearest = round(ms)
+        # Keep a tenth when rounding would hide that the call went over.
+        if abs(ms - nearest) >= 0.05:
+            return f"{ms:.1f} ms"
+        return f"{nearest:.0f} ms"
     if seconds == int(seconds):
         return f"{seconds:.0f} s"
     return f"{seconds:.1f} s"
