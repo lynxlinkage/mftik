@@ -65,6 +65,9 @@ async def _seed_book(exchange: PaperExchange) -> None:
     await maker.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_public_req_reply(exchange: PaperExchange) -> None:
     public = exchange.public()
@@ -89,6 +92,9 @@ async def test_public_req_reply(exchange: PaperExchange) -> None:
     await public.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_public_has_no_candle_history(exchange: PaperExchange) -> None:
     """The paper engine invents prices tick by tick and keeps no past.
@@ -106,6 +112,9 @@ async def test_public_has_no_candle_history(exchange: PaperExchange) -> None:
     await public.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_public_stream_ticker(exchange: PaperExchange) -> None:
     public = exchange.public()
@@ -122,6 +131,9 @@ async def test_public_stream_ticker(exchange: PaperExchange) -> None:
     await public.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_private_market_order_and_streams(exchange: PaperExchange) -> None:
     await _seed_book(exchange)
@@ -171,6 +183,9 @@ async def test_private_market_order_and_streams(exchange: PaperExchange) -> None
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_private_market_order_sized_in_quote(exchange: PaperExchange) -> None:
     await _seed_book(exchange)
@@ -191,6 +206,9 @@ async def test_private_market_order_sized_in_quote(exchange: PaperExchange) -> N
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_quote_budget_that_does_not_divide_evenly_still_fills(
     exchange: PaperExchange,
@@ -229,6 +247,9 @@ async def test_quote_budget_that_does_not_divide_evenly_still_fills(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_quote_budget_beyond_the_book_is_cancelled_not_filled(
     exchange: PaperExchange,
@@ -270,6 +291,9 @@ async def test_quote_budget_beyond_the_book_is_cancelled_not_filled(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_market_order_that_outruns_the_book_keeps_what_it_took(
     exchange: PaperExchange,
@@ -311,6 +335,9 @@ async def test_a_market_order_that_outruns_the_book_keeps_what_it_took(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_market_order_the_book_cannot_serve_at_all_is_cancelled_flat(
     exchange: PaperExchange,
@@ -332,6 +359,9 @@ async def test_a_market_order_the_book_cannot_serve_at_all_is_cancelled_flat(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
     private = _private(exchange)
@@ -371,6 +401,9 @@ async def test_limit_rest_cancel(exchange: PaperExchange) -> None:
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_client_order_id_roundtrip_and_cancel(exchange: PaperExchange) -> None:
     private = _private(exchange)
@@ -398,6 +431,9 @@ async def test_client_order_id_roundtrip_and_cancel(exchange: PaperExchange) -> 
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_duplicate_client_order_id_rejected(exchange: PaperExchange) -> None:
     private = _private(exchange)
@@ -435,6 +471,9 @@ async def test_requires_connect() -> None:
             await public.fetch_ticker(PAPER("BTCUSDT"))
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
     await _seed_book(exchange)
@@ -464,6 +503,9 @@ async def test_public_and_private_share_engine(exchange: PaperExchange) -> None:
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_cross_account_match(exchange: PaperExchange) -> None:
     await _seed_book(exchange)
@@ -486,6 +528,9 @@ async def test_cross_account_match(exchange: PaperExchange) -> None:
     await taker.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_api_key_isolates_accounts(exchange: PaperExchange) -> None:
     await _seed_book(exchange)
@@ -505,6 +550,9 @@ async def test_api_key_isolates_accounts(exchange: PaperExchange) -> None:
     await b.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_paper_auth_rejects_bad_secret(exchange: PaperExchange) -> None:
     exchange.register_api("k1", "correct")
@@ -515,6 +563,9 @@ async def test_paper_auth_rejects_bad_secret(exchange: PaperExchange) -> None:
         await client.connect()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_post_only_rests_when_it_does_not_cross(
     exchange: PaperExchange,
@@ -539,6 +590,9 @@ async def test_post_only_rests_when_it_does_not_cross(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_post_only_is_refused_rather_than_filled(
     exchange: PaperExchange,
@@ -565,6 +619,9 @@ async def test_post_only_is_refused_rather_than_filled(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_crossing_limit_without_post_only_still_fills(
     exchange: PaperExchange,
@@ -609,6 +666,9 @@ async def _seed_thin_ask(
     await maker.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_ioc_keeps_what_crossed_and_cancels_the_rest(
     exchange: PaperExchange,
@@ -635,6 +695,9 @@ async def test_ioc_keeps_what_crossed_and_cancels_the_rest(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_an_ioc_that_crosses_fully_just_fills(
     exchange: PaperExchange,
@@ -658,6 +721,9 @@ async def test_an_ioc_that_crosses_fully_just_fills(
     await private.close()
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_fill_or_kill_is_cancelled_when_the_book_is_too_thin(
     exchange: PaperExchange,

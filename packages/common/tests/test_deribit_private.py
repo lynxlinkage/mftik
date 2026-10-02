@@ -553,6 +553,9 @@ async def test_portfolio_push_maps_the_same_fields() -> None:
     assert balance.locked == Decimal("60")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_portfolio_watched_later_still_reaches_the_account_stream(
     deribit: FakeDeribit,
 ) -> None:

@@ -7,6 +7,9 @@ import pytest
 from mftik.strategy.timer import Timer, now_ms
 
 
+@pytest.mark.real_sleep(
+    reason="strategy Timer fires on the real loop, not FakeClock"
+)
 @pytest.mark.asyncio
 async def test_one_shot_register_and_fire() -> None:
     timer = Timer()
@@ -67,6 +70,9 @@ async def test_a_token_never_fires_before_the_millisecond_it_is_due() -> None:
     assert lateness[0] >= 0, f"fired {-lateness[0]}ms before it was due"
 
 
+@pytest.mark.real_sleep(
+    reason="strategy Timer fires on the real loop, not FakeClock"
+)
 @pytest.mark.asyncio
 async def test_interval_and_cancel() -> None:
     timer = Timer()
@@ -98,6 +104,9 @@ async def test_async_callback() -> None:
     token.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="strategy Timer fires on the real loop, not FakeClock"
+)
 @pytest.mark.asyncio
 async def test_cancel_before_fire() -> None:
     timer = Timer()
@@ -109,6 +118,9 @@ async def test_cancel_before_fire() -> None:
     assert hits == []
 
 
+@pytest.mark.real_sleep(
+    reason="strategy Timer fires on the real loop, not FakeClock"
+)
 @pytest.mark.asyncio
 async def test_close_cancels_all() -> None:
     timer = Timer()
@@ -124,6 +136,9 @@ async def test_close_cancels_all() -> None:
         timer.token()
 
 
+@pytest.mark.real_sleep(
+    reason="strategy Timer fires on the real loop, not FakeClock"
+)
 @pytest.mark.asyncio
 async def test_a_callback_can_cancel_its_own_token_and_keep_going() -> None:
     """Self-cancel must not kill the coroutine that asked for it.

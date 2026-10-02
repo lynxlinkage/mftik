@@ -65,6 +65,9 @@ async def _record(store: TapeStore, trade_id: str, *, ms: int | None = None) -> 
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_tape_tail_is_chunked(broker: Broker, store: TapeStore) -> None:
     await store.mark_recording(FEED, since_ms=1, ttl_seconds=3600)
@@ -110,6 +113,9 @@ async def test_tape_tail_is_chunked(broker: Broker, store: TapeStore) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_unknown_feed_is_an_empty_slice(
     broker: Broker, store: TapeStore

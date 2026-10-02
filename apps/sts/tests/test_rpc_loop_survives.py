@@ -43,6 +43,9 @@ async def _health(broker: Broker) -> HealthStatus:
     return HealthStatus.model_validate(reply.payload)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_the_loop_rebuilds_itself_after_an_unexpected_failure(
     broker: Broker, monkeypatch: pytest.MonkeyPatch
@@ -76,6 +79,9 @@ async def run_rpc_under_test(broker: Broker, stop: asyncio.Event) -> None:
     await sts_app.run_rpc(broker, stop, subject=Topics.STS)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_shutdown_still_ends_the_loop(broker: Broker) -> None:
     """A loop that will not stop is the other way to lose a restart."""

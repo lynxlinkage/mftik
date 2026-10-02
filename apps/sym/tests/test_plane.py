@@ -658,6 +658,9 @@ async def test_client_get_asks_for_one_ticker(broker: Broker, served) -> None:
     ]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_client_get_finds_inactive_settled_instrument(
     broker: Broker, plane_factory
 ) -> None:

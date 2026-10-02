@@ -406,6 +406,9 @@ async def test_an_id_no_open_order_matches_is_refused_before_the_cancel(
 # --- streams ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_order_updates_come_home_canonical(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -421,6 +424,9 @@ async def test_order_updates_come_home_canonical(
     assert order.client_order_id == "c-42"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_only_real_executions_reach_the_fill_stream(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -439,6 +445,9 @@ async def test_only_real_executions_reach_the_fill_stream(
     assert fill.fee == Decimal("0.06")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_wallet_push_becomes_one_balance_per_coin(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -465,6 +474,9 @@ async def test_a_wallet_push_becomes_one_balance_per_coin(
     assert balance.locked == Decimal("10")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_positions_stream_off_the_contract_book(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -498,6 +510,9 @@ async def test_positions_stream_off_the_contract_book(
     assert position.universal_ticker == "Bybit_Perp_BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_closed_position_arrives_as_a_zero(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -516,6 +531,9 @@ async def test_a_closed_position_arrives_as_a_zero(
     assert position.flat
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_account_stream_is_not_scoped_to_one_book(
     bybit: FakeBybit, api: FakeApi
 ) -> None:
@@ -618,6 +636,9 @@ async def test_perp_positions_come_home_canonical(
 # --- lifecycle -------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_reconnect_on_either_socket_is_reported(
     bybit: FakeBybit, api: FakeApi
 ) -> None:

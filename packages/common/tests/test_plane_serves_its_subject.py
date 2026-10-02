@@ -73,6 +73,9 @@ def _run_rpc(plane: str):
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("plane", "health_type", "named"), PLANES)
 async def test_a_plane_answers_on_the_subject_it_was_given(
@@ -102,6 +105,9 @@ async def test_a_plane_answers_on_the_subject_it_was_given(
         assert HealthStatus.model_validate(reply.payload).status == "ok"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("plane", "health_type", "named"), PLANES)
 async def test_a_plane_does_not_answer_on_a_subject_it_was_not_given(

@@ -114,6 +114,9 @@ def no_pause(monkeypatch):
     monkeypatch.setattr(backfill_cron, "ACCOUNT_PAUSE_S", 0)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_every_account_with_history_is_asked_about(broker, db) -> None:
     async with db() as session:
         await an_owner(session)
@@ -132,6 +135,9 @@ async def test_every_account_with_history_is_asked_about(broker, db) -> None:
         assert {a.reason for a in seen} == {"cron"}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_account_that_stopped_trading_is_still_swept(broker, db) -> None:
     """The case no per-event trigger reaches: nothing detaches from it again."""
     async with db() as session:
@@ -153,6 +159,9 @@ async def test_a_credential_that_never_traded_is_not_asked_about(
     assert await sweep(broker) == 0
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_one_account_is_asked_about_once_per_sweep(broker, db) -> None:
     """Several instruments are one walk, not one request each."""
     async with db() as session:
@@ -177,6 +186,9 @@ async def test_one_account_is_asked_about_once_per_sweep(broker, db) -> None:
         assert [a.api_id for a in seen] == [5]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_loop_sweeps_on_its_interval(broker, db, monkeypatch) -> None:
     async with db() as session:
         await an_owner(session)
@@ -199,6 +211,9 @@ async def test_the_loop_sweeps_on_its_interval(broker, db, monkeypatch) -> None:
         assert [a.api_id for a in seen] == [1]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_failed_sweep_does_not_end_the_loop(broker, db, monkeypatch) -> None:
     """The next tick asks again; a stalled cron is the only real failure."""
     calls = {"n": 0}
@@ -229,6 +244,9 @@ async def _noop(*a, **kw) -> None:
     return None
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_account_whose_credential_is_gone_is_not_asked_about(
     broker, db
 ) -> None:

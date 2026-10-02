@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.feed import DeribitPublicStream
@@ -21,6 +22,9 @@ def _flag(task: asyncio.Task[object] | None) -> bool:
     return bool(task.get_context().run(_SETUP.get))
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_read_loop_tasks_do_not_inherit_the_setup_flag(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -86,6 +90,9 @@ async def test_read_loop_tasks_do_not_inherit_the_setup_flag(
     assert feed.stats.reconnects == 1
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_resync_during_reconnect_waits_for_the_read_loop(
     deribit_public: FakeDeribit,
 ) -> None:

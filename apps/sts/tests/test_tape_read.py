@@ -112,6 +112,9 @@ async def _record(
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_reads_back_as_aggtrade_models(
     broker: Broker, store: TapeStore
@@ -138,6 +141,9 @@ async def test_reads_back_as_aggtrade_models(
     assert record.first_trade_id == "1"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_omitting_on_print_keeps_the_prints_on_the_slice(
     broker: Broker, store: TapeStore
@@ -165,6 +171,9 @@ async def test_omitting_on_print_keeps_the_prints_on_the_slice(
     assert len(result) == 2
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_trade_topic_reads_back_as_trade(
     broker: Broker, store: TapeStore
@@ -185,6 +194,9 @@ async def test_trade_topic_reads_back_as_trade(
     assert type(prints[0]) is Trade
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_records_from_before_a_gap_are_dropped(
     broker: Broker, store: TapeStore
@@ -207,6 +219,9 @@ async def test_records_from_before_a_gap_are_dropped(
     assert result.dropped_before_gap == 1
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_coverage_is_reported(broker: Broker, store: TapeStore) -> None:
     await store.mark_recording(AGG_FEED, since_ms=99, ttl_seconds=3600)
@@ -225,6 +240,9 @@ async def test_coverage_is_reported(broker: Broker, store: TapeStore) -> None:
     assert result.recording is True
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_stopped_feed_says_so(broker: Broker, store: TapeStore) -> None:
     """History that ends in the past is still history — but it ends."""
@@ -245,6 +263,9 @@ async def test_a_stopped_feed_says_so(broker: Broker, store: TapeStore) -> None:
     assert result.recording is False
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_nothing_recorded_is_an_empty_slice_not_an_error(
     broker: Broker, store: TapeStore
@@ -262,6 +283,9 @@ async def test_nothing_recorded_is_an_empty_slice_not_an_error(
     assert result.recording is False
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_one_unreadable_record_does_not_lose_the_read(
     broker: Broker, store: TapeStore
@@ -289,6 +313,9 @@ async def test_one_unreadable_record_does_not_lose_the_read(
     assert [r.trade_id for r in prints] == ["1", "3"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_limit_takes_the_most_recent(
     broker: Broker, store: TapeStore
@@ -317,6 +344,9 @@ async def _interrupted(
     await store.mark_recording(AGG_FEED, since_ms=resumed_ms, ttl_seconds=3600)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_short_measured_gap_is_read_across_and_reported(
     broker: Broker, store: TapeStore
@@ -342,6 +372,9 @@ async def test_a_short_measured_gap_is_read_across_and_reported(
     assert result.missing_ms == 2_000
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_gap_too_long_to_span_still_ends_the_series(
     broker: Broker, store: TapeStore
@@ -366,6 +399,9 @@ async def test_a_gap_too_long_to_span_still_ends_the_series(
     assert result.gaps == []
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_caller_can_refuse_every_gap(
     broker: Broker, store: TapeStore
@@ -389,6 +425,9 @@ async def test_a_caller_can_refuse_every_gap(
     assert result.dropped_before_gap == 1
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_gap_the_records_no_longer_reach_is_not_reported(
     broker: Broker, store: TapeStore
@@ -435,6 +474,9 @@ async def test_a_star_mapping_does_not_invent_an_owner(
         await _tape(broker, md={"*": [AGG_FEED]}).read(TICKER)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_the_wrong_instance_returns_an_empty_slice(
     broker: Broker, store: TapeStore
@@ -460,6 +502,9 @@ async def test_the_wrong_instance_returns_an_empty_slice(
     assert result.recording is False
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_read_assembles_chunks_into_one_slice(
     broker: Broker, store: TapeStore, monkeypatch

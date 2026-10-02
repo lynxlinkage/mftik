@@ -51,6 +51,9 @@ async def _boom() -> None:
     raise RuntimeError("poll failed")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_an_ordinary_shutdown_reports_nothing(
     caplog: pytest.LogCaptureFixture,

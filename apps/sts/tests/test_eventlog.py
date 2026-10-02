@@ -278,6 +278,9 @@ def _session(
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_session_records_lifecycle_and_market_data(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -316,6 +319,9 @@ async def test_session_records_lifecycle_and_market_data(
     assert start["md"] == ["ticker.Paper_Spot_BTCUSDT"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_hook_failure_is_recorded_against_the_event(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -361,6 +367,9 @@ async def test_hook_failure_is_recorded_against_the_event(
     assert md[0]["env_id"] == failures[0]["env_id"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_unhandled_message_is_recorded(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -393,6 +402,9 @@ async def test_unhandled_message_is_recorded(
     assert unhandled[0]["peer"] == "md"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_order_submit_and_ack_are_both_recorded(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -448,6 +460,9 @@ async def test_order_submit_and_ack_are_both_recorded(
     assert orders[1]["cid"] == cid
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_order_with_no_td_records_the_refusal(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -481,6 +496,9 @@ async def test_order_with_no_td_records_the_refusal(
 # so without a record of the answer the log cannot say what the strategy knew.
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_oms_view_records_the_book_it_was_given(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -518,6 +536,9 @@ async def test_oms_view_records_the_book_it_was_given(
     assert reads[0]["payload"]["orders"]["555"]["price"] == "99"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_oms_order_records_a_miss_as_a_miss(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -543,6 +564,9 @@ async def test_oms_order_records_a_miss_as_a_miss(
     assert "payload" not in reads[0]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_ledger_view_records_the_balances(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -580,6 +604,9 @@ async def test_ledger_view_records_the_balances(
     assert reads[0]["payload"]["balances"]["USDT"]["prelock"] == "400"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_leverage_cache_hit_is_recorded_too(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -687,6 +714,9 @@ async def _a_store() -> TapeStore:
     return TapeStore(fakeredis.aioredis.FakeRedis(decode_responses=True))
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_tape_read_records_the_prints_not_just_the_coverage(
     broker: Broker, tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001
@@ -740,6 +770,9 @@ async def test_tape_read_records_the_prints_not_just_the_coverage(
     assert prices == ["68000", "68001", "68002"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_spanned_gap_is_written_to_the_log(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -790,6 +823,9 @@ async def test_a_spanned_gap_is_written_to_the_log(
     assert summary["max_gap_ms"] == 30_000
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_capped_tape_read_says_it_was_capped(
     broker: Broker, tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001
@@ -843,6 +879,9 @@ async def test_a_capped_tape_read_says_it_was_capped(
     assert sum(c["count"] for c in chunks) == 2
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_timer_ticks_are_recorded_under_their_label(
     broker: Broker, tmp_path: Path
 ) -> None:

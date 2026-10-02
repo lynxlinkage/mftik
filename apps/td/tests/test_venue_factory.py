@@ -75,6 +75,9 @@ def _factory(broker: Broker, rows: dict[int, FakeApiRow], **kwargs):
     return VenueSessionFactory(broker, load_api=load_api, **kwargs)
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 async def test_paper_venue_builds_a_paper_session(
     broker: Broker, paper: PaperExchange
 ) -> None:

@@ -70,6 +70,9 @@ async def _ask(broker: Broker, envelope):  # noqa: ANN001
     return await broker.request(Topics.sts("sts-jp"), envelope, timeout=5.0)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_chunked_put_lists_and_reads_back(
     broker: Broker, serving: Path
@@ -186,6 +189,9 @@ async def test_a_chunked_put_lists_and_reads_back(
     assert not (serving / "weights" / "model.pt").exists()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_an_upload_under_sessions_is_refused(
     broker: Broker, serving: Path
@@ -204,6 +210,9 @@ async def test_an_upload_under_sessions_is_refused(
     assert list(serving.rglob("*.part")) == []
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_key_that_is_a_directory_is_answered_not_dropped(
     broker: Broker, serving: Path

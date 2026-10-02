@@ -274,6 +274,9 @@ async def caller(broker: Broker):
 # --- the loop itself -------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_the_serve_loop_rebuilds_itself_rather_than_giving_up(
     broker: Broker, reader: FakeReader, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -314,6 +317,9 @@ async def test_the_serve_loop_rebuilds_itself_rather_than_giving_up(
 # --- the happy path --------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_query_is_acked_then_answered_on_the_callers_channel(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -330,6 +336,9 @@ async def test_a_query_is_acked_then_answered_on_the_callers_channel(
     assert reader.calls == [(SYMBOL, "1h", 3)]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_no_feed_subscription_is_needed(
     fetch: FetchSession, caller: Caller
 ) -> None:
@@ -344,6 +353,9 @@ async def test_no_feed_subscription_is_needed(
     assert fetch.venues == [VENUE]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_answer_follows_the_request_not_the_caller(
     broker: Broker, fetch: FetchSession
 ) -> None:
@@ -363,6 +375,9 @@ async def test_the_answer_follows_the_request_not_the_caller(
     await unrelated.close()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_ack_lands_before_the_venue_answers(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -378,6 +393,9 @@ async def test_the_ack_lands_before_the_venue_answers(
     assert (await caller.next_result()).ok is True
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_slow_query_does_not_block_the_next_one(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -391,6 +409,9 @@ async def test_a_slow_query_does_not_block_the_next_one(
     assert ids == {"slow", "fast"}
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_venue_reader_is_built_once_and_kept(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -403,6 +424,9 @@ async def test_a_venue_reader_is_built_once_and_kept(
     assert reader.connects == 1
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_concurrent_first_queries_build_one_reader(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -421,6 +445,9 @@ async def test_concurrent_first_queries_build_one_reader(
 # --- refusals at the ack ---------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_unsupported_request_type_is_refused(
     fetch: FetchSession, caller: Caller
 ) -> None:
@@ -429,6 +456,9 @@ async def test_unsupported_request_type_is_refused(
     assert ack.error_code == QueryCode.MD_UNSUPPORTED_REQUEST
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_unreadable_payload_is_refused(
     fetch: FetchSession, caller: Caller
 ) -> None:
@@ -437,6 +467,9 @@ async def test_unreadable_payload_is_refused(
     assert ack.error_code == QueryCode.MD_INVALID_REQUEST
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_query_with_nowhere_to_answer_is_refused(
     fetch: FetchSession, caller: Caller
 ) -> None:
@@ -446,6 +479,9 @@ async def test_a_query_with_nowhere_to_answer_is_refused(
     assert ack.error_code == QueryCode.MD_INVALID_REQUEST
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_too_many_in_flight_is_refused_at_the_ack(
     broker: Broker, reader: FakeReader, caller: Caller
 ) -> None:
@@ -468,6 +504,9 @@ async def test_too_many_in_flight_is_refused_at_the_ack(
 # --- failures after the ack ------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_venue_that_serves_no_reads_says_so(
     fetch: FetchSession, caller: Caller
 ) -> None:
@@ -479,6 +518,9 @@ async def test_a_venue_that_serves_no_reads_says_so(
     assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_venue_failure_still_produces_a_result(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -493,6 +535,9 @@ async def test_a_venue_failure_still_produces_a_result(
     assert "slow down" in result.reason
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_unsupported_interval_maps_to_its_own_code(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -505,6 +550,9 @@ async def test_an_unsupported_interval_maps_to_its_own_code(
     assert result.error_code == QueryCode.MD_INTERVAL_NOT_SUPPORTED
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_empty_answer_is_a_success(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -518,6 +566,9 @@ async def test_an_empty_answer_is_a_success(
     assert result.error_code == QueryCode.NONE
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_unmapped_venue_label_passes_through(
     fetch: FetchSession, caller: Caller, reader: FakeReader
 ) -> None:
@@ -532,6 +583,9 @@ async def test_an_unmapped_venue_label_passes_through(
 # --- lifecycle -------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_stopping_closes_every_reader(
     broker: Broker, reader: FakeReader, caller: Caller
 ) -> None:
@@ -550,6 +604,9 @@ async def test_stopping_closes_every_reader(
 # --- end to end ------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_strategy_with_no_market_data_gets_its_candles(
     broker: Broker, reader: FakeReader
 ) -> None:
@@ -610,6 +667,9 @@ async def test_a_strategy_with_no_market_data_gets_its_candles(
 # --- other reads -----------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_order_book_query_comes_back_as_a_book(
     broker: Broker, caller: Caller
 ) -> None:
@@ -634,6 +694,9 @@ async def test_an_order_book_query_comes_back_as_a_book(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_best_quote_query_comes_back_as_a_quote(
     broker: Broker, caller: Caller
 ) -> None:
@@ -659,6 +722,9 @@ async def test_a_best_quote_query_comes_back_as_a_quote(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_one_sided_book_is_a_success_with_no_quote(
     broker: Broker, caller: Caller
 ) -> None:
@@ -680,6 +746,9 @@ async def test_a_one_sided_book_is_a_success_with_no_quote(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_one_sided_option_quote_arrives_with_its_zero_side(
     broker: Broker, caller: Caller
 ) -> None:
@@ -707,6 +776,9 @@ async def test_a_one_sided_option_quote_arrives_with_its_zero_side(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
     broker: Broker, caller: Caller
 ) -> None:
@@ -729,6 +801,9 @@ async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_funding_history_arrives_oldest_first(
     broker: Broker, caller: Caller
 ) -> None:
@@ -761,6 +836,9 @@ async def test_funding_history_arrives_oldest_first(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_venue_without_funding_history_is_refused_by_name(
     broker: Broker, caller: Caller
 ) -> None:
@@ -783,6 +861,9 @@ async def test_a_venue_without_funding_history_is_refused_by_name(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_open_interest_arrives_as_one_print(
     broker: Broker, caller: Caller
 ) -> None:
@@ -807,6 +888,9 @@ async def test_open_interest_arrives_as_one_print(
     await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_venue_without_open_interest_is_refused_by_name(
     broker: Broker, caller: Caller
 ) -> None:

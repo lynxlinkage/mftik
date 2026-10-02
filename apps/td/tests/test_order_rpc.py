@@ -53,6 +53,9 @@ def _submit_envelope(**overrides: Any) -> Envelope[Any]:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_no_td_serving_times_out(broker: Broker) -> None:
     """Nothing is attached, so the request waits in the list and times out.
 

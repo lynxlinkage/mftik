@@ -301,6 +301,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_reload_rpc_returns_the_generation_it_now_believes(
     broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -337,6 +340,9 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_sync_rpc_installs_then_returns_the_generation(
     broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -380,6 +386,9 @@ async def test_sync_rpc_installs_then_returns_the_generation(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_generation_rpc_is_read_only(
     broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

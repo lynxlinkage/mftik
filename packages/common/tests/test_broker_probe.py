@@ -51,6 +51,9 @@ def _status() -> Envelope[HealthStatus]:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @session_loop
 async def test_a_probe_to_nobody_times_out(broker: Broker) -> None:
     """Which is the caller's answer of *down*, not an error to handle."""
@@ -64,6 +67,9 @@ async def test_a_probe_to_nobody_times_out(broker: Broker) -> None:
 DEAD_PROBES = 64
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @session_loop
 async def test_probing_a_dead_instance_does_not_pile_up(broker: Broker) -> None:
     """The leak this method exists to prevent, stated as the caller sees it.
@@ -104,6 +110,9 @@ async def test_probing_a_dead_instance_does_not_pile_up(broker: Broker) -> None:
     assert len(served) < DEAD_PROBES
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @session_loop
 async def test_a_served_probe_answers_like_any_request(broker: Broker) -> None:
     """Leaving nothing behind is about the unanswered case, not the reply path."""
@@ -128,6 +137,9 @@ async def test_a_served_probe_answers_like_any_request(broker: Broker) -> None:
     assert status.venues == ["Bybit"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @session_loop
 async def test_a_probe_carries_a_reply_address_its_handler_can_use(
     broker: Broker,
