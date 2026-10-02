@@ -237,6 +237,27 @@ def test_bytes_counts_every_generation_still_on_disk(tmp_path: Path) -> None:
     assert stamp_two.nbytes == _tree_bytes(env.root)
 
 
+def test_a_pinned_generation_survives_later_commits(tmp_path: Path) -> None:
+    """A generation named in the pin file outlives current and previous."""
+    env = NodeEnv(tmp_path)
+    generations = []
+    for n in range(2):
+        with env.lock():
+            dest = env.begin()
+            (dest / "pkg.py").write_text("z = 3\n" * 20)
+            env.commit(dest, {"numpy": _rec(f"{n}.0")})
+            generations.append(dest.parent)
+    pinned = int(generations[0].name.removeprefix("gen-"))
+    env.write_pinned_generations([pinned])
+    with env.lock():
+        dest = env.begin()
+        (dest / "pkg.py").write_text("z = 3\n" * 20)
+        env.commit(dest, {"numpy": _rec("9.0")})
+    assert generations[0].is_dir()
+    assert generations[1].is_dir()
+    assert env.read_pinned_generations() == frozenset({pinned})
+
+
 def test_a_dropped_generation_is_not_counted(tmp_path: Path) -> None:
     env = NodeEnv(tmp_path)
     generations = []

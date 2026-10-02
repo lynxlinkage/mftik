@@ -3,11 +3,10 @@
 This is the layer §3.4 names ``mftik_sts.controller``. It replaces
 ``session/manager.py``. Start, end, list, and the reconcile that creates
 or stops a worker are real (B4-02) and wired into the STS process.
-Classifying a crash and choosing a rehang is B5-06. The code-identity pins and
-the registry / env handler signatures are IF-16; those handlers raise
-``NotImplementedError("IF-16")`` until B5-10. This package does not
-import strategy code (F39). Artifact and event-log reads stay with
-B5-11 (F40).
+Classifying a crash and choosing a rehang is B5-06. The code-identity
+pins and the registry / env handlers are IF-16; B5-10 writes the
+digest replica and does not import strategy code (F39). Artifact and
+event-log reads stay with B5-11 (F40).
 
 **State authority (§3.3).**
 

@@ -1,12 +1,9 @@
-"""What B5-10 has to make true of the registry and env handlers.
-
-Every test here is ``xfail(strict=True)``. The signatures raise
-``NotImplementedError("IF-16")``, so the tests fail, and ``strict`` means
-the day the handlers answer the suite goes red until the marker is removed.
+"""Registry and env handlers answer on the digest-addressed replica.
 
 The behaviours IF-16 already implements — the replica, the pin, GC,
 deployable, the rehang's digest, and the probe — are not in this file.
 They pass in ``test_hostdisk.py`` and ``test_hostdisk_probe.py``.
+These three calls write a temp ``MFTIK_DATA`` and do not import a tree.
 """
 
 from __future__ import annotations
@@ -34,7 +31,12 @@ from mftik_sts.controller import (
     registry_sync_handler,
 )
 
-_B5 = "B5-10: controller serves registry and env on the digest-addressed replica"
+pytestmark = pytest.mark.component
+
+
+@pytest.fixture(autouse=True)
+def _isolate_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MFTIK_DATA", str(tmp_path))
 
 
 def _orch(tmp_path: Path) -> StsOrchestrator:
@@ -52,7 +54,6 @@ def _model(reply_payload: object, model: type):
     return model.model_validate(reply_payload)
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 async def test_registry_sync_replies_with_the_sync_result(tmp_path: Path) -> None:
     """The reply is the sync result. The handler writes the replica and
     does not import the tree; the probe is a subprocess."""
@@ -64,7 +65,6 @@ async def test_registry_sync_replies_with_the_sync_result(tmp_path: Path) -> Non
     _model(reply.payload, StsRegistrySyncResult)
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 async def test_registry_reload_replies_without_importing(tmp_path: Path) -> None:
     """Reload rescans the index. It does not import a strategy tree."""
     request = StsRegistryReloadRequest()
@@ -75,7 +75,6 @@ async def test_registry_reload_replies_without_importing(tmp_path: Path) -> None
     _model(reply.payload, StsRegistryReloadResult)
 
 
-@pytest.mark.xfail(strict=True, reason=_B5)
 async def test_env_sync_replies_with_the_env_result(tmp_path: Path) -> None:
     request = StsEnvSyncRequest()
     reply = await env_sync_handler(_orch(tmp_path))(

@@ -29,6 +29,9 @@ STAMP_NAME = "applied.json"
 LOCK_NAME = "apply.lock"
 CURRENT_NAME = "current"
 ENV_DIRNAME = "env"
+#: Generations a live session still imports. ``commit`` keeps these in
+#: addition to the generation it is publishing and the one before it.
+PINNED_GENERATIONS_NAME = "pinned-generations.json"
 
 
 class EnvironmentLocked(Exception):
@@ -250,7 +253,9 @@ class NodeEnv:
         # the volume it shares with the registry, which is every generation
         # still on disk — and not the one this apply is about to drop. Keep
         # the predecessor a live process may still be importing from; aborted
-        # applies burn numbers, so "n - 2" is not it.
+        # applies burn numbers, so "n - 2" is not it. Generations named in
+        # ``pinned-generations.json`` stay as well (F39): a session pinned
+        # to an older overlay still lazy-imports from it.
         self._prune_generations(keep={n, previous})
         stamp = EnvStamp(
             generation=n,
@@ -278,13 +283,60 @@ class NodeEnv:
             )
         return stamp
 
+    def read_pinned_generations(self) -> frozenset[int]:
+        """Generations ``pinned-generations.json`` names. A missing file is empty.
+
+        A file that is not a list of ints keeps nothing extra: ``commit``
+        must still be able to prune. Callers that want a generation kept
+        write the file before they commit.
+        """
+        path = self.root / PINNED_GENERATIONS_NAME
+        if not path.is_file():
+            return frozenset()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return frozenset()
+        if not isinstance(raw, list):
+            return frozenset()
+        pinned: set[int] = set()
+        for item in raw:
+            if type(item) is int and item >= 0:
+                pinned.add(item)
+        return frozenset(pinned)
+
+    def write_pinned_generations(self, generations: Collection[int]) -> None:
+        """Replace the pin file with ``generations``. The set is exact.
+
+        A caller that wants to add one generation reads, unions, and
+        writes. This method does not merge: a sync that knows every
+        non-terminal pin rewrites the file so a dropped session can be
+        pruned later.
+        """
+        if isinstance(generations, str) or not isinstance(generations, Collection):
+            raise TypeError("generations must be a collection of ints")
+        pinned: set[int] = set()
+        for generation in generations:
+            if type(generation) is not int:
+                raise TypeError("generations must be a collection of ints")
+            if generation < 0:
+                raise ValueError("generation must be >= 0")
+            pinned.add(generation)
+        self.root.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(sorted(pinned)) + "\n"
+        path = self.root / PINNED_GENERATIONS_NAME
+        tmp = path.with_name(PINNED_GENERATIONS_NAME + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+
     def _prune_generations(self, *, keep: set[int]) -> None:
+        retained = set(keep) | set(self.read_pinned_generations())
         for child in self.root.glob("gen-*"):
             try:
                 number = _generation_of(child)
             except ValueError:
                 continue
-            if number not in keep:
+            if number not in retained:
                 shutil.rmtree(child, ignore_errors=True)
 
     def site_packages(self, generation: int) -> Path:

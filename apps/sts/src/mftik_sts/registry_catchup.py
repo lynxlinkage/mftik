@@ -13,12 +13,6 @@ import asyncio
 import logging
 
 from mftik.broker import Broker
-from mftik.protocol import (
-    API_REGISTRY_CATCHUP,
-    ApiRegistryCatchupRequest,
-    ApiRegistryCatchupRequestEnvelope,
-    ApiRegistryCatchupResult,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -30,21 +24,16 @@ async def catch_up_until_matched(
     delay = 0.2
     while not stop.is_set():
         try:
-            reply = await broker.request(
-                API_REGISTRY_CATCHUP,
-                ApiRegistryCatchupRequestEnvelope.wrap(
-                    ApiRegistryCatchupRequest(instance=instance),
-                    type=API_REGISTRY_CATCHUP,
-                    source="sts",
-                ),
-                timeout=60,
-            )
+            # Lazy: this module is imported by the process entry, and the
+            # handler module imports the orchestrator.
+            from mftik_sts.controller.handlers import catch_up_registry
+
+            result = await catch_up_registry(broker, instance)
         except Exception as exc:
             logger.warning(
                 "registry catch-up: API did not answer (%s); retrying", exc
             )
         else:
-            result = ApiRegistryCatchupResult.model_validate(reply.payload)
             if result.ok:
                 logger.info(
                     "registry catch-up: %s matches the API store", instance

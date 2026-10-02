@@ -27,8 +27,10 @@ releases intents.
   (B3-04) reclaims from the liveness report as the fallback. This
   module does not.
 * ``strategy_digest`` and ``env_generation`` are columns (IF-16,
-  migration ``0036``). This module does not resolve or write them.
-  Pinning them at start is B5-10. ``create_live`` leaves both null.
+  migration ``0036``). :func:`resolve_start_pins` reads this process's
+  registry and env stamp at start and :meth:`create_live` stores the
+  pair. A built-in name does not match a qualified registry key.
+  :class:`StsCreateSessionRequest` does not carry either field.
 
 **Invariants.**
 
@@ -459,6 +461,37 @@ async def _request_v2[T: BaseModel](
         ) from exc
 
 
+def resolve_start_pins(strategy_type: str) -> tuple[str | None, int | None]:
+    """The digest and env generation to store on a new session row.
+
+    The digest is the registry record whose ``origin::type`` equals
+    ``strategy_type``. A built-in name such as ``NoopStrategy`` does
+    not match ``private::NoopStrategy``. No stamp file means no
+    generation pin, including when generation 0 would otherwise be
+    implied. A stamp that exists pins its generation, ``0`` included,
+    and unions that generation into ``pinned-generations.json`` so a
+    later commit does not drop it.
+    """
+    from mftik.environment import NodeEnv
+    from mftik.registry import RegistryStore, qualify
+
+    digest: str | None = None
+    store = RegistryStore.from_env()
+    if store.registry_dir.is_dir():
+        for rec in store.list_all():
+            if qualify(rec.origin, rec.type) == strategy_type:
+                digest = rec.digest
+                break
+    env = NodeEnv.from_env()
+    if not env.stamp_path.is_file():
+        return digest, None
+    generation = env.read_stamp().generation
+    pinned = set(env.read_pinned_generations())
+    pinned.add(generation)
+    env.write_pinned_generations(pinned)
+    return digest, generation
+
+
 async def _persist_start(
     spec: StrategySpec,
     *,
@@ -473,6 +506,7 @@ async def _persist_start(
 ) -> None:
     """Write the spec and the intent rows. One transaction. No RPC."""
     owner = IntentOwner(sts_instance=target, session_id=session_id)
+    strategy_digest, env_generation = resolve_start_pins(strategy_type)
     async with session_scope() as db:
         await StsSessionRepository(db).create_live(
             session_id=session_id,
@@ -484,6 +518,8 @@ async def _persist_start(
             st_paras=dict(spec.sts),
             restart=spec.restart,
             instance=target,
+            strategy_digest=strategy_digest,
+            env_generation=env_generation,
         )
         repo = IntentRepository(db)
         api_ids = td_api_ids_of(td)
@@ -769,10 +805,9 @@ async def start(
     asked for, or the derived target when the deploy named none. That
     name is also the owner on the intent messages. The start request
     still carries the name the deploy asked for.
-    ``strategy_digest`` and ``env_generation`` are columns on the row
-    (IF-16). This function does not write them, and
-    :class:`StsCreateSessionRequest` does not carry them. Pinning the
-    pair is B5-10.
+    ``strategy_digest`` and ``env_generation`` are written here from
+    this process's registry and env stamp.
+    :class:`StsCreateSessionRequest` does not carry them.
 
     A plane that refuses the accept does not leave a ``live`` row.
     :func:`_abandon_unaccepted` notifies what was already sent, marks

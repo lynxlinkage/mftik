@@ -1,9 +1,12 @@
 """Subprocess entry: import one tree and print a one-line report.
 
-Run as a script (``python probe_child.py``), not as
-``python -m mftik_sts.hostdisk.probe_child``. The ``-m`` form loads
-``mftik_sts``, and that package imports the running STS process. This
-file imports :func:`mftik.registry.load.load_class` and
+Run as ``python probe_child.py`` or
+``python -m mftik_sts.hostdisk.probe_child``. Importing :mod:`mftik_sts`
+does not load the STS process (B5-09), so ``-m`` is safe. The controller
+still launches this file as a script: importing
+:mod:`mftik_sts.hostdisk.probe` must not run the child.
+
+This file imports :func:`mftik.registry.load.load_class` and
 :func:`mftik.registry.protocol.handshake_info`. The controller does not.
 """
 
@@ -37,13 +40,21 @@ def main(argv: list[str]) -> int:
                 sys.path.insert(0, str(site))
         files = read_tree(Path(tree))
         chosen = pick_class(check_files(files))
-        load_class(
+        from mftik_sts.impl import _BUILTIN_KEYS
+
+        if chosen.type in _BUILTIN_KEYS:
+            _emit("skipped", "name collision with a bundled strategy")
+            return 0
+        loaded = load_class(
             Path(tree),
             type_name=chosen.type,
             source="probe",
             name=chosen.type,
             digest=digest,
         )
+        if getattr(loaded, "__name__", None) in _BUILTIN_KEYS:
+            _emit("skipped", "name collision with a bundled strategy")
+            return 0
     except Exception as exc:
         _emit("skipped", f"import error: {exc}")
         return 0

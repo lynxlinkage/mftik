@@ -12,9 +12,11 @@ from pathlib import Path
 
 import pytest
 from mftik.environment import EnvStamp, NodeEnv
+from mftik.protocol import StsRegistrySyncRequest, StsRegistryTreeOp
 from mftik.registry.digest import digest_files
 from mftik.registry.errors import RegistryDigestMismatch
 from mftik.registry.files import normalize_files
+from mftik.registry.qualify import qualify
 from mftik.registry.store import RegistryStore
 from mftik_sts.controller import SessionSpec
 from mftik_sts.hostdisk import (
@@ -28,6 +30,7 @@ from mftik_sts.hostdisk import (
     pinned_code,
     rehang_code,
 )
+from mftik_sts.hostdisk.sync import apply_registry_sync, prepare_disk
 
 pytestmark = pytest.mark.component
 
@@ -241,3 +244,87 @@ def test_deployable_checks_the_disk_and_does_not_import(tmp_path: Path) -> None:
     assert refused.ok is False
     assert refused.reason == "requires: numpy"
     assert _modules("_mftik_reg_") == before
+
+
+def test_prepare_disk_copies_a_legacy_tree_and_leaves_it(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    assert prepare_disk(tmp_path)
+    replica = TreeReplica(tmp_path)
+    assert replica.current(qualify("private", added.type)) == added.digest
+    assert Path(added.path).is_dir()
+    assert replica.path_of(added.digest) is not None
+
+
+def test_a_full_retain_deletes_legacy_dirs_after_pins_resolve(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    key = qualify("private", added.type)
+    request = StsRegistrySyncRequest(
+        trees=[
+            StsRegistryTreeOp(
+                op="upsert",
+                origin="private",
+                name=added.type,
+                digest=added.digest,
+                files={"strategy.py": _TINY},
+            )
+        ],
+        reload=False,
+        retain=[key],
+    )
+    apply_registry_sync(request, keep_digests=frozenset(), data_dir=tmp_path)
+    assert not Path(added.path).exists()
+    assert TreeReplica(tmp_path).path_of(added.digest) is not None
+
+
+def test_a_partial_sync_does_not_delete_legacy_dirs(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    request = StsRegistrySyncRequest(
+        trees=[
+            StsRegistryTreeOp(
+                op="upsert",
+                origin="private",
+                name=added.type,
+                digest=added.digest,
+                files={"strategy.py": _TINY},
+            )
+        ],
+        reload=False,
+    )
+    apply_registry_sync(request, keep_digests=frozenset(), data_dir=tmp_path)
+    assert Path(added.path).is_dir()
+
+
+def test_an_unreadable_legacy_tree_blocks_every_deletion(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    junk = tmp_path / "registry" / "private" / "Junk"
+    junk.mkdir()
+    (junk / "readme.txt").write_text("not a strategy\n", encoding="utf-8")
+    key = qualify("private", added.type)
+    request = StsRegistrySyncRequest(trees=[], reload=False, retain=[key])
+    apply_registry_sync(request, keep_digests=frozenset(), data_dir=tmp_path)
+    assert Path(added.path).is_dir()
+    assert junk.is_dir()
+
+
+def test_a_missing_pin_blocks_legacy_deletion(tmp_path: Path) -> None:
+    added = RegistryStore(tmp_path).add({"strategy.py": _TINY})
+    key = qualify("private", added.type)
+    missing = "sha256:" + "ab" * 32
+    request = StsRegistrySyncRequest(
+        trees=[
+            StsRegistryTreeOp(
+                op="upsert",
+                origin="private",
+                name=added.type,
+                digest=added.digest,
+                files={"strategy.py": _TINY},
+            )
+        ],
+        reload=False,
+        retain=[key],
+    )
+    apply_registry_sync(
+        request, keep_digests=frozenset({missing}), data_dir=tmp_path
+    )
+    assert Path(added.path).is_dir()
+    assert TreeReplica(tmp_path).path_of(added.digest) is not None

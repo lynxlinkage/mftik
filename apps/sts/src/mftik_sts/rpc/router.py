@@ -79,6 +79,13 @@ CONTROLLER_TYPES = frozenset(
     {STS_SESSION_START, STS_SESSION_END, STS_SESSION_LIST}
 )
 
+#: Digest-addressed registry and env. Served by the controller when one
+#: is bound. :data:`_HANDLERS` still names the legacy importers so
+#: :func:`dispatch` keeps answering the tests that call it directly.
+_DISK_TYPES = frozenset(
+    {STS_REGISTRY_SYNC, STS_REGISTRY_RELOAD, STS_ENV_SYNC}
+)
+
 _HANDLERS: dict[str, Handler] = {
     STS_ARTIFACT_LIST: handle_artifact_list,
     STS_ARTIFACT_READ: handle_artifact_read,
@@ -118,6 +125,20 @@ def _not_ready(message: UntypedEnvelope) -> Reply:
         source="sts",
         session_id=message.session_id,
     )
+
+
+def _disk_handlers(orchestrator: StsOrchestrator) -> dict[str, MessageHandler]:
+    from mftik_sts.controller import (
+        env_sync_handler,
+        registry_reload_handler,
+        registry_sync_handler,
+    )
+
+    return {
+        STS_REGISTRY_SYNC: registry_sync_handler(orchestrator),
+        STS_REGISTRY_RELOAD: registry_reload_handler(orchestrator),
+        STS_ENV_SYNC: env_sync_handler(orchestrator),
+    }
 
 
 def _unknown(message: UntypedEnvelope) -> Reply:
@@ -174,6 +195,13 @@ def control_handler(
             return await end(message)
         if kind == STS_SESSION_LIST and listing is not None:
             return await listing(message)
+        if kind in _DISK_TYPES:
+            # The digest replica. Do not fall through to the legacy
+            # handlers: those import every tree into this process.
+            if orchestrator is None:
+                return _not_ready(message)
+            disk = _disk_handlers(orchestrator)
+            return await disk[kind](message)
         legacy = _HANDLERS.get(kind)
         if legacy is None:
             return _unknown(message)

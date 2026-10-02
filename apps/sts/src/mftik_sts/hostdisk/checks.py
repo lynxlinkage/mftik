@@ -10,6 +10,8 @@ importer.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 
 from mftik.environment import NodeEnv
@@ -23,6 +25,32 @@ from mftik_sts.hostdisk.replica import TreeReplica
 
 #: ``RegistryStore.add`` writes this when the class has no ``requires_mftik``.
 _DEFAULT_REQUIRES_MFTIK = "0.1.0"
+
+#: Set to ``1`` when this tree is a source checkout whose distribution
+#: version is ``0.0.0``. Otherwise a source-tree release refuses every
+#: ``requires_mftik``, including ``0.0.0``.
+MFTIK_DEV_RELEASE = "MFTIK_DEV_RELEASE"
+
+_PRE_RANK = {"a": 0, "b": 1, "rc": 2}
+_PRE_ALIAS = {
+    "a": "a",
+    "alpha": "a",
+    "b": "b",
+    "beta": "b",
+    "rc": "rc",
+    "c": "rc",
+    "preview": "rc",
+}
+_VERSION = re.compile(
+    r"^(?:(?P<epoch>[0-9]+)!)?"
+    r"(?P<release>[0-9]+(?:\.[0-9]+)*)"
+    r"(?:\.?(?P<pre_l>a|alpha|b|beta|rc|c|preview)(?P<pre_n>[0-9]*))?"
+    r"(?:\.post(?P<post>[0-9]+))?"
+    r"(?:\.dev(?P<dev>[0-9]+))?"
+    r"(?:\+(?P<local>[0-9A-Za-z.]+))?"
+    r"$",
+    re.IGNORECASE,
+)
 
 #: The pinned tree is not on this disk and cannot be fetched back (F39).
 REASON_STRATEGY_UNAVAILABLE = "strategy_unavailable"
@@ -110,12 +138,12 @@ def rehang_code(
     since moved to another digest of the same name. A built-in strategy
     is not failed for ``requires_mftik``: its code is ``release``.
 
-    ``requires_mftik`` is compared as a numeric minimum
-    (:func:`release_accepts`). The plan says an incompatible tree is
-    failed and alerted; it does not name the predicate. A floor is what
-    lets a strategy that asked for 0.1.0 keep running after the release
-    moves forward, and fail when the release is still behind what the
-    tree declared.
+    ``requires_mftik`` is compared as a PEP 440 minimum
+    (:func:`release_accepts`) against the release the caller passes.
+    The plan says an incompatible tree is failed and alerted; it does
+    not name the predicate. A floor is what lets a strategy that asked
+    for 0.1.0 keep running after the release moves forward, and fail
+    when the release is still behind what the tree declared.
     """
     if not isinstance(spec, SessionSpec):
         raise TypeError("rehang_code reads a SessionSpec")
@@ -146,19 +174,55 @@ def rehang_code(
     return RehangCode(digest=digest, failed=False, reason=None, alert=False)
 
 
-def release_accepts(requires_mftik: str, release: str) -> bool:
+def installed_release() -> str:
+    """The installed ``mftik`` distribution version.
+
+    Missing package metadata is ``0.0.0``, the hatch default for a
+    source tree. That value is not a release: :func:`release_accepts`
+    refuses it unless :data:`MFTIK_DEV_RELEASE` is ``1`` or the caller
+    passes ``allow_dev=True``.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        found = version("mftik")
+    except PackageNotFoundError:
+        return "0.0.0"
+    if not isinstance(found, str) or found == "":
+        return "0.0.0"
+    return found
+
+
+def release_accepts(
+    requires_mftik: str, release: str, *, allow_dev: bool | None = None
+) -> bool:
     """True when ``release`` is at least the declared minimum.
 
-    Both sides are dotted integers (``0.2.0``). Anything else is
-    incompatible, so a rehang fails closed rather than spawning a tree
-    whose declaration this process cannot read. Equal counts as
-    compatible.
+    Both sides are PEP 440 versions. A leading ``v`` is ignored. Trailing
+    zeros do not matter (``0.2`` and ``0.2.0`` are the same release).
+    A final release is newer than ``rc``, which is newer than ``b``,
+    which is newer than ``a``. A release with no ``.dev`` is newer than
+    the same release with one. An epoch (``1!``) fails closed. Anything
+    this parser cannot read fails closed.
+
+    A source-tree release — ``0``, ``0.0``, ``0.0.0``, or the same with
+    a leading ``v``, and no pre, post, or dev — accepts every
+    ``requires_mftik`` when ``allow_dev`` is true, and accepts nothing
+    when it is false, including a requirement of ``0.0.0``. ``allow_dev``
+    left unset reads :data:`MFTIK_DEV_RELEASE`: only the value ``1``
+    turns it on.
     """
-    need = _version(requires_mftik)
-    have = _version(release)
-    if need is None or have is None:
+    if allow_dev is None:
+        allow_dev = os.environ.get(MFTIK_DEV_RELEASE) == "1"
+    have = _parse_version(release)
+    if have is not None and have.source_tree:
+        return allow_dev
+    if have is None or have.epoch is not None:
         return False
-    return have >= need
+    need = _parse_version(requires_mftik)
+    if need is None or need.epoch is not None:
+        return False
+    return _version_key(have) >= _version_key(need)
 
 
 def _requires_mftik(chosen: StrategyClass) -> str:
@@ -166,13 +230,61 @@ def _requires_mftik(chosen: StrategyClass) -> str:
     return chosen.requires_mftik or _DEFAULT_REQUIRES_MFTIK
 
 
-def _version(value: str) -> tuple[int, ...] | None:
-    if not isinstance(value, str) or value == "":
+@dataclass(frozen=True, slots=True)
+class _ParsedVersion:
+    epoch: int | None
+    release: tuple[int, ...]
+    pre: tuple[int, int] | None
+    post: int | None
+    dev: int | None
+
+    @property
+    def source_tree(self) -> bool:
+        """``0.0.0`` with no epoch, pre, post, or dev."""
+        return (
+            self.epoch is None
+            and self.pre is None
+            and self.post is None
+            and self.dev is None
+            and self.release == (0,)
+        )
+
+
+def _parse_version(value: str) -> _ParsedVersion | None:
+    if not isinstance(value, str):
         return None
-    parts = value.split(".")
-    numbers: list[int] = []
-    for part in parts:
-        if not part.isdigit():
-            return None
-        numbers.append(int(part))
-    return tuple(numbers)
+    text = value.strip()
+    if text[:1] in {"v", "V"}:
+        text = text[1:]
+    match = _VERSION.fullmatch(text)
+    if match is None:
+        return None
+    epoch = match.group("epoch")
+    parts = [int(part) for part in match.group("release").split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    pre_l = match.group("pre_l")
+    pre: tuple[int, int] | None = None
+    if pre_l is not None:
+        label = _PRE_ALIAS[pre_l.lower()]
+        number = match.group("pre_n")
+        pre = (_PRE_RANK[label], int(number) if number else 0)
+    post = match.group("post")
+    dev = match.group("dev")
+    return _ParsedVersion(
+        epoch=None if epoch is None else int(epoch),
+        release=tuple(parts),
+        pre=pre,
+        post=None if post is None else int(post),
+        dev=None if dev is None else int(dev),
+    )
+
+
+def _version_key(
+    parsed: _ParsedVersion,
+) -> tuple[tuple[int, ...], tuple[int, int], int, tuple[int, int]]:
+    """Order final > rc > b > a, and a release with no ``.dev`` above one with it."""
+    pre = (3, 0) if parsed.pre is None else parsed.pre
+    dev = (1, 0) if parsed.dev is None else (0, parsed.dev)
+    post = 0 if parsed.post is None else parsed.post
+    return (parsed.release, pre, post, dev)

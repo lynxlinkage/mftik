@@ -71,6 +71,15 @@ class StoredSession:
 
 
 @dataclass(frozen=True)
+class CodePin:
+    """One non-terminal row's code identity, for the keep set."""
+
+    instance: str | None
+    strategy_digest: str | None
+    env_generation: int | None
+
+
+@dataclass(frozen=True)
 class StatusWrite:
     """The Status columns one commit stores."""
 
@@ -154,6 +163,19 @@ class DbStatusStore:
                 worker_incarnation=row.worker_incarnation,
                 restart_count=row.restart_count,
                 conditions=_conditions(row.conditions),
+            )
+
+    async def list_code_pins(self) -> tuple[CodePin, ...]:
+        """Non-terminal rows. The caller filters by instance."""
+        async with self._scope() as db:
+            rows = await StsSessionRepository(db).list_nonterminal()
+            return tuple(
+                CodePin(
+                    instance=row.instance,
+                    strategy_digest=row.strategy_digest,
+                    env_generation=row.env_generation,
+                )
+                for row in rows
             )
 
     async def save(self, write: StatusWrite) -> None:

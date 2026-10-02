@@ -115,6 +115,24 @@ class TreeReplica:
             raise ValueError("name must be a string")
         return self._read_index().get(name)
 
+    def names(self) -> dict[str, str]:
+        """A copy of the name → digest index."""
+        return dict(self._read_index())
+
+    def unbind(self, name: str) -> None:
+        """Drop ``name`` from the index. The tree directory stays.
+
+        A name that is already absent is left absent. GC is what deletes
+        a digest nothing pins and the index no longer names.
+        """
+        if not isinstance(name, str) or name == "" or "/" in name or "\\" in name:
+            raise ValueError("name must be a non-empty strategy name")
+        index = self._read_index()
+        if name not in index:
+            return
+        del index[name]
+        self._write_index(index)
+
     def path_of(self, digest: str) -> Path | None:
         """The tree directory, or ``None`` when this disk does not have it."""
         digest = require_digest(digest)
