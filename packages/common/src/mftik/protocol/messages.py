@@ -1392,6 +1392,11 @@ TD_POSITION_UPDATE = "td.position.update"
 #: Account-worker availability broadcast (§5.6). Subject is
 #: ``td.account.state.{api_id}``, not this string.
 TD_ACCOUNT_STATE = "td.account.state"
+#: Desired and observed trading-layer bit (F35). Subject is
+#: ``td.account.{api_id}``, not this string. The request carries the
+#: controller's desired ``active``; the ack carries what the worker
+#: observed after applying it.
+TD_ACCOUNT_TRADING = "td.account.trading"
 #: Published on ``td.{api_id}.global`` after a new incarnation rebuilds
 #: the ledger (§7.1).
 TD_ACCOUNT_RESET = "td.account.reset"

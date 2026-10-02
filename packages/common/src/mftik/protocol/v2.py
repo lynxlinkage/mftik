@@ -19,7 +19,10 @@ state whose authority sits somewhere else.
   (F21). ``md.w.*`` is that worker's own connection state. ``md.universe.*``
   is the MD controller's selector.
 * ``td.account.state.*`` and ``td.account.reset`` are the account
-  worker's. ``td.order.cancel_session`` asks that worker to cancel.
+  worker's. ``td.account.trading`` is the controller's desired
+  trading-layer bit and the worker's observed bit, on
+  ``td.account.{api_id}``. ``td.order.cancel_session`` asks that
+  worker to cancel.
 * ``procman.report.*`` is the Supervisor's observation of which workers
   are alive, plus the entries the plane's orchestrator adds for a
   worker that should stay listed with no process (R4). It is not
@@ -363,6 +366,24 @@ class TdAccountState(BaseModel):
     reason: str = ""
 
 
+class TdAccountTrading(BaseModel):
+    """TD controller → account worker: ``td.account.trading`` (F35, §7.2).
+
+    Sent on ``td.account.{api_id}``, once per reconcile pass, for every
+    desired account. ``active`` on the request is the desired trading
+    layer, level-triggered from intent. ``active`` on the ack is what
+    the worker observed after applying it. A fresh worker starts off
+    and waits for the first push. Silence after that keeps the last
+    value (P5); this message is not how a missing controller closes
+    the layer.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    api_id: int
+    active: bool
+
+
 class TdAccountReset(BaseModel):
     """Account worker → sessions: ``td.account.reset`` (§7.1, F13).
 
@@ -547,6 +568,7 @@ MdWorkerStateEnvelope = Envelope[MdWorkerState]
 MdAtomStateEnvelope = Envelope[MdAtomState]
 MdUniverseEventEnvelope = Envelope[MdUniverseEvent]
 TdAccountStateEnvelope = Envelope[TdAccountState]
+TdAccountTradingEnvelope = Envelope[TdAccountTrading]
 TdAccountResetEnvelope = Envelope[TdAccountReset]
 TdCancelSessionRequestEnvelope = Envelope[TdCancelSessionRequest]
 TdCancelSessionResultEnvelope = Envelope[TdCancelSessionResult]

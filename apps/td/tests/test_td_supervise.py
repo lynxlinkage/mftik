@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from mftik.broker.errors import RequestTimeoutError
 from mftik.procman import (
     CapacityExceeded,
     ObservedWorker,
@@ -14,6 +15,7 @@ from mftik.procman import (
     WorkerPhase,
     WorkerStatus,
 )
+from mftik.protocol import TD_ACCOUNT_TRADING, Envelope, TdAccountTrading, Topics
 from mftik_td.account.heartbeat import BEAT_PERIOD_S
 from mftik_td.controller.defaults import ACCOUNT_HB_TIMEOUT_S
 from mftik_td.controller.types import (
@@ -24,10 +26,28 @@ from mftik_td.controller.types import (
 )
 from mftik_td.controller.worker import account_worker_spec
 from mftik_td.supervise import (
+    TRADING_PUSH_TIMEOUT_S,
     account_views,
     account_worker_argv,
     apply_reconcile,
 )
+
+
+class _Broker:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.sent: list[tuple[str, bool, float | None]] = []
+
+    async def request(self, subject, envelope, *, timeout=None):
+        active = envelope.payload.active
+        self.sent.append((subject, active, timeout))
+        if self.fail:
+            raise RequestTimeoutError(subject, "req", timeout or 0.0)
+        return Envelope[TdAccountTrading].wrap(
+            TdAccountTrading(api_id=envelope.payload.api_id, active=active),
+            type=TD_ACCOUNT_TRADING,
+            source="td",
+        )
 
 
 class _Supervisor:
@@ -85,6 +105,7 @@ async def test_one_capacity_refusal_does_not_stop_the_pass(
 ) -> None:
     caplog.set_level(logging.INFO)
     supervisor = _Supervisor(tmp_path)
+    broker = _Broker()
     accounts = (
         _account(1, "Paper"),
         _account(2, "Paper"),
@@ -106,9 +127,13 @@ async def test_one_capacity_refusal_does_not_stop_the_pass(
         accounts,
         code_ref="test",
         cancel_on_disconnect={3: False},
+        broker=broker,
     )
 
-    assert supervisor.spawned == [account_worker_id(3)]
+    assert supervisor.spawned == [account_worker_id(4), account_worker_id(3)]
+    assert broker.sent == [
+        (Topics.td_account(3), True, TRADING_PUSH_TIMEOUT_S),
+    ]
     text = "\n".join(record.getMessage() for record in caplog.records)
     assert "api_id=1" in text
     assert "capacity_exceeded" in text
@@ -121,6 +146,32 @@ async def test_one_capacity_refusal_does_not_stop_the_pass(
     assert all("capacity_exceeded" not in line for line in refused)
     assert "api_id=4" in text
     assert "Gate" in text
+
+
+async def test_a_trading_push_that_times_out_does_not_stop_the_pass(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    supervisor = _Supervisor(tmp_path)
+    broker = _Broker(fail=True)
+    actions = (
+        OrchestratorAction(kind=ActionKind.PUSH_TRADING, api_id=3, active=True),
+        _spawn(3),
+    )
+    await apply_reconcile(
+        supervisor,
+        actions,
+        (_account(3, "Paper"),),
+        code_ref="test",
+        cancel_on_disconnect={3: False},
+        broker=broker,
+    )
+    assert supervisor.spawned == [account_worker_id(3)]
+    assert broker.sent
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "api_id=3" in text
+    assert "retried next pass" in text
 
 
 async def test_a_held_slot_replaces_the_boot_view(tmp_path: Path) -> None:

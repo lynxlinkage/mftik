@@ -97,21 +97,45 @@ async def run_rpc(
     await serve(broker, subject, handle, stop=stop)
 
 
+async def _held_set_ready(seeded: bool) -> bool:
+    """Whether the in-memory book has been rebuilt from ``td_intents``.
+
+    False until :func:`mftik_td.db.seed_intent_book` succeeds. A failed
+    read stays false and the next pass tries again. The trading bit is
+    not pushed from that empty book (P5): workers that outlived this
+    process keep the bit they already have.
+    """
+    if seeded:
+        return True
+    return await td_db.seed_intent_book(intent_book(), instance=INSTANCE)
+
+
 async def _reconcile_once(
     supervisor: Supervisor,
     orchestrator: TdOrchestrator,
     observations,
+    broker: Broker,
+    *,
+    publish: bool,
 ) -> None:
-    """Read bindings, name actions, apply spawn, stop and release."""
+    """Read bindings, name actions, apply spawn, stop, release and the trading bit.
+
+    ``publish`` false names no ``td.account.trading`` push. The boot
+    pass and every later pass leave it false until the held set has
+    been seeded.
+    """
     accounts, flags = await load_accounts(INSTANCE)
     views = await account_views(supervisor, observations, accounts)
-    actions = orchestrator.reconcile(accounts, intent_book().rows(), views)
+    actions = orchestrator.reconcile(
+        accounts, intent_book().rows(), views, publish=publish
+    )
     await apply_reconcile(
         supervisor,
         actions,
         accounts,
         code_ref=orchestrator.code_ref,
         cancel_on_disconnect=flags,
+        broker=broker,
     )
 
 
@@ -119,9 +143,16 @@ async def _reconcile_loop(
     supervisor: Supervisor,
     orchestrator: TdOrchestrator,
     observations,
+    broker: Broker,
     stop: asyncio.Event,
+    seeded: bool,
 ) -> None:
-    """Later passes. The boot pass already ran, before the subjects opened."""
+    """Later passes. The boot pass already ran, before the subjects opened.
+
+    ``seeded`` is that boot pass's answer. A seed that already succeeded
+    is not read again: a later read would put back an owner the report
+    GC had released.
+    """
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=ACCOUNT_RECONCILE_PERIOD_S)
@@ -129,7 +160,10 @@ async def _reconcile_loop(
         except TimeoutError:
             pass
         try:
-            await _reconcile_once(supervisor, orchestrator, observations)
+            seeded = await _held_set_ready(seeded)
+            await _reconcile_once(
+                supervisor, orchestrator, observations, broker, publish=seeded
+            )
         except Exception:
             logger.exception("TD reconcile pass failed")
 
@@ -187,8 +221,20 @@ async def amain() -> bool:
             # that instance before the sample; see
             # :func:`mftik.intent_gc.watch_sts_reports`.
             intents = intent_book()
+            # The book is empty after a process start. Seed it from
+            # unreleased ``td_intents`` before any trading push. A failed
+            # read leaves ``publish`` false; the next pass retries.
+            # Workers that are still up keep their last bit (P5).
+            seeded = False
             try:
-                await _reconcile_once(supervisor, orchestrator, observations)
+                seeded = await _held_set_ready(seeded)
+                await _reconcile_once(
+                    supervisor,
+                    orchestrator,
+                    observations,
+                    broker,
+                    publish=seeded,
+                )
             except Exception:
                 logger.exception("TD reconcile pass failed")
             logger.info("TD started instance=%s", INSTANCE)
@@ -217,7 +263,14 @@ async def amain() -> bool:
                 name="td-intent-gc",
             )
             reconcile_task = asyncio.create_task(
-                _reconcile_loop(supervisor, orchestrator, observations, stop),
+                _reconcile_loop(
+                    supervisor,
+                    orchestrator,
+                    observations,
+                    broker,
+                    stop,
+                    seeded,
+                ),
                 name="td-reconcile",
             )
             report_task = asyncio.create_task(
@@ -225,9 +278,7 @@ async def amain() -> bool:
                     supervisor,
                     plane=SOURCE,
                     instance=INSTANCE,
-                    publish=lambda subject, envelope: broker.publish(
-                        subject, envelope
-                    ),
+                    publish=lambda subject, envelope: broker.publish(subject, envelope),
                     clock=SystemClock(),
                 ),
                 name="td-procman-report",

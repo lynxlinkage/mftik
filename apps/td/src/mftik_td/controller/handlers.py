@@ -67,9 +67,10 @@ class TdIntentBook:
 
     Postgres ``td_intents`` belongs to the API and the STS controller.
     This object does not read or write it, and it does not set
-    ``released_at``. A restart starts empty: nothing is pushed to an
-    account worker from that empty set (P5). Rebuilding it is not
-    B4-07.
+    ``released_at``. A restart starts empty. The TD process seeds it
+    from unreleased rows before the first trading push (P5). Until
+    that seed succeeds, the process publishes nothing: an empty book
+    is not a deactivate. Rebuilding was not B4-07.
 
     :attr:`gc_states` is the per-STS-instance cursor
     :func:`mftik.intent_gc.on_sts_report` updates. The subscription in

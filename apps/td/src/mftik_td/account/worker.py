@@ -69,6 +69,7 @@ class AccountWorker:
         ledger: Ledger | None = None,
         private: TradingConnector | None = None,
         session: Session | None = None,
+        resident_connector: TradingConnector | None = None,
         backfill: BackfillExecutor | None = None,
     ) -> None:
         self.api_id = _positive_id(api_id, "api_id")
@@ -77,7 +78,16 @@ class AccountWorker:
             raise TypeError("cancel_on_disconnect must be a bool")
         self.venue = require(venue).name
         self.cancel_on_disconnect = cancel_on_disconnect
-        connector = session.private if session is not None else private
+        # Paper's resident connector and the trading session's private
+        # client are different objects. ``session.destroy`` closes the
+        # trading one; the resident one stays up across the switch.
+        # Callers that pass only ``session`` keep the previous wiring.
+        if resident_connector is not None:
+            connector = resident_connector
+        elif session is not None:
+            connector = session.private
+        else:
+            connector = private
         self.resident = ResidentLayer(
             self.api_id,
             venue=self.venue,
@@ -92,12 +102,14 @@ class AccountWorker:
             ledger=ledger,
             private=private,
             session=session,
+            clock=clock,
         )
         self.deadman: DeadMansSwitch = deadman_for(self.venue)
         self.broadcast = StateBroadcast(self.api_id, self.incarnation)
         self.orders = OrderHandler(self, clock=clock)
         self.oms = OmsHandler(self)
         self.ledger = LedgerHandler(self)
+        self.trading.arm(self.orders)
 
     @property
     def worker_id(self) -> str:

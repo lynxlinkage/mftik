@@ -3,8 +3,10 @@
 The controller package does not import this module, and this module
 does not import :mod:`mftik_td.account`. The worker is a process. Its
 argv is a string. Spawn, stop and release are
-:class:`~mftik.procman.Supervisor` calls. ``PUSH_TRADING`` is named and
-not delivered: there is no wire type yet (DEFAULT 1, B6-02).
+:class:`~mftik.procman.Supervisor` calls. ``PUSH_TRADING`` is
+``td.account.trading`` on ``td.account.{api_id}``, one request per
+desired account per pass. A push that times out is logged and retried
+next pass. It does not stop the pass.
 
 ``live_start_ticks`` is always ``None``. Procman has no public accessor
 for the live start time that is not a ``/proc`` read, and this plane
@@ -32,12 +34,20 @@ from mftik.procman import (
     WorkerStatus,
     load_supervisor_state,
 )
+from mftik.protocol import (
+    TD_ACCOUNT_TRADING,
+    TD_ERROR,
+    Envelope,
+    TdAccountTrading,
+    Topics,
+)
 
 from mftik_td.controller.decisions import observation_view
 from mftik_td.controller.defaults import (
     ACCOUNT_HB_TIMEOUT_S,
     ACCOUNT_MAX_RESTARTS,
     ACCOUNT_MIN_BACKOFF_S,
+    ACCOUNT_RECONCILE_PERIOD_S,
     ACCOUNT_RESTART_WINDOW_S,
     ACCOUNT_START_TIMEOUT_S,
     ACCOUNT_STOP_GRACE_S,
@@ -53,6 +63,14 @@ from mftik_td.controller.worker import account_worker_spec
 from mftik_td.db import bindings_for_instance
 
 logger = logging.getLogger(__name__)
+
+#: How long one ``td.account.trading`` request waits.
+#:
+#: The plan does not name it. One reconcile period is the bound: the
+#: next pass sends the same desired value, and the worker's handler is
+#: sequential, so a push still in flight is not a second switch.
+#: Provisional until that duration is confirmed.
+TRADING_PUSH_TIMEOUT_S = ACCOUNT_RECONCILE_PERIOD_S
 
 _ALIVE = frozenset(
     {WorkerPhase.STARTING, WorkerPhase.RUNNING, WorkerPhase.STOPPING}
@@ -171,19 +189,23 @@ async def apply_reconcile(
     *,
     code_ref: str,
     cancel_on_disconnect: Mapping[int, bool],
+    broker=None,
 ) -> None:
-    """Spawn, stop and release. One refusal does not stop the pass.
+    """Spawn, stop, release and push the trading bit.
 
-    Only paper accounts are spawned. The others are logged and left
-    unspawned; the next pass names them again until B6-02. ``SPAWN``
-    that raises :class:`~mftik.procman.CapacityExceeded` logs the
-    account and ``exc.code`` and leaves it unspawned. A plain
+    Every bound venue is spawned. ``SPAWN`` that raises
+    :class:`~mftik.procman.CapacityExceeded` logs the account and
+    ``exc.code`` and leaves it unspawned. A plain
     :class:`~mftik.procman.ProcmanError` is logged the same way and is
-    not ``capacity_exceeded``. ``PUSH_TRADING`` is not delivered.
+    not ``capacity_exceeded``. ``PUSH_TRADING`` is one
+    ``td.account.trading`` request. A timeout, a missing broker, or an
+    ack that is not the desired bit is logged. None of those stop the
+    pass. The next pass sends the bit again.
     """
     by_id = {account.api_id: account for account in accounts}
     for action in actions:
         if action.kind is ActionKind.PUSH_TRADING:
+            await _push_trading(broker, action)
             continue
         try:
             if action.kind is ActionKind.SPAWN:
@@ -230,13 +252,11 @@ async def _spawn(
     if account is None:
         logger.warning("TD spawn named api_id=%s with no binding", action.api_id)
         return
-    if account.venue != "Paper":
-        logger.info(
-            "TD skipping api_id=%s venue=%s; only paper accounts get a worker (B6-02)",
-            account.api_id,
-            account.venue,
-        )
-        return
+    logger.info(
+        "TD spawning api_id=%s venue=%s",
+        account.api_id,
+        account.venue,
+    )
     incarnation = action.incarnation
     if incarnation is None:
         raise ProcmanError(f"spawn api_id={account.api_id} has no incarnation")
@@ -252,6 +272,62 @@ async def _spawn(
         env=dict(os.environ),
     )
     await supervisor.spawn(spec)
+
+
+async def _push_trading(broker, action: OrchestratorAction) -> None:
+    """Deliver one trading bit. A failure is the next pass's retry."""
+    if action.active is None:
+        logger.warning(
+            "TD trading push api_id=%s has no active bit", action.api_id
+        )
+        return
+    if broker is None:
+        logger.warning(
+            "TD trading push api_id=%s active=%s not delivered; no broker",
+            action.api_id,
+            action.active,
+        )
+        return
+    subject = Topics.td_account(action.api_id)
+    try:
+        reply = await broker.request(
+            subject,
+            Envelope[TdAccountTrading].wrap(
+                TdAccountTrading(api_id=action.api_id, active=action.active),
+                type=TD_ACCOUNT_TRADING,
+                source="td",
+            ),
+            timeout=TRADING_PUSH_TIMEOUT_S,
+        )
+    except Exception:
+        logger.warning(
+            "TD trading push api_id=%s active=%s failed; retried next pass",
+            action.api_id,
+            action.active,
+            exc_info=True,
+        )
+        return
+    observed = _observed_active(reply)
+    if getattr(reply, "type", None) == TD_ERROR or observed is not action.active:
+        logger.warning(
+            "TD trading push api_id=%s wanted %s observed %s",
+            action.api_id,
+            action.active,
+            observed,
+        )
+
+
+def _observed_active(reply) -> bool | None:
+    payload = getattr(reply, "payload", None)
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        value = payload.get("active")
+    else:
+        value = getattr(payload, "active", None)
+    if type(value) is bool:
+        return value
+    return None
 
 
 def _status_view(api_id: int, status: WorkerStatus) -> AccountView:

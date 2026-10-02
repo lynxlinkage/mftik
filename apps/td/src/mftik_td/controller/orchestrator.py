@@ -5,8 +5,8 @@ The running TD process constructs this
 :mod:`mftik_td.controller.defaults`, provisional, pending issue #286)
 and calls
 :meth:`TdOrchestrator.reconcile`. :mod:`mftik_td.supervise` applies
-``SPAWN``, ``STOP`` and ``RELEASE``. ``PUSH_TRADING`` is named and not
-delivered: there is no wire type yet (B6-02). The held intents live on
+``SPAWN``, ``STOP`` and ``RELEASE``, and delivers ``PUSH_TRADING`` as
+``td.account.trading`` (B6-02). The held intents live on
 :class:`~mftik_td.controller.TdIntentBook`. B6-04 fills in
 drain-replace. ``pid_gone`` is :func:`mftik.procman.previous_worker_gone`.
 ``MARK_FAILED``, and ``NONE`` while the shim is still waiting, name
@@ -209,6 +209,8 @@ class TdOrchestrator:
         accounts: Sequence[BoundAccount],
         intents: Sequence[TdIntentPut],
         views: Sequence[AccountView],
+        *,
+        publish: bool = True,
     ) -> tuple[OrchestratorAction, ...]:
         """Name worker actions and trading pushes for one pass (§7.2).
 
@@ -230,8 +232,14 @@ class TdOrchestrator:
         table (B3-03).
 
         B4-07 names the actions. :mod:`mftik_td.supervise` applies
-        ``SPAWN``, ``STOP`` and ``RELEASE``. ``PUSH_TRADING`` stays in
-        the tuple and is not delivered.
+        ``SPAWN``, ``STOP`` and ``RELEASE``, and delivers
+        ``PUSH_TRADING`` as ``td.account.trading``. The action stays in
+        this tuple either way.
+
+        ``publish`` false names no trading push (P5). The process
+        passes false until it has seeded the book from ``td_intents``.
+        An empty book with ``publish`` true is a seeded book: there
+        really is no unreleased intent, and the bit is false.
         """
         if isinstance(accounts, str) or not isinstance(accounts, Sequence):
             raise TypeError("accounts must be a sequence of BoundAccount")
@@ -261,7 +269,7 @@ class TdOrchestrator:
             if step is not None:
                 actions.append(step)
         for push in trading_pushes(
-            publish=True, accounts=wanted, intents=intents
+            publish=publish, accounts=wanted, intents=intents
         ):
             actions.append(
                 OrchestratorAction(
