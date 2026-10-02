@@ -4,8 +4,9 @@ Extracted from the ``sts.recon`` handler TD used to serve. That request was an
 OMS snapshot and nothing else, so the part of it that outlives the session
 mechanism is the waiting: an UNKNOWN order means the book does not yet say
 what the account holds, and answering anyway is how a strategy ends up acting
-on a leg it cannot see. IF-11 puts this behind ``view(settled=True)``; nothing
-calls it until then.
+on a leg it cannot see. IF-11's ``mftik_td.account.OmsHandler.view`` is the
+handler that will call this for ``settled=True``. The handler raises until
+B6-08, which is why nothing here is called yet.
 """
 
 from __future__ import annotations

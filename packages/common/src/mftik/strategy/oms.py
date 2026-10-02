@@ -216,10 +216,12 @@ class StrategyOms:
         The default is the book as it stands, UNKNOWN included, which is the
         right read for anything on a hot path.
 
-        ``settled=True`` raises :class:`NotImplementedError` until IF-11 serves
-        it; TD already has the waiting logic
-        (:func:`mftik_td.session.settled.view_when_settled`) and nothing calls
-        it yet.
+        ``settled=True`` still raises :class:`NotImplementedError`. IF-11
+        defines the account-worker handler
+        (``mftik_td.account.OmsHandler.view``) and the ``settled`` field
+        on the request; that handler returns null data, and this client
+        does not send until B6-08 makes the wait real. The wait TD
+        already has is :func:`mftik_td.session.settled.view_when_settled`.
         """
         if settled:
             raise NotImplementedError("IF-06")
