@@ -256,6 +256,9 @@ async def test_reconcile_once_forwards_the_publish_gate(
 
     class _Orch:
         code_ref = "v1"
+        # drain-replace (B6-04) skips held accounts. This fake never holds one.
+        draining: set[int] = set()
+        gate = None
 
         def reconcile(self, accounts, intents, views, *, publish: bool = True):
             del accounts, intents, views
