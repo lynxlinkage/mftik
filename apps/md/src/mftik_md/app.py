@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
 import logging
 import os
 import signal
@@ -25,7 +24,13 @@ from mftik.broker.handler import serve
 from mftik.clock import SystemClock
 from mftik.exchange import venues
 from mftik.intent_gc import watch_sts_reports
-from mftik.procman import ProcmanError, Supervisor, publish_reports
+from mftik.procman import (
+    ProcmanError,
+    Supervisor,
+    current_release,
+    pinned_releases_path,
+    publish_reports,
+)
 from mftik.protocol import ProcmanReportEnvelope
 
 from mftik_md.fetch_ctl import FetchController, fetch_close_mode
@@ -66,11 +71,12 @@ def _work_dir() -> Path:
 
 
 def _code_ref() -> str:
-    """The image's ``mftik`` distribution version (``MFTIK_DIST_VERSION``).
+    """The release that spawned this process's workers (§4.5).
 
-    One call site, so a release helper can replace this line.
+    :func:`mftik.procman.current_release`: the Strategon tag when that
+    variable is set, otherwise the installed distribution version.
     """
-    return importlib.metadata.version("mftik")
+    return current_release()
 
 
 async def run_rpc(
@@ -175,7 +181,11 @@ async def amain() -> bool:
         # ``md.fetch``. Reads are not served here.
         clock = SystemClock()
         supervisor = Supervisor(
-            _work_dir(), plane="md", instance=INSTANCE, clock=clock
+            _work_dir(),
+            plane="md",
+            instance=INSTANCE,
+            clock=clock,
+            pin_path=pinned_releases_path(),
         )
         report_task: asyncio.Task[None] | None = None
         watch_task: asyncio.Task[None] | None = None

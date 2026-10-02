@@ -20,6 +20,7 @@ from mftik.procman import (
     WorkerPhase,
     WorkerSpec,
     WorkerStatus,
+    current_release,
 )
 from mftik_md.app import INSTANCE, _code_ref, _work_dir
 from mftik_md.defaults import (
@@ -143,9 +144,14 @@ def test_work_dir_is_the_plane_and_the_instance(
     assert _work_dir() == tmp_path / "md" / INSTANCE
 
 
-def test_code_ref_is_the_installed_distribution() -> None:
+def test_code_ref_is_the_spawning_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STRATEGON_RELEASE_VERSION", raising=False)
+    assert _code_ref() == current_release()
     assert _code_ref() == importlib.metadata.version("mftik")
-    assert _code_ref()
+    monkeypatch.setenv("STRATEGON_RELEASE_VERSION", "v0.9.5")
+    assert _code_ref() == "v0.9.5"
 
 
 def test_forwarded_env_keeps_the_bus(
@@ -166,6 +172,8 @@ def test_the_md_process_does_not_construct_a_fetch_session() -> None:
     ).read_text()
     assert "FetchSession" not in text
     assert "fetch_close_mode" in text
+    assert "current_release" in text
+    assert "pinned_releases_path()" in text
 
 
 async def test_a_running_worker_is_adopted() -> None:

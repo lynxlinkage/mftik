@@ -27,6 +27,7 @@ from mftik.procman import (
     OOM_SCORE_ADJ,
     CloseMode,
     Supervisor,
+    WorkerPhase,
     WorkerSpec,
     log_path,
 )
@@ -111,6 +112,22 @@ async def _take(queue: asyncio.Queue[UntypedEnvelope], count: int, timeout: floa
             break
         got.append(await asyncio.wait_for(queue.get(), remaining))
     return got
+
+
+async def _until_ready(supervisor: Supervisor) -> None:
+    """The shim has seen ``ready`` after the paper client connected."""
+    deadline = time.monotonic() + 2
+    status = None
+    while time.monotonic() < deadline:
+        status = await supervisor.status(WORKER_ID)
+        if (
+            status is not None
+            and status.ready
+            and status.phase is WorkerPhase.RUNNING
+        ):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"connection worker did not report ready: {status}")
 
 
 def _assert_books(messages: list[UntypedEnvelope], seqs: list[int]) -> None:
@@ -222,6 +239,7 @@ async def test_a_subscriber_receives_paper_atoms_and_seq_restarts(
                 except TimeoutError as exc:
                     raise AssertionError(_stderr(tmp_path)) from exc
                 _assert_books(first_books, [1, 2, 3])
+                await _until_ready(supervisor)
                 assert "incarnation=1" in _stderr(tmp_path)
 
                 await supervisor.stop(WORKER_ID)
@@ -239,6 +257,7 @@ async def test_a_subscriber_receives_paper_atoms_and_seq_restarts(
                 except TimeoutError as exc:
                     raise AssertionError(_stderr(tmp_path)) from exc
                 _assert_books(second_books, [SEQ_ORIGIN, 2, 3])
+                await _until_ready(supervisor)
                 assert "incarnation=2" in _stderr(tmp_path)
             finally:
                 paper_stop.set()
