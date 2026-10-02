@@ -27,10 +27,12 @@ from mftik.procman import CloseMode, Supervisor, WorkerPhase, log_path
 from mftik.protocol import (
     STS_REASON_OPERATOR_STOP,
     STS_SESSION_START,
+    TD_ACCOUNT_TRADING,
     TD_OMS_VIEW,
     Envelope,
     StsCreateSessionRequest,
     StsSessionEndRequest,
+    TdAccountTrading,
     TdOmsViewRequest,
     Topics,
 )
@@ -284,6 +286,9 @@ async def paper(tmp_path: Path):
                     break
             await asyncio.sleep(0.05)
         assert ready, f"paper worker phase={phase}"
+        # B6-02 leaves the trading layer off. Submits are refused, and
+        # cancel_session answers ok=False, until this bit is on.
+        await _enable_trading(broker, api_id, work)
         yield SimpleNamespace(
             broker=broker,
             api_id=api_id,
@@ -301,6 +306,26 @@ async def paper(tmp_path: Path):
             pass
         await broker.close()
         await exchange.stop()
+
+
+async def _enable_trading(broker: Broker, api_id: int, work: Path) -> None:
+    reply = await broker.request(
+        Topics.td_account(api_id),
+        Envelope[TdAccountTrading].wrap(
+            TdAccountTrading(api_id=api_id, active=True),
+            type=TD_ACCOUNT_TRADING,
+            source="test",
+        ),
+        timeout=8,
+    )
+    body = TdAccountTrading.model_validate(reply.payload)
+    log = log_path(work, account_worker_id(api_id), "stderr")
+    detail = ""
+    if log.is_file():
+        detail = log.read_text(encoding="utf-8", errors="replace")[-2000:]
+    assert reply.type == TD_ACCOUNT_TRADING, detail
+    assert body.api_id == api_id
+    assert body.active is True, detail
 
 
 def _start_message(request: StsCreateSessionRequest) -> Envelope[dict]:
