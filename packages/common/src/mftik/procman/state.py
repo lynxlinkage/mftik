@@ -4,7 +4,8 @@ The diagram, as a table. Reading it is real. Choosing an edge from a live
 worker — ready or not, restart or not, window full or not — is
 :mod:`mftik.procman.decisions`. Failure classification and the restart
 plan are real (B3-02). The supervisor applies those edges; it does not
-time ``BACKOFF`` itself. Reattach still raises until B3-03.
+time ``BACKOFF`` itself. Reattach is real (B3-03) and does not add an
+edge: a replacement starts a new incarnation, it does not leave ``LOST``.
 
 ::
 
@@ -18,6 +19,9 @@ time ``BACKOFF`` itself. Reattach still raises until B3-03.
 ``SIGTERM`` is drawn from ``RUNNING``. :meth:`Supervisor.stop` can also
 arrive while the worker is still ``STARTING``, so the table has that edge
 too: same signal, earlier phase. There is no edge out of ``LOST``.
+:meth:`Supervisor.spawn` may replace a ``LOST`` slot only after the F36
+check says the old worker pid is gone; that new incarnation enters
+through ``STOPPED`` + ``SPAWN`` and does not transition the old slot.
 """
 
 from __future__ import annotations

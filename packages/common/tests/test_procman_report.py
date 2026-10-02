@@ -147,6 +147,50 @@ async def test_report_refuses_until_start_has_reconciled(tmp_path: Path) -> None
     assert supervisor._generation == 0
 
 
+async def test_report_opens_after_start_and_closes_with_the_supervisor(
+    tmp_path: Path,
+) -> None:
+    """B3-03 calls ``allow_reports`` only after reconcile, and ``close`` pauses."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    with pytest.raises(ProcmanError, match="until start finishes"):
+        await supervisor.report()
+    assert supervisor._generation == 0
+    await supervisor.start()
+    report = await supervisor.report()
+    assert report.generation == 1
+    assert report.workers == []
+    await supervisor.close(CloseMode.DETACH)
+    with pytest.raises(ProcmanError, match="closed"):
+        await supervisor.report()
+    assert supervisor._generation == 1
+
+
+async def test_start_does_not_reopen_reports_closed_during_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``close`` during ``start`` pauses first. The scan must not reopen."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    loop = asyncio.get_running_loop()
+
+    def _close_during_scan(_work_dir: Path) -> dict[str, Path]:
+        asyncio.run_coroutine_threadsafe(
+            supervisor.close(CloseMode.DETACH), loop
+        ).result(timeout=5)
+        return {}
+
+    monkeypatch.setattr(
+        "mftik.procman.supervisor._scan_sockets", _close_during_scan
+    )
+    await supervisor.start()
+    assert supervisor.reports_closed()
+    assert not supervisor.reports_open()
+    supervisor.allow_reports()
+    assert supervisor.reports_closed()
+    with pytest.raises(ProcmanError, match="closed"):
+        await supervisor.report()
+    assert supervisor._generation == 0
+
+
 async def test_close_pauses_and_an_unknown_mode_does_not(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     supervisor.allow_reports()
@@ -155,8 +199,7 @@ async def test_close_pauses_and_an_unknown_mode_does_not(tmp_path: Path) -> None
     report = await supervisor.report()
     assert report.generation == 1
 
-    with pytest.raises(NotImplementedError):
-        await supervisor.close(CloseMode.DETACH)
+    await supervisor.close(CloseMode.DETACH)
     with pytest.raises(ProcmanError, match="closed"):
         await supervisor.report()
     assert supervisor._generation == 1
@@ -367,8 +410,7 @@ async def test_the_loop_stays_quiet_until_reconciled_and_stops_on_close(
         assert len(published) == 1
         assert calls == 1
         assert published[0].payload.workers == []
-        with pytest.raises(NotImplementedError):
-            await supervisor.close(CloseMode.STOP)
+        await supervisor.close(CloseMode.STOP)
         clock.advance(REPORT_PERIOD_S)
         await asyncio.sleep(0)
         assert len(published) == 1

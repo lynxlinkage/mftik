@@ -5,9 +5,7 @@ diagram, and the NDJSON frames round-trip. The shim is real as of
 B3-01. Classifying a death and planning a restart are real as of B3-02.
 The liveness report is real as of B3-04; its wire shape is
 :class:`mftik.protocol.v2.ProcmanReport`, not a second type in this
-package. Reattach still raises ``NotImplementedError("IF-03")``.
-
-What B3-03 has to make true is in ``test_procman_contract.py``, as xfail.
+package. Reattach, detach and stop are real as of B3-03.
 """
 
 from __future__ import annotations
@@ -25,9 +23,7 @@ from mftik.procman import (
     PIPE_BUF,
     SHIM_OOM_SCORE_ADJ,
     STATUS_FD_ENV,
-    TICKET,
     TRANSITIONS,
-    CloseMode,
     ExitRecord,
     InvalidTransition,
     InvalidWorkerId,
@@ -55,12 +51,10 @@ from mftik.procman import (
     exit_record_path,
     exit_record_tmp_path,
     load_frame,
-    reattach_action,
     socket_path,
     supervisor_state_path,
     transition,
 )
-from mftik.procman.decisions import DesiredSlot, ObservedWorker
 
 _CODE_REF = "the release version of the controller that spawned the worker (§4.5)"
 
@@ -384,20 +378,6 @@ def test_the_duplicate_report_types_are_gone() -> None:
     assert procman.REPORT_PERIOD_S == 5.0
 
 
-async def test_supervisor_methods_raise_the_ticket(tmp_path: Path) -> None:
-    supervisor = Supervisor(tmp_path, plane="td", instance="td")
-    # spawn, stop, status and report are real (B3-02, B3-04). start and
-    # close stay with B3-03. close pauses publication, then still raises.
-    calls = (
-        supervisor.start(),
-        supervisor.close(CloseMode.DETACH),
-        supervisor.close("stop"),
-    )
-    for call in calls:
-        with pytest.raises(NotImplementedError, match=rf"^{TICKET}$"):
-            await call
-
-
 async def test_close_rejects_an_unknown_mode(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     with pytest.raises(ValueError):
@@ -421,21 +401,6 @@ async def test_stop_refuses_an_id_that_escapes_run(tmp_path: Path) -> None:
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     with pytest.raises(InvalidWorkerId):
         await supervisor.stop("../outside")
-
-
-def test_decisions_raise_the_ticket() -> None:
-    # classify_failure, plan_restart and count_restarts_in_window are real
-    # (B3-02). reattach_action stays until B3-03.
-    calls = (
-        lambda: reattach_action(
-            plane="sts",
-            desired=DesiredSlot.PRESENT,
-            observed=ObservedWorker.RUNNING,
-        ),
-    )
-    for call in calls:
-        with pytest.raises(NotImplementedError, match=rf"^{TICKET}$"):
-            call()
 
 
 def test_the_package_imports_neither_pydantic_nor_nats() -> None:

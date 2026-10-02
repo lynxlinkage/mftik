@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -22,21 +23,31 @@ import pytest
 from mftik.clock import FakeClock
 from mftik.procman import (
     BACKOFF_RATIO,
+    CloseMode,
     FailureCause,
+    ObservedWorker,
     ProcmanError,
+    ReattachObservation,
     RestartDecision,
     RestartIntensity,
     ShimClient,
     ShimStatus,
+    SpawnedShim,
     Supervisor,
+    SupervisorRecord,
     WorkerPhase,
     WorkerSpec,
     classify_failure,
     decode_exit,
+    encode_exit,
+    encode_supervisor_state,
     exit_record_path,
     exit_record_tmp_path,
+    load_supervisor_state,
     plan_restart,
+    previous_worker_gone,
     socket_path,
+    supervisor_state_path,
 )
 from mftik.procman.messages import ExitRecord
 from mftik.procman.supervisor import (
@@ -464,16 +475,32 @@ async def test_stop_of_an_unknown_worker_is_refused(tmp_path: Path) -> None:
         await supervisor.stop("td/account/42")
 
 
-async def test_spawn_refuses_a_live_slot_and_a_lost_one(tmp_path: Path) -> None:
+async def test_spawn_refuses_a_live_slot_and_a_live_lost_pid(tmp_path: Path) -> None:
+    """A live phase is refused. ``LOST`` is refused only while that pid lives.
+
+    The pid is this process, so the refusal does not spawn. Replacing a
+    ``LOST`` slot whose pid is gone is the integration test: it needs a
+    real worker.
+    """
     supervisor = Supervisor(tmp_path, plane="td", instance="td")
     spec = _spec()
     _hold(supervisor, spec, WorkerPhase.RUNNING)
     with pytest.raises(ProcmanError):
         await supervisor.spawn(spec)
     supervisor._slots.clear()
-    _hold(supervisor, spec, WorkerPhase.LOST, exit_code=None)
-    with pytest.raises(ProcmanError):
+    pid = os.getpid()
+    ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    _hold(
+        supervisor,
+        spec,
+        WorkerPhase.LOST,
+        exit_code=None,
+        pid=pid,
+        worker_start_ticks=ticks,
+    )
+    with pytest.raises(ProcmanError, match=f"worker pid {pid} is still alive"):
         await supervisor.spawn(_spec(incarnation=2))
+    assert supervisor._slots[spec.id].phase is WorkerPhase.LOST
 
 
 async def test_spawn_refuses_an_incarnation_that_does_not_move_forward(
@@ -690,10 +717,23 @@ def _ps_family(work_dir: Path) -> tuple[set[int], set[int]]:
     return shims, workers
 
 
+def _marker(work_dir: Path, name: str) -> Path:
+    """A file whose path does not contain ``work_dir``.
+
+    :func:`_ps_family` treats every live argv that contains the work
+    directory as a shim. A worker that writes a marker has to do it
+    outside that directory, or it is counted as a second shim.
+    """
+    directory = Path("/tmp") / "mftik-markers" / work_dir.name
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / name
+
+
 def _reap_workdir(work_dir: Path) -> None:
     shims, _workers = _ps_family(work_dir)
     for pid in shims:
         _kill_tree(pid)
+    shutil.rmtree(Path("/tmp") / "mftik-markers" / work_dir.name, ignore_errors=True)
 
 
 def _peer(path: Path) -> int | None:
@@ -739,13 +779,20 @@ def _stop_held(slot: _Slot) -> None:
 
 
 async def _cleanup(supervisor: Supervisor) -> None:
-    task = supervisor._driver
-    if task is not None and not task.done():
-        task.cancel()
-        await asyncio.wait({task})
-    for slot in list(supervisor._slots.values()):
-        _stop_held(slot)
-    supervisor._slots.clear()
+    """``close(stop)`` when this supervisor has not already detached.
+
+    After ``detach`` the public close will not signal, so the slots are
+    killed directly. ``ps`` is the backstop either way.
+    """
+    try:
+        if supervisor._closed:
+            for slot in list(supervisor._slots.values()):
+                _stop_held(slot)
+            supervisor._slots.clear()
+        else:
+            await supervisor.close(CloseMode.STOP)
+    finally:
+        _reap_workdir(supervisor.work_dir)
 
 
 async def _until(supervisor: Supervisor, worker_id: str, predicate, timeout: float = 4):
@@ -1014,3 +1061,605 @@ async def test_two_concurrent_spawns_keep_one_shim_and_one_worker(
     finally:
         await _cleanup(supervisor)
         _reap_workdir(tmp_path)
+
+
+# --- reattach and the F36 fence: B3-03 ------------------------------------
+
+
+def test_previous_worker_gone_is_the_pid_reuse_rule() -> None:
+    """A missing process is gone. The same start time is not. A different
+    one is reuse. An unrecorded start time cannot prove reuse."""
+    assert previous_worker_gone(recorded_start_ticks=10, live_start_ticks=None)
+    assert previous_worker_gone(recorded_start_ticks=None, live_start_ticks=None)
+    assert not previous_worker_gone(recorded_start_ticks=10, live_start_ticks=10)
+    assert previous_worker_gone(recorded_start_ticks=10, live_start_ticks=11)
+    assert not previous_worker_gone(recorded_start_ticks=None, live_start_ticks=11)
+    with pytest.raises(ValueError):
+        previous_worker_gone(recorded_start_ticks=True, live_start_ticks=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        previous_worker_gone(recorded_start_ticks=-1, live_start_ticks=None)
+
+
+def test_reattach_refuses_a_plane_that_is_not_a_supervisor_plane() -> None:
+    from mftik.procman import DesiredSlot, reattach_action
+
+    with pytest.raises(ValueError):
+        reattach_action(
+            plane="sym",  # type: ignore[arg-type]
+            desired=DesiredSlot.PRESENT,
+            observed=ObservedWorker.RUNNING,
+        )
+
+
+def _dead_pid() -> int:
+    pid = 1 << 22
+    while pid < (1 << 22) + 2000 and Path(f"/proc/{pid}").exists():
+        pid += 1
+    return pid
+
+
+def _save_record(work_dir: Path, record: SupervisorRecord) -> None:
+    path = supervisor_state_path(work_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(encode_supervisor_state((record,)))
+
+
+def _record(
+    spec: WorkerSpec, phase: WorkerPhase, **overrides: object
+) -> SupervisorRecord:
+    raw: dict[str, object] = {
+        "spec": spec,
+        "phase": phase,
+        "worker_pid": None,
+        "worker_start_ticks": None,
+        "shim_pid": None,
+        "shim_start_ticks": None,
+        "since_s": 0.0,
+    }
+    raw.update(overrides)
+    return SupervisorRecord(**raw)  # type: ignore[arg-type]
+
+
+async def test_start_reports_absent_when_nothing_is_left_on_disk(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(labels={"desk": "a"})
+    gone = _record(
+        spec, WorkerPhase.RUNNING, worker_pid=_dead_pid(), worker_start_ticks=3
+    )
+    _save_record(tmp_path, gone)
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    found = await supervisor.start()
+    assert found == (
+        ReattachObservation(
+            id=spec.id,
+            observed=ObservedWorker.ABSENT,
+            spec=spec,
+            incarnation=1,
+            status=None,
+            exit_record=None,
+        ),
+    )
+    assert await supervisor.status(spec.id) is None
+
+
+async def test_start_holds_an_exited_worker_from_the_exit_file(tmp_path: Path) -> None:
+    spec = _spec()
+    dead = _dead_pid()
+    _save_record(
+        tmp_path,
+        _record(spec, WorkerPhase.RUNNING, worker_pid=dead, worker_start_ticks=4),
+    )
+    path = exit_record_path(tmp_path, spec.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        encode_exit(
+            ExitRecord(
+                id=spec.id,
+                incarnation=1,
+                pid=dead,
+                exit_code=3,
+                signal=None,
+                ready=False,
+            )
+        )
+    )
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    found = await supervisor.start()
+    assert len(found) == 1
+    assert found[0].observed is ObservedWorker.EXITED
+    assert found[0].exit_record is not None
+    assert found[0].exit_record.exit_code == 3
+    assert found[0].status is None
+    held = await supervisor.status(spec.id)
+    assert held is not None
+    assert held.phase is WorkerPhase.FAILED
+    assert held.exit_code == 3
+    await supervisor.release_slot(spec.id)
+    assert await supervisor.status(spec.id) is None
+
+
+async def test_start_holds_lost_when_the_socket_refuses_and_no_exit_file_exists(
+    tmp_path: Path,
+) -> None:
+    spec = _spec()
+    dead = _dead_pid()
+    _save_record(
+        tmp_path,
+        _record(spec, WorkerPhase.RUNNING, worker_pid=dead, worker_start_ticks=5),
+    )
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    path = socket_path(tmp_path, spec.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sock.bind(os.fspath(path))
+    sock.close()
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    found = await supervisor.start()
+    assert found[0].observed is ObservedWorker.LOST
+    assert found[0].status is None
+    assert found[0].exit_record is None
+    held = await supervisor.status(spec.id)
+    assert held is not None
+    assert held.phase is WorkerPhase.LOST
+    await supervisor.release_slot(spec.id)
+    assert await supervisor.status(spec.id) is None
+
+
+async def test_release_slot_refuses_a_lost_worker_whose_pid_is_still_alive(
+    tmp_path: Path,
+) -> None:
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    spec = _spec()
+    pid = os.getpid()
+    ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    _hold(
+        supervisor,
+        spec,
+        WorkerPhase.LOST,
+        exit_code=None,
+        pid=pid,
+        worker_start_ticks=ticks,
+        released=True,
+    )
+    with pytest.raises(ProcmanError, match=f"worker pid {pid} is still alive"):
+        await supervisor.release_slot(spec.id)
+    assert await supervisor.status(spec.id) is not None
+
+
+async def test_detach_leaves_a_held_slot_and_cancels_the_driver(tmp_path: Path) -> None:
+    supervisor = Supervisor(tmp_path, plane="td", instance="td", clock=FakeClock())
+    spec = _spec()
+    slot = _hold(supervisor, spec, WorkerPhase.RUNNING, shim_pid=0)
+    supervisor._ensure_driver_locked()
+    task = supervisor._driver
+    assert task is not None
+    await supervisor.close(CloseMode.DETACH)
+    assert task.done()
+    assert supervisor._driver is None
+    assert slot.phase in (WorkerPhase.RUNNING, WorkerPhase.LOST)
+    assert await supervisor.status(spec.id) is not None
+    with pytest.raises(ProcmanError, match="closed"):
+        await supervisor.spawn(spec)
+
+
+async def test_a_second_start_is_refused(tmp_path: Path) -> None:
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    assert await supervisor.start() == ()
+    with pytest.raises(ProcmanError, match="already started"):
+        await supervisor.start()
+
+
+async def test_spawn_replaces_a_lost_slot_whose_pid_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new incarnation enters through ``STOPPED`` + ``SPAWN``. No edge
+    leaves ``LOST``. The launch itself is faked: the real process is the
+    integration test."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td", clock=FakeClock())
+    spec = _spec()
+    _hold(
+        supervisor,
+        spec,
+        WorkerPhase.LOST,
+        exit_code=None,
+        pid=_dead_pid(),
+        worker_start_ticks=9,
+        released=True,
+        shim_pid=0,
+    )
+
+    def fake(launched: WorkerSpec, *, work_dir: Path) -> SpawnedShim:
+        del work_dir
+        return SpawnedShim(
+            worker_id=launched.id,
+            socket=tmp_path / "missing.sock",
+            pid=0,
+        )
+
+    monkeypatch.setattr("mftik.procman.supervisor.spawn_shim", fake)
+    await supervisor.spawn(_spec(incarnation=2))
+    status = await supervisor.status(spec.id)
+    assert status is not None
+    assert status.spec.incarnation == 2
+    await supervisor.close(CloseMode.DETACH)
+
+
+async def test_spawn_writes_the_spec_before_the_shim_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row exists before ``spawn_shim``. A crash there still leaves a spec."""
+    supervisor = Supervisor(tmp_path, plane="td", instance="td", clock=FakeClock())
+    spec = _spec(labels={"desk": "a"})
+    seen: list[tuple[SupervisorRecord, ...]] = []
+
+    def fake(launched: WorkerSpec, *, work_dir: Path) -> SpawnedShim:
+        del launched
+        seen.append(load_supervisor_state(work_dir))
+        raise ProcmanError("shim not started")
+
+    monkeypatch.setattr("mftik.procman.supervisor.spawn_shim", fake)
+    with pytest.raises(ProcmanError, match="shim not started"):
+        await supervisor.spawn(spec)
+    assert len(seen) == 1
+    row = seen[0][0]
+    assert row.spec.id == spec.id
+    assert row.spec.incarnation == spec.incarnation
+    assert row.spec.code_ref == "v1"
+    assert dict(row.spec.labels) == {"desk": "a"}
+    assert row.phase is WorkerPhase.STARTING
+    assert row.worker_pid is None
+    assert row.worker_start_ticks is None
+    assert row.shim_pid is None
+    assert row.shim_start_ticks is None
+    assert spec.id not in supervisor._spawning
+    assert await supervisor.status(spec.id) is None
+
+
+def _wait_until(predicate, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("condition was still false")
+
+
+@pytest.mark.integration
+async def test_detach_reattach_does_not_spawn_a_duplicate_and_killing_the_shim_stops(
+    tmp_path: Path,
+) -> None:
+    """§4.4 and the ticket: detach leaves the worker, a new supervisor
+    reattaches it, and killing the shim makes that worker stop on SIGTERM
+    with no exit file."""
+    marker = _marker(tmp_path, "caught")
+    ready = _marker(tmp_path, "ready")
+    spec = _spec(
+        _argv(_CATCH_TERM, str(marker), str(ready)),
+        labels={"desk": "a"},
+        hb_timeout_s=None,
+        start_timeout_s=30,
+    )
+    first = Supervisor(tmp_path, plane="td", instance="td")
+    second: Supervisor | None = None
+    try:
+        await first.start()
+        await first.spawn(spec)
+        await _until(
+            first,
+            spec.id,
+            lambda item: item is not None and item.pid is not None and ready.exists(),
+        )
+        status = await first.status(spec.id)
+        assert status is not None and status.pid is not None
+        pid = status.pid
+        recorded: tuple[SupervisorRecord, ...] = ()
+
+        def _written() -> bool:
+            nonlocal recorded
+            try:
+                recorded = load_supervisor_state(tmp_path)
+            except ProcmanError:
+                return False
+            return bool(
+                recorded
+                and recorded[0].worker_pid == pid
+                and recorded[0].worker_start_ticks is not None
+                and recorded[0].shim_pid is not None
+                and recorded[0].shim_start_ticks is not None
+            )
+
+        _wait_until(_written)
+        row = recorded[0]
+        assert row.spec.id == spec.id
+        assert row.spec.incarnation == 1
+        assert row.spec.code_ref == "v1"
+        assert dict(row.spec.labels) == {"desk": "a"}
+        assert row.phase in (WorkerPhase.STARTING, WorkerPhase.RUNNING)
+        task = first._driver
+        await first.close(CloseMode.DETACH)
+        assert task is not None and task.done()
+        assert _pid_running(pid)
+        assert not (marker.is_file() and marker.read_text() == "sigterm")
+        second = Supervisor(tmp_path, plane="td", instance="td")
+        found = await second.start()
+        assert [item.id for item in found] == [spec.id]
+        assert found[0].observed is ObservedWorker.RUNNING
+        assert found[0].incarnation == 1
+        assert found[0].spec is not None
+        assert found[0].spec.code_ref == "v1"
+        assert dict(found[0].spec.labels) == {"desk": "a"}
+        assert found[0].status is not None and found[0].status.pid == pid
+        held = await second.status(spec.id)
+        assert held is not None
+        assert held.pid == pid
+        assert held.phase in (WorkerPhase.STARTING, WorkerPhase.RUNNING)
+        with pytest.raises(ProcmanError):
+            await second.spawn(
+                _spec(
+                    _argv(_SLEEP),
+                    incarnation=2,
+                    hb_timeout_s=None,
+                    start_timeout_s=30,
+                )
+            )
+        shims, workers = _ps_family(tmp_path)
+        assert workers == {pid}
+        assert len(shims) == 1
+        os.kill(next(iter(shims)), signal.SIGKILL)
+        _wait_until(
+            lambda: marker.is_file()
+            and marker.read_text() == "sigterm"
+            and not _pid_running(pid)
+        )
+        assert not exit_record_path(tmp_path, spec.id).exists()
+        assert not exit_record_tmp_path(tmp_path, spec.id).exists()
+        shims, workers = _ps_family(tmp_path)
+        assert shims == set()
+        assert pid not in workers
+    finally:
+        if second is not None:
+            await _cleanup(second)
+        await _cleanup(first)
+
+
+@pytest.mark.integration
+async def test_reattach_rearms_the_heartbeat_window(tmp_path: Path) -> None:
+    """The counter has no timestamp. The deadline starts at the first
+    observation after reattach, so a worker is not killed during start."""
+    spec = _spec(_argv(_READY_SLEEP), start_timeout_s=30, hb_timeout_s=0.6)
+    first = Supervisor(tmp_path, plane="td", instance="td")
+    second: Supervisor | None = None
+    try:
+        await first.spawn(spec)
+        await _until(
+            first,
+            spec.id,
+            lambda item: item is not None and item.phase is WorkerPhase.RUNNING,
+        )
+        pid = (await first.status(spec.id)).pid
+        await first.close(CloseMode.DETACH)
+        second = Supervisor(tmp_path, plane="td", instance="td")
+        found = await second.start()
+        assert found[0].observed is ObservedWorker.RUNNING
+        assert found[0].status is not None and found[0].status.pid == pid
+        await asyncio.sleep(0.25)
+        status = await second.status(spec.id)
+        assert status is not None
+        assert status.phase is WorkerPhase.RUNNING
+        assert status.pid == pid
+        assert _pid_running(pid)
+    finally:
+        if second is not None:
+            await _cleanup(second)
+        await _cleanup(first)
+
+
+@pytest.mark.integration
+async def test_spawn_over_lost_refuses_while_the_old_pid_is_alive(
+    tmp_path: Path,
+) -> None:
+    ignoring = _marker(tmp_path, "ignoring")
+    spec = _spec(
+        _argv(_IGNORE_TERM, str(ignoring)),
+        start_timeout_s=30,
+        hb_timeout_s=None,
+        stop_grace_s=0.3,
+    )
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    try:
+        await supervisor.spawn(spec)
+        await _until(
+            supervisor,
+            spec.id,
+            lambda item: (
+                item is not None and item.pid is not None and ignoring.exists()
+            ),
+        )
+        pid = (await supervisor.status(spec.id)).pid
+        assert pid is not None
+        shim = _peer(socket_path(tmp_path, spec.id))
+        assert shim is not None
+        os.kill(shim, signal.SIGKILL)
+        await _until(
+            supervisor,
+            spec.id,
+            lambda item: item is not None and item.phase is WorkerPhase.LOST,
+        )
+        assert _pid_running(pid)
+        with pytest.raises(ProcmanError, match=f"worker pid {pid} is still alive"):
+            await supervisor.spawn(
+                _spec(
+                    _argv(_SLEEP),
+                    incarnation=2,
+                    start_timeout_s=30,
+                    hb_timeout_s=None,
+                )
+            )
+        assert _pid_running(pid)
+        assert (await supervisor.status(spec.id)).phase is WorkerPhase.LOST
+        shims, _workers = _ps_family(tmp_path)
+        assert shim not in shims
+    finally:
+        await _cleanup(supervisor)
+        _reap_workdir(tmp_path)
+
+
+@pytest.mark.integration
+async def test_spawn_over_lost_replaces_the_worker_once_its_pid_is_gone(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(_argv(_SLEEP), start_timeout_s=30, hb_timeout_s=None)
+    supervisor = Supervisor(tmp_path, plane="td", instance="td")
+    try:
+        await supervisor.spawn(spec)
+        await _until(
+            supervisor,
+            spec.id,
+            lambda item: item is not None and item.pid is not None,
+        )
+        pid = (await supervisor.status(spec.id)).pid
+        assert pid is not None
+        shim = _peer(socket_path(tmp_path, spec.id))
+        assert shim is not None
+        os.kill(shim, signal.SIGKILL)
+        await _until(
+            supervisor,
+            spec.id,
+            lambda item: item is not None and item.phase is WorkerPhase.LOST,
+        )
+        _wait_until(lambda: not _pid_running(pid))
+        await supervisor.spawn(
+            _spec(_argv(_SLEEP), incarnation=2, start_timeout_s=30, hb_timeout_s=None)
+        )
+        status = await supervisor.status(spec.id)
+        assert status is not None
+        assert status.spec.incarnation == 2
+        assert status.pid is not None and status.pid != pid
+        assert _pid_running(status.pid)
+        shims, workers = _ps_family(tmp_path)
+        assert workers == {status.pid}
+        assert len(shims) == 1
+    finally:
+        await _cleanup(supervisor)
+        _reap_workdir(tmp_path)
+
+
+@pytest.mark.integration
+async def test_spawn_without_start_refuses_a_worker_still_recorded_alive(
+    tmp_path: Path,
+) -> None:
+    """The fence reads ``supervisor.json`` when this process holds no slot."""
+    ready = _marker(tmp_path, "ready")
+    spec = _spec(
+        _argv(_CATCH_TERM, str(_marker(tmp_path, "caught")), str(ready)),
+        hb_timeout_s=None,
+        start_timeout_s=30,
+    )
+    first = Supervisor(tmp_path, plane="td", instance="td")
+    second: Supervisor | None = None
+    try:
+        await first.spawn(spec)
+        await _until(
+            first,
+            spec.id,
+            lambda item: item is not None and item.pid is not None and ready.exists(),
+        )
+        pid = (await first.status(spec.id)).pid
+        assert pid is not None
+        _wait_until(
+            lambda: any(
+                row.worker_pid == pid for row in load_supervisor_state(tmp_path)
+            )
+        )
+        await first.close(CloseMode.DETACH)
+        second = Supervisor(tmp_path, plane="td", instance="td")
+        with pytest.raises(ProcmanError, match=f"worker pid {pid} is still alive"):
+            await second.spawn(
+                _spec(
+                    _argv(_SLEEP),
+                    incarnation=2,
+                    hb_timeout_s=None,
+                    start_timeout_s=30,
+                )
+            )
+        assert _pid_running(pid)
+        _shims, workers = _ps_family(tmp_path)
+        assert workers == {pid}
+    finally:
+        if second is not None:
+            await _cleanup(second)
+        await _cleanup(first)
+
+
+@pytest.mark.integration
+async def test_spawn_refuses_a_live_socket_when_the_record_has_no_pid(
+    tmp_path: Path,
+) -> None:
+    """F36 fences a worker that has a socket and no live recorded pid.
+
+    Deleting ``supervisor.json`` is the crash before the pre-shim write.
+    Putting the spec back with null pids is that write. Either way the
+    next ``spawn`` is refused and names the pid, and ``start`` holds the
+    slot and reports ``RUNNING`` with the spec.
+    """
+    spec = _spec(
+        _argv(_READY_SLEEP),
+        hb_timeout_s=None,
+        start_timeout_s=30,
+        labels={"desk": "a"},
+    )
+    first = Supervisor(tmp_path, plane="td", instance="td")
+    second: Supervisor | None = None
+    third: Supervisor | None = None
+    try:
+        await first.spawn(spec)
+        await _until(
+            first,
+            spec.id,
+            lambda item: item is not None
+            and item.phase is WorkerPhase.RUNNING
+            and item.pid is not None,
+        )
+        pid = (await first.status(spec.id)).pid
+        assert pid is not None
+        await first.close(CloseMode.DETACH)
+
+        supervisor_state_path(tmp_path).unlink()
+        second = Supervisor(tmp_path, plane="td", instance="td")
+        with pytest.raises(ProcmanError, match=f"worker pid {pid} is still alive"):
+            await second.spawn(
+                _spec(
+                    _argv(_SLEEP),
+                    incarnation=2,
+                    hb_timeout_s=None,
+                    start_timeout_s=30,
+                )
+            )
+        assert not supervisor_state_path(tmp_path).exists()
+        assert _pid_running(pid)
+        shims, workers = _ps_family(tmp_path)
+        assert workers == {pid}
+        assert len(shims) == 1
+
+        _save_record(tmp_path, _record(spec, WorkerPhase.STARTING))
+        third = Supervisor(tmp_path, plane="td", instance="td")
+        found = await third.start()
+        assert [item.id for item in found] == [spec.id]
+        assert found[0].observed is ObservedWorker.RUNNING
+        assert found[0].spec is not None
+        assert found[0].spec.id == spec.id
+        assert found[0].spec.code_ref == "v1"
+        assert dict(found[0].spec.labels) == {"desk": "a"}
+        assert found[0].status is not None and found[0].status.pid == pid
+        held = await third.status(spec.id)
+        assert held is not None
+        assert held.pid == pid
+        assert held.phase is WorkerPhase.RUNNING
+    finally:
+        if third is not None:
+            await _cleanup(third)
+        if second is not None:
+            await _cleanup(second)
+        await _cleanup(first)
+    _wait_until(lambda: _ps_family(tmp_path) == (set(), set()))
+
