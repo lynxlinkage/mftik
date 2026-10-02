@@ -200,6 +200,8 @@ def test_raw_trade_uses_its_own_trade_id() -> None:
     assert trade.side is Side.BUY
 
 
+# payload parse spiked over the 50 ms unit call cap
+@pytest.mark.component
 def test_kline_reads_open_time_in_seconds_and_the_closed_flag() -> None:
     event = BinanceKlineEvent.model_validate(
         {
@@ -485,6 +487,8 @@ def test_order_ack_fills_become_fills_with_the_orders_ids() -> None:
     assert fills[0].fee_asset == "BNB"
 
 
+# payload parse spiked over the 50 ms unit call cap
+@pytest.mark.component
 def test_klines_rows_are_read_by_column_not_by_ohlc_order() -> None:
     """The two volumes sit either side of a second timestamp."""
     kline = kline_from_row(

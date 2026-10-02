@@ -24,6 +24,9 @@ from mftik.cli.operator import (
 from mftik.cli.run import _DEPLOY_HTTP_TIMEOUT_S, run_wait_action
 from mftik.protocol import ProcmanWorker
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 
 def test_help_lists_the_new_commands(capsys) -> None:
     """Acceptance: ``mftik --help`` names every command this ticket adds."""

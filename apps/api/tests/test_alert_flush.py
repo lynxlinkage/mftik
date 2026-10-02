@@ -239,6 +239,8 @@ async def test_disabled_alert_does_not_post(runtime: MatchRuntime) -> None:
     assert runtime.pending_events(1) == []
 
 
+# webhook round-trip; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_429_is_recorded_and_matching_continues(
     runtime: MatchRuntime, deliveries: list[dict[str, Any]]
 ) -> None:

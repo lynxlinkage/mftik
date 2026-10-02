@@ -153,6 +153,8 @@ def test_order_handler_types_are_submit_cancel_and_cancel_session() -> None:
     assert worker.ledger.TYPES == frozenset({TD_LEDGER_VIEW})
 
 
+# walks the TD sources; over the 50 ms unit call cap
+@pytest.mark.component
 def test_the_td_process_does_not_import_the_account_worker() -> None:
     """B6 wires it. The process that is running today must not."""
     root = Path(__file__).resolve().parents[1] / "src" / "mftik_td"

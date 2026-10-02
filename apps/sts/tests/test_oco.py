@@ -33,6 +33,9 @@ from mftik.protocol import (
 )
 from mftik_sts.impl.oco import LEG_COUNT, OneCancelOther
 
+# strategy driver; slow cases miss the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 PAPER_BTC = UniversalTicker.parse("Paper_Spot_BTCUSDT")
 
 BTCUSDT = SymbolInfo(

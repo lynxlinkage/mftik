@@ -158,7 +158,7 @@ def test_each_tier_receives_a_pytest_timeout() -> None:
         return (mark.mark.args, mark.mark.kwargs.get("method"))  # type: ignore[attr-defined]
 
     assert timeout_of(unit) == ((5.0,), "thread")
-    assert timeout_of(component) == ((5.0,), "thread")
-    assert timeout_of(integration) == ((30.0,), "thread")
+    assert timeout_of(component) == ((30.0,), "thread")
+    assert timeout_of(integration) == ((60.0,), "thread")
     assert timeout_of(e2e) == ((0.0,), "thread")
     assert preset.added == []

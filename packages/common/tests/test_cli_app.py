@@ -22,6 +22,9 @@ from mftik.cli.app import (
 from mftik.cli.client import CliError, NodeUnreachable
 from mftik.cli.config import ConfigError, Profile
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 
 @pytest.fixture(autouse=True)
 def config_file(tmp_path: Path, monkeypatch) -> Path:

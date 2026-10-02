@@ -59,6 +59,7 @@ def test_connz_count_ignores_private_clients() -> None:
 
 
 @session_loop
+@pytest.mark.component
 async def test_two_prefixes_share_the_connection_and_leave_it_up(
     nats_connection: NatsClient,
 ) -> None:

@@ -168,6 +168,8 @@ async def test_read_returns_the_bytes_gzipped(
 @pytest.mark.real_sleep(
     reason="this test calls asyncio.sleep while waiting for a real side effect"
 )
+# private NATS plus a real sleep; over the 50 ms unit cap. B2-05.
+@pytest.mark.integration
 async def test_chunks_concatenate_into_one_valid_gzip(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:

@@ -25,6 +25,9 @@ from mftik_md.fetch.readers import (
 )
 from websockets.asyncio.server import serve
 
+# loopback venue stub; over the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("Binance_Spot_BTCUSDT")
 NATIVE = "BTC-USDT"
 

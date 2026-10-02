@@ -41,6 +41,9 @@ from mftik.cli.operator import (
 from mftik.cli.run import run_wait_action
 from mftik.protocol import ProcmanWorker
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 _TINY = """\
 from mftik.strategy import Strategy
 

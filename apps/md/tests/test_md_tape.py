@@ -15,6 +15,9 @@ from mftik.protocol import Topics
 from mftik_md.tape import TapeRecorder
 from mftik_md.tape_store import TapeStore, decode_tape_gaps
 
+# fakeredis tape IO; over the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 AGG_FEED = Topics.md_feed("aggtrade", TICKER)
 

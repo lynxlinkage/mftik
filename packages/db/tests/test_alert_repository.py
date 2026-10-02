@@ -161,8 +161,8 @@ async def test_hex_session_id_is_a_legal_sts_selector(db) -> None:
     assert row.selector == "a" * 32
 
 
-# over the 50 ms unit call cap; still inside component
-@pytest.mark.component
+# file-backed sqlite; over the 500 ms component cap
+@pytest.mark.integration
 async def test_runtime_sqlite_engine_cascades_matcher_delete(
     tmp_path,
 ) -> None:

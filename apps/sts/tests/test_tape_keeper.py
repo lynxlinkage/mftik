@@ -12,6 +12,9 @@ from mftik.protocol import parse_strategy_yml, strategy_catalog
 from mftik_sts.impl import resolve, resolve_class
 from mftik_sts.impl.tape_keeper import TapeKeeper
 
+# strategy catalog; over the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 TICKER = "BinanceUM_Perp_BTCUSDT"
 
 

@@ -40,8 +40,10 @@ CALL_LIMIT_S: dict[str, float | None] = {
 #: that never returns dies here.
 HANG_TIMEOUT_S: dict[str, float] = {
     "unit": 5.0,
-    "component": 5.0,
-    "integration": 30.0,
+    # Above the waits component tests already pass to ``asyncio.wait_for``.
+    # A thread timeout that fires first kills the xdist worker.
+    "component": 30.0,
+    "integration": 60.0,
     "e2e": 0.0,
 }
 
