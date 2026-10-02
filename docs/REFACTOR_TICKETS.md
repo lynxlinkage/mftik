@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.35。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.36。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
@@ -911,14 +911,17 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B8-01 orchestrator：desired 與 owner（#238）
 
 - **驗收：** desired atom 由 intent、常駐訂閱、selector 組成，每個 atom 有 owner 集合；owner 進入 terminal 後由 GC 移除。
+- **另外（#299，F44）：** `controller_epoch` 存在新表 `md_controller(instance PK, controller_epoch bigint)`（含 migration），controller 啟動時以一句 `UPSERT … SET controller_epoch = controller_epoch + 1 RETURNING` 遞增並讀回。`controller.py` 裡「報告中斷要不要清 absence streak」的未定註解改成定案：不清（§8.2 規則 3）。驗收：同一個 instance 連續啟動兩次，epoch 嚴格遞增；兩個 controller 同時啟動拿到不同的 epoch。
 - **依賴：** B7-01、B4-07
+- **決策：** F18、F44
 
 ### B8-02 placement 與連線 worker 的生命週期（#239）
 
 - **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束；controller 不對 `pv` 不同的連線 worker 推 desired，也不另開新 worker 承接它的 atom；`md.intent.put` 落在還有這種 worker 的 `(venue, endpoint)` 時，以 `protocol_mismatch` 拒絕，訊息列出要 `restart` 的 worker（F41）。
+- **placement 的速率（F44）：** placement 只看 `max_atoms`；連線 worker 在 `md.w.*` 回報的實測 msg/s 超過 `max_messages_per_second` 的 80% 時，那條連線不再放新 atom，已在上面的不搬。驗收：一條連線的回報速率超過門檻後，新 atom 開到別的連線；原有的 atom 不動。
 - **readiness 與重啟（F42）：** 連線 worker 的 ready 只代表本地初始化完成，不等第一次連上交易所；連不上時照樣 ready，經 `md.w.*` 報 `down`。crash 重啟用 B3-08 的 `INFRA_RESTART`，heartbeat timeout 10 秒。驗收：spawn 時交易所連不上不會 FAILED，恢復後不經重啟開始發佈；event loop 卡 5 秒不會被殺。
 - **依賴：** B8-01、B4-10、B3-08
-- **決策：** F17、F22、F41、F42
+- **決策：** F17、F22、F41、F42、F44
 
 ### B8-03 reconciler 完整版（#240）
 
@@ -944,8 +947,9 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B8-06 狀態廣播、原地重啟、列出舊版 worker（#243）
 
 - **驗收：** `md.w.*` 依 F14 廣播；`mftik md restart <conn>` 原地重啟並在 coverage 記錄 tape 空洞；`mftik workers --stale` 列出跑在舊版代碼上的 worker。
+- **另外（F44）：** `md.w.*` 的狀態廣播帶這條連線實測的 msg/s，B8-02 用它判斷滿載。
 - **依賴：** B8-03、B3-07
-- **決策：** F14、F24
+- **決策：** F14、F24、F44
 
 ### B8-07 MD 編排驗收（#244）
 
@@ -959,19 +963,27 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B9-01 `option_chain`（#245）
 
 - **驗收：** 依 `expiries`、`min_tte`、`strikes.atm` 選出合約；ref 移動時依 `recenter` 的規則重新置中；ref 斷線或 listing 過期時維持上一份。
+- **細節（#299，F44），每條都有契約測試：**
+  - ref 剛好落在兩檔正中間：取靠近目前中心的一檔；沒有中心（第一次選）時取較低的一檔
+  - debounce 正在 hold 住中心時新出現的 expiry：取它自己的 strike 序列上離存下的中心價最近的一檔
+  - 「離中心幾檔」量在這一輪套用 `min_tte` 之後的最近 expiry 的序列上；存下的中心不在序列上時先對到最近的一檔
+  - listing 回來 0 個 instrument：`Hold(listing_empty)`，新增 `HoldReason.LISTING_EMPTY`；和「每個 expiry 都在 `min_tte` 內」的空 universe 分開測
 - **依賴：** IF-09、B8-01
-- **決策：** F33
+- **決策：** F33、F44
 
 ### B9-02 `rolling_future`（#246）
 
 - **驗收：** 依到期日分出 weekly / monthly / quarterly；`roll_before` 時 current 切到下一張；舊合約保留到到期才移除。
+- **另外（#299，F44）：** tenor 分類交給 venue 的 atom adapter（`tenor_of(instrument)`）。週五日曆是預設實作，只套用在 adapter 宣告適用的 venue（目前是 Deribit）；其他 venue 要提供自己的 `tenor_of` 才能部署 `rolling_future`，否則在 deploy 時被拒並說明原因。驗收：Deribit 走預設日曆；替一個 venue 提供 `tenor_of` 後，非週五到期的合約分類正確；沒有分類能力的 venue，deploy 被拒。
 - **依賴：** IF-09、B8-01
-- **決策：** F33
+- **決策：** F33、F44
 
 ### B9-03 狀態持久化、規格共用、部署時的上限（#247）
 
 - **驗收：** controller 重啟後 universe 和 epoch 不變、不重新置中；規格相同的 selector 只算一份；部署時算出 atom 上限並做容量檢查。
+- **另外（#299，F44）：** `Center.at` 是 selection 狀態裡的明確欄位，只在重新置中時改寫，不以 `updated_at` 代用。驗收：期權到期輪替（selection 變、沒有重新置中）之後，`Center.at` 不變；controller 重啟後 dwell 從存下的 `Center.at` 接著算。
 - **依賴：** B9-01、B9-02、IF-14
+- **決策：** F33、F44
 
 ### B9-04 `md.universe` 與 SDK（#248）
 

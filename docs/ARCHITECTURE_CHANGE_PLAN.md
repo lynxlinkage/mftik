@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.35（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F43）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.36（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F44）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.36（#299，MD controller 與 selector 的行為細節）：** 新增 F44：placement 只用 `max_atoms`，速率改成實測的滿載訊號；報告中斷不清 absence streak；`controller_epoch` 存在 `md_controller` 表；`Center.at` 是明確欄位；selector 的平手、新 expiry、量距離的 strike 序列、空 listing、非週五到期五條規則。§6.2、§6.4、§8.2 隨之更新；實作分到 B8-01、B8-02、B8-06、B9-01、B9-02、B9-03。
 >
 > **v0.35（#297、#296）：** F37 的 Gate 定為現貨（`Gate`）與合約（`GateFutures`）兩個都用，倒數取帳號層級（§7.1，B6-07）。#296 追認 B5-01 的做法（must-deliver 共用一條 FIFO、`bind_delivery` 綁 `seq` / `age`、ingress 從已解析的 dict 讀 `bar_open`）；worker 收到的 spec 由 B5-10 補上 `(strategy_digest, env_generation)`；must-deliver 的佇列長度和行情分開（B3-09）。
 >
@@ -71,6 +73,7 @@
 | F41 | `pv` 在兩個地方擋。**deploy 時：** API 把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent；`WorkerSpec` 記下 worker 的 `pv`，經 `procman.report` 帶出；某個 `(venue, endpoint)` 上還有 `pv` 不同的 MD 連線 worker 時，MD controller 對落在那裡的 `md.intent.put` 以 `protocol_mismatch` 拒絕，不另開新 worker 承接。**執行中：** `pv` 改放 NATS header `Mftik-Pv`，由 transport 蓋上、在任何解碼之前檢查；header 缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數，不回錯誤。request 收到不符的 reply 時，transport 對呼叫端拋出本地錯誤。envelope 的 `pv` 欄位刪除 | body 裡的 `pv` 有預設值，解碼之後就分不出「缺少」和「相符」，所以檢查只能在解碼之前，而所有訊息都會經過、又還沒解碼的地方只有 transport。丟棄而不回錯誤，`mftik.broker.handler` 的 H5、H6 不變，fan-out 也一併涵蓋。代價是送錯版本的 request 會 timeout、廣播只被計數，所以要靠 deploy 時的比對先擋（§4.6）。新 controller 推不到舊 `pv` 連線 worker 的 desired、也收不到它的狀態廣播，不知道它持有哪些 atom；另開新 worker 承接會讓同一個 atom 有兩個發佈者和兩個 tape writer（違反 F22、§6.3），所以整個 `(venue, endpoint)` 擋到人工 `restart`（F24）為止；B4-10（#363）、B8-02（#239） |
 | F42 | MD 連線、TD 帳號、MD fetch worker 不設 FATAL：crash 後第 n 次重啟前等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘 n 才歸零；n 到 5 發 crash-loop 告警，歸零時解除。ready 只代表本地初始化完成（設定與憑證載入、NATS subject 答得到），不包含交易所連線：連不上由 F14 的狀態廣播回報，在進程內依同一條曲線重試（連線維持 60 秒後歸零）；FAILED 只留給設定錯誤；API key 被拒時照樣 ready，報 `unavailable(auth_rejected)`，不再重試認證。TD 帳號與 MD 連線的 heartbeat timeout 為 10 秒。STS 維持 F11。其餘暫定數值以現值為預設，列在附錄 D | 它們是共用基礎設施：FATAL 會讓所有依賴的 session 停到有人處理，TD 還會留下策略撤不掉的掛單（F37 預設關閉）；crash 重啟用的是當下 controller 的 release，修正版上線後會自己恢復。jitter 避免相關的 crash（同一個壞 frame 打在多條連線、同一個 bug 影響多個帳號）同步重連，撞上 per-IP 的連線速率限制。ready 若包含交易所連線，spawn 時遇到維護或網路抖動就會 FAILED 且永不重啟。10 秒和 F14 收件端的靜默判定一致，procman 不會比收件端先下手（§4.3）；B3-08（#365）、B3-09（#366）、B6-09（#367）、B8-02（#239）、B8-03（#240） |
 | F43 | `limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設 0（用 process 模式要宣告）。`offload_pool(workers=N)` 建立時預留 N 個；`isolate=True` 背後的 pool 在第一次使用時建立，拿剩下的額度，至少 1 個。額度不夠就在呼叫處拋出 `OffloadQuotaExceeded`，不默默縮小。准入在部署時預留 session 估計值加上 P × 子進程估計值（P 為 `offload_processes`；子進程估計值有設 `offload_memory_mb` 就用它，否則用實測的 spawn 子進程基準 Pss）；子進程不算進 `max_workers`。`offload_threads` 預設維持 2 | 一個寫在 strategy.yml 的數字界定整棵子進程樹，准入和 operator 在代碼跑起來之前就看得到上限；若 pool 不受 `limits` 管，子進程數由執行期代碼決定，准入無從得知。默默縮小會讓策略以為有 N 個 worker，延遲莫名變差。預設 1 會讓每個 session 多預留一個大多用不到的子進程（約 60 MiB，等於估計值翻倍）。`StrategyHarness` 套用同樣的限制，測試時就會撞到（§4.7、§5.5）；B5-03（#212） |
+| F44 | MD controller 與 selector 的九條細節（#299）：(1) placement 只用 `max_atoms`；連線 worker 在 `md.w.*` 回報實測 msg/s，超過 `max_messages_per_second` 的 80% 就不再放新 atom，已在上面的不搬。(2) 報告中斷不清 absence streak。(3) `controller_epoch` 存在 `md_controller(instance PK, controller_epoch)`，啟動時以一句 UPSERT 遞增。(4) `Center.at` 是 selection 狀態裡的明確欄位，只在重新置中時改寫，不以 `updated_at` 代用。(5) 參考價落在兩檔正中間時取靠近目前中心的一檔，沒有中心時取較低的一檔。(6) debounce 期間新出現的 expiry 跟著存下的中心點，取它自己序列上離中心價最近的一檔。(7) 距離一律量在這一輪套用 `min_tte` 之後的最近 expiry 的 strike 序列上。(8) listing 回來 0 個 instrument 一律當讀取失敗，`Hold(listing_empty)`。(9) tenor 分類交給 venue 的 atom adapter（`tenor_of`），週五日曆是只套用在宣告適用的 venue（目前是 Deribit）的預設實作；沒有分類能力的 venue 部署 `rolling_future` 在 deploy 時失敗 | (1) 每個 atom 的推送量差好幾個數量級，給不出靜態成本。(2) 換 publisher 時 B3-04 已重置；同一 publisher 中斷前後的兩份報告都是權威的缺席觀測，terminal 的 session 不會回到報告上。(4) 期權到期輪替時 selection 會變，中心點和時間戳要保留（S5）。(6) 狀態只有一個中心點，`evaluate` 是純函數，結果必須能從 `(listing, prev)` 重算。(8) 把讀取失敗當成空盤面會退訂整條鏈；真的空了，舊合約到期時照 C7 移除。(9) venue 詞彙歸 MD 的 atom 層（§6.1），SYM 不改（§6.2、§6.4、§8.2）；B8-01、B8-02、B8-06、B9-01、B9-02、B9-03 |
 
 ## 0. 摘要
 
@@ -971,11 +974,13 @@ self.td.state(api_id)
   3. selector：ATM 期權鏈、轉倉（§6.4，F33）。session intent 和常駐訂閱都可以帶 selector。
 - `desired_atoms = ⋃ demand`，每個 atom 記錄它的 owner 集合。owner 進入 terminal 時由 GC 移除。
 - **placement**：依 `(venue, endpoint)` 的 capacity 把 atom 分配到連線上。分配有黏性：新 atom 優先放進已有的連線，容量不夠時才開新的連線 worker。atom 放上去之後就不搬（F22）；連線上沒有任何 atom 時，該 worker 結束。不做整併，代價是連線可能碎片化，每條碎片多佔一個進程的 RSS（§4.7）。
+  - placement 只看 `max_atoms`（F44）。每個 atom 的推送量差好幾個數量級，給不出靜態的每 atom 成本，所以 `max_messages_per_second` 改成實測的滿載訊號：連線 worker 在 `md.w.*` 回報自己的 msg/s，超過上限的 80% 就不再放新 atom；已在上面的 atom 不搬。
 - 把每條連線的 desired set 連同 `generation` 推給對應的連線 worker（F18）：
   - 每次都推完整清單，不推增量（level-triggered）。
   - `generation = (controller_epoch, seq)`。`controller_epoch` 在 controller 每次啟動時於 DB 遞增；worker 只接受比手上更大的 generation，所以新舊 controller 短暫重疊時，舊的推送不會蓋掉新的。
 - **到期**：依 SYM listing 判斷某商品已到期時，從 desired 移除對應 atom，並對它的 owner 發出 `md.feed.end(expired)`。這取代 `_expiry_tasks`。
 - controller 重啟時，從 DB 裡的 intent 和常駐設定重算 desired。重算完成、推出新 generation 之前，worker 保持上一份 desired（P5）。
+- `controller_epoch` 存在 `md_controller(instance PK, controller_epoch bigint)`，以 instance 為單位；controller 啟動時以一句 `UPSERT … SET controller_epoch = controller_epoch + 1 RETURNING` 遞增（F44）。
 
 ### 6.3 連線 worker 與 reconciler
 
@@ -1028,12 +1033,18 @@ md:
 - `option_chain`：
   - 依 `expiries` 選出 expiry；離到期不到 `min_tte` 的跳過，所以期權鏈在舊 expiry 結束前就會移到下一個。
   - 每個 expiry 以 ref 找出最近的掛牌 strike 當中心，取上下 `atm` 檔，各 strike 的 C/P 依 `sides`。
+  - ref 剛好落在兩檔正中間時，取靠近目前中心的一檔；沒有中心（第一次選）時取較低的一檔（F44）。
+  - debounce 正在 hold 住中心時新出現的 expiry，跟著存下的中心點：取它自己的 strike 序列上離中心價最近的一檔。狀態只有一個中心點，`evaluate` 是純函數，成員必須能從 `(listing, prev)` 重算（F44）。
+  - 「離中心幾檔」一律量在這一輪套用 `min_tte` 之後的最近 expiry 的 strike 序列上；存下的中心點不在這個序列上時，先對到最近的一檔（F44）。
   - **防抖動：** ref 離目前中心超過 `recenter.strikes` 檔才重新置中，兩次置中至少間隔 `min_dwell`。
 - `rolling_future`：
   - 依到期日把合約分成 weekly、monthly、quarterly，取對應 tenor 最近的一張當 current。
+  - weekly / monthly / quarterly 的分類交給 venue 的 atom adapter（`tenor_of(instrument)`）。週五日曆是預設實作，只套用在 adapter 宣告適用的 venue（目前是 Deribit）；沒有分類能力的 venue 部署 `rolling_future` 時在 deploy 失敗，不默默套用錯的日曆（F44）。
   - 到期前 `roll_before` 時 current 切到下一張。**舊合約保留到到期**才移除，轉倉期間兩邊行情都在。
 - **fail-static（P5）：** listing 過期、ref 斷線、MD controller 不在時，一律維持上一份結果。
+- **空 listing（F44）：** listing 回來 0 個 instrument，一律當成讀取失敗，回 `Hold(listing_empty)`、維持上一份。把讀取失敗當成空盤面會退訂整條期權鏈；真的空了，舊合約到期時照 C7 移除，不會卡住。這和「每個 expiry 都落在 `min_tte` 內」不同，後者照常讓 universe 變空。
 - **持久化：** `prev`（上一次的 Selection、epoch、置中狀態）存在 DB。controller 重啟後從這裡接著算，不會重新置中。
+  - 置中的時間 `Center.at` 是 selection 狀態裡的明確欄位，只在真的重新置中時改寫，不以列的 `updated_at` 代用：期權到期輪替時 selection 會變，但中心點和它的時間戳要保留（F44）。
 - **共用：** 規格相同（spec hash 相同）的 selector 只算一份，所有 owner 拿到同一個 universe 和 epoch。
 - **容量：** 部署時就能算出 atom 上限。例子裡的期權鏈是 2 × 11 × 2 = 44 個 atom：Deribit 的 ticker 和 greeks 共用 `ticker.*` channel，所以不會變成 88 個。這個上限用於 deploy 的容量檢查（§4.7 的准入控制）。
 
@@ -1147,7 +1158,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 
 1. intent 一律帶 `owner = (sts_instance, session_id)`。
 2. 每個 STS controller 的 Supervisor 定期發布 `procman.report.sts.{instance}`，內容是目前存活的 worker id 集合加上 generation。controller 滾動的幾秒鐘內報告會暫停，這段期間什麼都不回收（P5）。
-3. 某個 owner 在**連續兩份報告**中都不存在 → 回收它的 intent。報告列的是 desired 為 running 的 session（包含 `restarting`，§5.2 R4），所以重新掛起的期間不會被回收。這是權威觀測，幾秒內完成。
+3. 某個 owner 在**連續兩份報告**中都不存在 → 回收它的 intent。報告列的是 desired 為 running 的 session（包含 `restarting`，§5.2 R4），所以重新掛起的期間不會被回收。這是權威觀測，幾秒內完成。報告中斷（同一個 publisher 暫停，或網路分區）不清空已累積的缺席次數：中斷前後的兩份報告都是權威的缺席觀測，terminal 的 session 不會再回到報告上。換 publisher（generation 從頭算）時，B3-04 已經重新計數（F44）。
 4. **報告整個停止時不回收任何東西（F32）。** STS controller 沒有報告時，沒有人能權威地說 session 是否還活著；常見原因是 controller crash loop 或壞版本等待 Strategon 回滾，這時 session 還在跑，回收會切斷它們的行情。整台機器重開時，STS Supervisor 會權威地發現 session 已死並清場；機器永久消失時，由人工執行 `mftik intents gc --instance <name>`（暫定）。代價只是在人處理之前，訂閱和帳號 worker 多留一陣子。回收 intent 本來就不會撤單，交易所上的掛單要靠 D27。
 5. 回收錯了也能自癒：主機恢復後，STS controller 的 reconcile 會替每個 running session 重新 `intent.put`。這是 level-triggered 的狀態對帳，不是週期續約，controller 不在線時也不會造成任何東西過期。
 
