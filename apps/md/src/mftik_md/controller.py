@@ -20,6 +20,13 @@ held by the MD controller:
   ``md.universe.{session_id}``. The table is IF-14's; this module does
   not touch it.
 
+**Hash → atom (B7-01).** Also memory, and not a third authority. The
+subject hash does not say which atom it was, so the controller keeps
+:class:`~mftik.exchange.atoms.AtomTable`, rebuilt from the ``atom_id``
+strings on the intent maps. A restart constructs a new table from those
+strings and gets the same subjects. Desired membership is still the
+first row above; filling it from the database is B8-01.
+
 ``controller_epoch`` is the other half of a generation. It increases in
 the database once per controller start (§6.2). §8.4 does not name the
 column, and IF-14 owns the schema, so this module takes the integer it
@@ -104,10 +111,11 @@ calling, so a controller roll starts the two-report count again
 absence streak is left as it was. The contract does not say whether a
 gap should clear the streak; leaving it is what "not a sample" means.
 
-Null data until a later ticket: :func:`desired_atoms`, :func:`place`
-and :func:`expire` raise ``NotImplementedError("IF-09")``. The types
-around them are real, the way an atom's identity is real while its
-venue adapter is not.
+:meth:`MdOrchestrator.load_atoms` rebuilds the hash table from
+``{feed: [atom_id]}`` and looks the venue up in
+:func:`mftik.exchange.atoms.adapter_for` (B7-01). :func:`desired_atoms`,
+:func:`place` and :func:`expire` still raise
+``NotImplementedError("IF-09")``. The types around them are real.
 
 A connection's identity, its generation and the set pushed to one
 worker are the connection module's: :class:`mftik_md.conn.ConnId`,
@@ -124,7 +132,13 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from mftik.exchange.atoms import Atom, Capacity
+from mftik.exchange.atoms import (
+    Atom,
+    AtomTable,
+    Capacity,
+    adapter_for,
+    load_adapters,
+)
 from mftik.exchange.tickers import UniversalTicker
 from mftik.intent_gc import IntentGcError, OwnerGc
 from mftik.intent_gc import gc_owners as _gc_owners
@@ -524,15 +538,55 @@ class MdOrchestrator:
     """The MD controller's façade over the pure functions above.
 
     Constructing one records the epoch this process was started with and
-    nothing else. It does not read the database, publish a generation,
-    or keep the sequence counter (C6). :meth:`gc_owners` answers (B4-07).
-    :meth:`desired`, :meth:`place` and :meth:`expire` still raise
-    ``NotImplementedError("IF-09")``. :meth:`generation` only builds
-    the pair.
+    an empty hash table. It does not read the database, publish a
+    generation, or keep the sequence counter (C6). :meth:`load_atoms`
+    replaces the hash table from intent atom ids (B7-01).
+    :meth:`gc_owners` answers (B4-07). :meth:`desired`, :meth:`place` and
+    :meth:`expire` still raise ``NotImplementedError("IF-09")``.
+    :meth:`generation` only builds the pair.
     """
 
     def __init__(self, controller_epoch: int) -> None:
         self.controller_epoch = _counter("controller_epoch", controller_epoch)
+        self._atoms = AtomTable()
+
+    @classmethod
+    def from_intents(
+        cls,
+        controller_epoch: int,
+        intents: Mapping[str, Sequence[str]],
+    ) -> MdOrchestrator:
+        """A controller whose hash table is these intent maps.
+
+        A restart is a new object with the same maps. The epoch is the
+        caller's (B8-01 increments it in the database). It does not
+        enter the subject.
+        """
+        orchestrator = cls(controller_epoch)
+        orchestrator.load_atoms(intents)
+        return orchestrator
+
+    @property
+    def atom_index(self) -> AtomTable:
+        """Hash → atom. Empty until :meth:`load_atoms`."""
+        return self._atoms
+
+    def load_atoms(self, intents: Mapping[str, Sequence[str]]) -> AtomTable:
+        """Rebuild the hash table from ``{feed: [atom_id]}``.
+
+        Replaces the table only after every id parses and every venue
+        has an adapter. A failure leaves the previous table in place.
+        The adapters are imported here, so a missing module fails when
+        the controller indexes atoms rather than on the first frame.
+        Does not read the database and does not decide desired
+        membership (B8-01).
+        """
+        load_adapters()
+        table = AtomTable.from_intents(intents)
+        for atom in table:
+            adapter_for(atom.venue)
+        self._atoms = table
+        return table
 
     def generation(self, seq: int) -> Generation:
         """``(controller_epoch, seq)``. Nothing is published."""

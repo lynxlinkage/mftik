@@ -14,7 +14,6 @@ IF-08 defines this layer and returns null data. So the tests split in two:
 from __future__ import annotations
 
 from decimal import Decimal
-from types import ModuleType
 from typing import Any
 
 import pytest
@@ -26,35 +25,13 @@ from mftik.exchange.atoms import (
     InvalidAtomError,
     JoinPolicy,
     Projector,
+    adapter_for,
+    atom_venues,
 )
-from mftik.exchange.binance.delivery import atoms as binance_cm_atoms
 from mftik.exchange.binance.future import atoms as binance_um_atoms
-from mftik.exchange.binance.spot import atoms as binance_spot_atoms
-from mftik.exchange.bitget import atoms as bitget_atoms
-from mftik.exchange.bybit import atoms as bybit_atoms
 from mftik.exchange.deribit import atoms as deribit_atoms
-from mftik.exchange.gate.future import atoms as gate_futures_atoms
-from mftik.exchange.gate.spot import atoms as gate_spot_atoms
 from mftik.exchange.models import Greeks, OpenInterest, Ticker, TickerStats
-from mftik.exchange.okx import atoms as okx_atoms
-from mftik.exchange.paper import atoms as paper_atoms
 from mftik.exchange.tickers import UniversalTicker
-
-#: Every venue in the registry has exactly one atoms module. Keyed by the venue
-#: name so a venue added without one shows up as a missing key rather than as a
-#: count that no longer matches.
-VENUE_ATOMS: dict[str, ModuleType] = {
-    "Binance": binance_spot_atoms,
-    "BinanceCM": binance_cm_atoms,
-    "BinanceUM": binance_um_atoms,
-    "Bitget": bitget_atoms,
-    "Bybit": bybit_atoms,
-    "Deribit": deribit_atoms,
-    "Gate": gate_spot_atoms,
-    "GateFutures": gate_futures_atoms,
-    "Okx": okx_atoms,
-    "Paper": paper_atoms,
-}
 
 ADAPTER_FUNCTIONS = ("atoms_for", "decode", "capacity", "join_policy")
 
@@ -146,19 +123,19 @@ def test_a_kline_topic_carries_its_interval() -> None:
 
 
 def test_every_registered_venue_has_an_atoms_module() -> None:
-    assert set(VENUE_ATOMS) == set(venues.names())
+    assert set(atom_venues()) == set(venues.names())
 
 
-@pytest.mark.parametrize("venue", sorted(VENUE_ATOMS))
+@pytest.mark.parametrize("venue", atom_venues())
 def test_a_venue_module_has_the_four_functions(venue: str) -> None:
-    module = VENUE_ATOMS[venue]
+    module = adapter_for(venue)
     for name in ADAPTER_FUNCTIONS:
         assert callable(getattr(module, name)), f"{venue} has no {name}"
 
 
 @pytest.mark.parametrize(
     "venue",
-    sorted(name for name in VENUE_ATOMS if name != "Paper"),
+    [name for name in atom_venues() if name != "Paper"],
 )
 def test_a_venue_module_refuses_with_the_ticket_number(venue: str) -> None:
     """Null data, and it says which ticket owns the gap (IF 共同驗收 2).
@@ -167,7 +144,7 @@ def test_a_venue_module_refuses_with_the_ticket_number(venue: str) -> None:
     book so a connection worker can publish it. Measured capacity and the
     topics the remote client does not stream stay B7-02g.
     """
-    module = VENUE_ATOMS[venue]
+    module = adapter_for(venue)
     atom = Atom(venue, "public", "whatever")
     ticker = UniversalTicker.parse(venues.require(venue).ticker_example)
     calls = {

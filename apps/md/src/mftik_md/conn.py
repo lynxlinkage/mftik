@@ -117,6 +117,7 @@ from mftik.exchange.atoms import (
     TOPIC_LIQUIDATION,
     TOPIC_TRADE,
     Atom,
+    AtomTable,
 )
 from mftik.exchange.models import OrderBook
 from mftik.protocol import (
@@ -617,6 +618,11 @@ class ConnWorker:
 
     ``clock`` supplies :meth:`run`'s ``recv_ts``. It defaults to the
     process clock. A test passes a :class:`~mftik.clock.FakeClock`.
+
+    :attr:`atom_index` is this process's hash → atom table (§6.1).
+    :meth:`remember` fills it from atom ids. A new process that
+    remembers the same ids rebuilds the same subjects. Nothing is
+    persisted. The table is not the desired set (B8-03).
     """
 
     def __init__(
@@ -637,6 +643,21 @@ class ConnWorker:
         self.incarnation = incarnation
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._seq = SeqClock(incarnation)
+        self._atom_index = AtomTable()
+
+    @property
+    def atom_index(self) -> AtomTable:
+        """Hash → atom for the ids :meth:`remember` was given."""
+        return self._atom_index
+
+    def remember(self, atoms: Sequence[Atom]) -> None:
+        """Index ``atoms``. The same id again is the same row.
+
+        Rebuilt from the ids alone, so a restarted process with the same
+        list names the same subjects.
+        """
+        for atom in atoms:
+            self._atom_index.add(atom)
 
     @property
     def worker_id(self) -> str:

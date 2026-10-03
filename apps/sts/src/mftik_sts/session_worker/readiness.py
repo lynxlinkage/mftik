@@ -11,29 +11,18 @@ TdReady is not here. It is one unsettled ``oms.view`` and one
 
 from __future__ import annotations
 
-import importlib
 import threading
 from dataclasses import dataclass
 
-from mftik.exchange.atoms import Atom, AtomOptions, JoinPolicy, kline_interval
+from mftik.exchange.atoms import (
+    Atom,
+    AtomOptions,
+    JoinPolicy,
+    adapter_for,
+    kline_interval,
+)
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
-
-#: Venue name → the module that implements ``atoms_for`` / ``join_policy``.
-#: A venue that is not in this map, or whose module still raises, is a
-#: missing feed. Paper is the one that resolves today.
-_VENUE_ATOMS: dict[str, str] = {
-    "Paper": "mftik.exchange.paper.atoms",
-    "Binance": "mftik.exchange.binance.spot.atoms",
-    "BinanceUM": "mftik.exchange.binance.future.atoms",
-    "BinanceCM": "mftik.exchange.binance.delivery.atoms",
-    "Bybit": "mftik.exchange.bybit.atoms",
-    "Okx": "mftik.exchange.okx.atoms",
-    "Bitget": "mftik.exchange.bitget.atoms",
-    "Deribit": "mftik.exchange.deribit.atoms",
-    "Gate": "mftik.exchange.gate.spot.atoms",
-    "GateFutures": "mftik.exchange.gate.future.atoms",
-}
 
 
 @dataclass(frozen=True)
@@ -66,9 +55,9 @@ def resolve_feeds(
     """Split ``feeds`` into plans and the ones that cannot be resolved.
 
     Order of ``feeds`` is kept in both results. A feed is missing when
-    the key does not parse, the venue has no atoms module, or ``atoms_for``
-    / ``join_policy`` raises — including the ``NotImplementedError`` the
-    unwired venues still raise.
+    the key does not parse, :func:`mftik.exchange.atoms.adapter_for`
+    does not know the venue, or ``atoms_for`` / ``join_policy`` raises —
+    including the ``NotImplementedError`` the unwired venues still raise.
     """
     resolved: list[ResolvedFeed] = []
     missing: list[str] = []
@@ -89,11 +78,8 @@ def _resolve_one(feed: str) -> ResolvedFeed | None:
         ticker = UniversalTicker.parse(ticker_text)
     except (TypeError, ValueError):
         return None
-    module_name = _VENUE_ATOMS.get(ticker.venue)
-    if module_name is None:
-        return None
     try:
-        module = importlib.import_module(module_name)
+        module = adapter_for(ticker.venue)
         interval = kline_interval(topic)
         opts = AtomOptions(interval=interval) if interval else AtomOptions()
         plan = module.atoms_for(topic, ticker, opts)
