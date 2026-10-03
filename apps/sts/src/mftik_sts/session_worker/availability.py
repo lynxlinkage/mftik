@@ -8,8 +8,8 @@ follower: it turns those broadcasts into ``on_md_update`` /
 ``td.state`` give. It never fails the session (principle 1). A strategy
 that cannot ride out a gap calls ``fail()`` itself.
 
-**Silence (DEFAULT 1, pending Yi Te).** The 10s timer for a worker or
-an account arms only after the first broadcast from that source. Until
+**Silence.** The 10s timer (§5.6, F14, :data:`SILENCE_S`) for a worker
+or an account arms only after the first broadcast from that source. Until
 then ``state`` is ``None`` — unknown, not down — and order entry is not
 refused here. TD's own ``TD_VENUE_NOT_CONNECTED`` remains the gate.
 Once armed, :data:`SILENCE_S` without a broadcast marks that worker's
@@ -18,7 +18,7 @@ feeds ``down`` and that account ``unavailable``, reason
 itself is disconnected the timer does not run: the gap is the reconnect
 path, and a false ``unavailable`` would block a cancel.
 
-**Atoms (DEFAULT 2, pending Yi Te).** Which feeds a worker carries is
+**Atoms.** Which feeds a worker carries is
 learned from ``MdAtomState`` on its own subject. A feed is ``down`` when
 any of its atoms is down (F19) and ``live`` only when every one of them
 is up. A silent worker takes down every feed whose atoms it last
@@ -28,12 +28,12 @@ is the up word (the word the broadcast interface already builds) and
 any other word takes the worker's feeds down, using that word as the
 reason.
 
-**Gaps (DEFAULT 3, pending Yi Te).** A version that skips, or a new
+**Gaps.** A version that skips, or a new
 incarnation, is a missed transition. Both payloads are full snapshots,
 and there is no query RPC on either plane, so the newest broadcast is
 the state. The gap is logged. Nothing here sends a request to the worker.
 
-**Resync (DEFAULT 4, pending Yi Te, and F13).** ``on_resync`` has two
+**Resync (F13).** ``on_resync`` has two
 causes and no others:
 
 * ``account_reset`` — ``TdAccountReset``, or a new incarnation on
@@ -59,8 +59,9 @@ parsed as an empty book. The session stays up.
 
 Same-incarnation recovery from silence restores the broadcast's state
 and does not call ``on_resync``. F13 names only the two causes above.
-§5.6's host-loss row also says the account receives ``on_resync``; that
-disagreement is left for Yi Te.
+§5.6's host-loss row also says the account receives ``on_resync``; this
+code does not, on a same-incarnation recovery from silence. That
+disagreement is left open.
 """
 
 from __future__ import annotations

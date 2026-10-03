@@ -36,19 +36,18 @@ from mftik.exchange.binance.protocol import (
 )
 from mftik.exchange.errors import ExchangeError
 
-# provisional, pending Yi Te (#286)
 #: How often an account worker reads public server time on this host.
 #: Binance's spot, USD-M and COIN-M REST docs do not state an HTTP idle
-#: close (spot:
-#: https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md).
-#: 30s until that is measured. The same gap covers all three hosts.
+#: close. The same gap covers all three hosts.
+#: Default; adjust from measurement (Appendix D).
 KEEPALIVE_INTERVAL_S = 30.0
 #: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
 #: the socket between ticks. httpx's own default is 5s.
-#: provisional, pending Yi Te (#286)
+#: Default; adjust from measurement (Appendix D).
 KEEPALIVE_EXPIRY_S = 90.0
-#: Connection counts are httpx's own defaults. Only the expiry changes.
-#: provisional, pending Yi Te (#286)
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
 POOL_LIMITS = httpx.Limits(
     max_connections=100,
     max_keepalive_connections=20,

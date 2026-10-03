@@ -12,9 +12,9 @@ change :meth:`~mftik.procman.Supervisor.spawn`.
 
 The running process registers :func:`intent_handler` on
 ``td.{instance}``, subscribes to ``procman.report.sts.*``, and
-constructs :class:`TdOrchestrator` with the provisional
+constructs :class:`TdOrchestrator` with the
 :class:`~mftik.procman.RestartIntensity` built from
-:mod:`mftik_td.controller.defaults` (issue #286). Held intents are a
+:mod:`mftik_td.controller.defaults` (Appendix D). Held intents are a
 :class:`TdIntentBook`. ``PUSH_TRADING`` is named here and delivered
 by :mod:`mftik_td.supervise` as ``td.account.trading`` (B6-02). Silence
 from this controller is still not a deactivate (P5). B6-04 does
@@ -66,8 +66,8 @@ F36). This package does not import strategy code and does not carry
   stop. The next incarnation is named only once the pid is gone. The
   trading bit is not cleared by a drain.
 * **K1** The worker spec says ``restart="on_failure"``. The intensity
-  passed to :func:`~mftik.procman.plan_restart` is the provisional one
-  built from :mod:`mftik_td.controller.defaults` (issue #286). There is no crash
+  passed to :func:`~mftik.procman.plan_restart` is the one
+  built from :mod:`mftik_td.controller.defaults` (Appendix D, F42). There is no crash
   class (P6). See :meth:`TdOrchestrator.account_restart`.
 
 Procman knows processes. Account membership, the trading bit and

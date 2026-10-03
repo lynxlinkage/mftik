@@ -449,7 +449,7 @@ def test_reconcile_pushes_the_trading_level_for_desired_accounts(
     assert all(action.kind is not ActionKind.SPAWN for action in actions)
 
 
-# --- restart intensity (issue #286) ----------------------------------------
+# --- restart intensity (Appendix D, F42) -----------------------------------
 
 
 def test_account_restart_uses_the_callers_intensity(tmp_path: Path) -> None:

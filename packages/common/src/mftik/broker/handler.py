@@ -90,14 +90,14 @@ logger = logging.getLogger(__name__)
 #: subject nobody is answering costs more than a reconnect attempt does.
 RESTART_DELAY_SECONDS = 1.0
 
-# provisional, pending Yi Te (#286)
 #: How many :class:`Detached` replies :func:`serve` may run at once.
 #:
 #: The account subject's settled OMS read is the caller this exists for:
 #: that wait is up to 30 seconds, and the same subject also carries the
-#: trading bit, the ledger and the unsettled book. The plan does not
-#: name the cap. A handler that does not return :class:`Detached` never
-#: uses it — the sequential path is what :func:`serve` does unless asked.
+#: trading bit, the ledger and the unsettled book. A handler that does
+#: not return :class:`Detached` never uses it — the sequential path is
+#: what :func:`serve` does unless asked.
+#: Default; adjust from measurement (Appendix D).
 SETTLED_MAX_CONCURRENT = 8
 
 #: What a handler answers with. Untyped in the signature because every reply has

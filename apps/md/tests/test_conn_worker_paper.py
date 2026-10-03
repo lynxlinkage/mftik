@@ -53,7 +53,7 @@ ATOM = atoms_for(TOPIC_ORDERBOOK, BTC, AtomOptions()).atoms[0]
 def _spec(
     argv: tuple[str, ...], *, incarnation: int, env: dict[str, str]
 ) -> WorkerSpec:
-    """Test values. Product restart numbers belong to B8-02 (#286)."""
+    """Test values. Product restart numbers belong to B8-02 (#239, F42)."""
     return WorkerSpec(
         id=WORKER_ID,
         plane="md",

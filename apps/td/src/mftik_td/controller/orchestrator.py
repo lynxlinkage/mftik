@@ -2,7 +2,7 @@
 
 The running TD process constructs this
 (:func:`mftik_td.supervise.account_restart_intensity`, the numbers in
-:mod:`mftik_td.controller.defaults`, provisional, pending issue #286)
+:mod:`mftik_td.controller.defaults`, Appendix D)
 and calls
 :meth:`TdOrchestrator.reconcile`. :mod:`mftik_td.supervise` applies
 ``SPAWN``, ``STOP`` and ``RELEASE``, and delivers ``PUSH_TRADING`` as
@@ -170,7 +170,7 @@ class TdOrchestrator:
        :meth:`account_restart`: :func:`mftik.procman.plan_restart` with
        ``restart="on_failure"`` and this orchestrator's intensity.
        There is no crash class (P6). The intensity is the caller's
-       (issue #286).
+       (Appendix D).
     9. After the recompute, trading-layer pushes come from
        :func:`mftik_td.controller.trading_pushes` with ``publish`` true,
        one per desired account. :func:`mftik_td.controller.close_actions`

@@ -77,7 +77,8 @@ _FORWARDED_ENV = (
     "SSL_CERT_FILE",
 )
 
-#: provisional, pending Yi Te (#286) — assembled from the named constants.
+#: Assembled from the named constants (Appendix D). Current value.
+#: F42 changes the curve; B3-08 (#365) owns that change.
 FETCH_RESTART_INTENSITY = RestartIntensity(
     max_restarts=FETCH_RESTART_MAX,
     window_s=FETCH_RESTART_WINDOW_S,

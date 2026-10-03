@@ -281,7 +281,12 @@ def test_intensity_is_required_and_not_chosen_here(tmp_path: Path) -> None:
 
 
 def test_the_controller_does_not_choose_restart_numbers() -> None:
-    """Issue #286. A call to ``RestartIntensity`` would be a number we picked."""
+    """The controller package does not construct ``RestartIntensity``.
+
+    The defaults live in ``mftik_td.controller.defaults`` (Appendix D)
+    and are assembled in ``mftik_td.supervise``. A call here would be
+    this package choosing the numbers.
+    """
     for tree in _sources():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):

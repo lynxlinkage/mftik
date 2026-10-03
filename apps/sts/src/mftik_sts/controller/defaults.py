@@ -2,9 +2,9 @@
 
 These numbers belong to the STS orchestrator. Procman takes a
 :class:`~mftik.procman.RestartIntensity` from its caller and does not
-keep a copy (IF-03). MD and TD are described as exponential backoff plus
-an intensity (§4.3) and the plan does not give them numbers, so nothing
-here invents any (issue #286).
+keep a copy (IF-03). MD fetch and TD account restart numbers live in
+those planes (Appendix D). F42 changes that curve; B3-08 (#365) owns
+the change. Nothing here invents an MD or TD number.
 
 A deploy may set a lower ``max_restarts`` or a different
 ``restart_window_s`` in ``strategy.yml``. It cannot lower the backoff
@@ -39,17 +39,18 @@ STS_MIN_BACKOFF_S = 1.0
 FIRST_INCARNATION = 1
 
 #: Procman's ready timer for a session worker, in seconds.
-#: Provisional, pending Yi Te (#286). Not F12's ``on_start`` budget.
-#: Ten seconds covers a cold interpreter start; a stand-in is ready at once.
+#: Not F12's ``on_start`` budget. Ten seconds covers a cold interpreter
+#: start; a stand-in is ready at once.
+#: Default; adjust from measurement (Appendix D).
 SESSION_START_TIMEOUT_S = 10.0
 
 #: Heartbeat silence, in seconds, after which a running session worker
-#: is no longer ``RUNNING``. Provisional, pending Yi Te (#286). The same
-#: number the procman supervisor tests use for this timer.
+#: is no longer ``RUNNING``. F42 keeps the STS session timeout at 3
+#: seconds. The procman supervisor tests use the same figure.
 SESSION_HB_TIMEOUT_S = 3.0
 
 #: How long a stop waits before the worker is killed, in seconds.
-#: Provisional, pending Yi Te (#286). The existing ``on_stop`` wall clock.
+#: The existing ``on_stop`` wall clock (F15, §5.3, ``ON_STOP_TIMEOUT_S``).
 SESSION_STOP_GRACE_S = ON_STOP_TIMEOUT_S
 
 #: The account worker's own bound on one ``cancel_session``
@@ -59,8 +60,8 @@ SESSION_STOP_GRACE_S = ON_STOP_TIMEOUT_S
 _TD_CANCEL_SESSION_WAIT_S = 30.0
 
 #: How long the controller waits for one account's
-#: ``td.order.cancel_session``, in seconds. Provisional, pending Yi Te
-#: (#286). One try; an expiry is ``Cleanup.UNCONFIRMED``.
+#: ``td.order.cancel_session``, in seconds. One try; an expiry is
+#: ``Cleanup.UNCONFIRMED``. F46 names this cleanup budget as 45 seconds.
 STS_CLEANUP_TIMEOUT_S = 45.0
 
 

@@ -55,8 +55,9 @@ Waiting on the exit record, and not having asked cleanup yet, do not
 publish it.
 
 The backoff curve is :data:`~mftik_sts.controller.STS_MIN_BACKOFF_S`
-times ``2 ** (attempt - 1)`` (provisional, #286). It is at least that
-floor and it is strictly increasing in ``attempt`` (attempt starts at 1).
+times ``2 ** (attempt - 1)`` (F11; the same multiplier as procman's
+``BACKOFF_RATIO``). It is at least that floor and it is strictly
+increasing in ``attempt`` (attempt starts at 1).
 """
 
 from __future__ import annotations
@@ -240,7 +241,7 @@ def backoff_s(attempt: int) -> float:
 
     At least :data:`~mftik_sts.controller.STS_MIN_BACKOFF_S`, and strictly
     increasing in ``attempt``. ``attempt`` starts at 1. The curve is that
-    floor times ``2 ** (attempt - 1)`` (provisional, #286). R2: the previous
+    floor times ``2 ** (attempt - 1)`` (F11). R2: the previous
     incarnation's last order and this one's first fall in different
     seconds, so a seq that restarts at 0 does not collide.
     """

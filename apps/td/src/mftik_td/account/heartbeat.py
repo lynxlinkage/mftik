@@ -15,10 +15,10 @@ from mftik.clock import SystemClock
 from mftik.procman import WorkerHeartbeat, heartbeat_loop, status_fd
 from mftik.procman import write_heartbeat as write_frame
 
-# provisional, pending Yi Te (#286)
 #: Shorter than the controller's heartbeat timeout, so a live worker is
 #: not declared lost between beats. Passed to ``heartbeat_loop``; the
 #: helper does not choose it.
+#: Default; adjust from measurement (Appendix D).
 BEAT_PERIOD_S = 1.0
 
 

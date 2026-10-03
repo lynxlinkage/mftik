@@ -2,8 +2,8 @@
 
 Registered on the running process, on ``td.{instance}``. The held set is
 a :class:`TdIntentBook`. The process also constructs a
-:class:`~mftik_td.controller.TdOrchestrator` with the provisional
-intensity from :mod:`mftik_td.controller.defaults` (issue #286) and
+:class:`~mftik_td.controller.TdOrchestrator` with the
+intensity from :mod:`mftik_td.controller.defaults` (Appendix D, F42) and
 reconciles from :mod:`mftik_td.app`. This handler does not. It does
 not deliver ``PUSH_TRADING``.
 

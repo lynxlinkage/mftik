@@ -302,10 +302,10 @@ _ACCEPT_TIMEOUT_S = 5.0
 #: How long ``sts.session.end`` may take. The controller waits for the
 #: worker's ``on_stop`` and up to ``SESSION_STOP_GRACE_S`` before it
 #: replies, so :data:`_ACCEPT_TIMEOUT_S` alone times out a stop that
-#: succeeds on the controller. Provisional, pending Yi Te (#286).
-#: ``SESSION_STOP_GRACE_S`` is :data:`ON_STOP_TIMEOUT_S` today; B4-03
-#: may add a teardown margin, and this sum has to stay above that grace
-#: and under the CLI's 30s HTTP timeout.
+#: succeeds on the controller. ``SESSION_STOP_GRACE_S`` is
+#: :data:`ON_STOP_TIMEOUT_S`; this sum stays above that grace and under
+#: the CLI's 30s HTTP timeout.
+#: Default; adjust from measurement (Appendix D).
 _END_TIMEOUT_S = ON_STOP_TIMEOUT_S + _ACCEPT_TIMEOUT_S
 
 _ERROR_TYPES = frozenset({STS_ERROR, TD_ERROR, MD_ERROR})

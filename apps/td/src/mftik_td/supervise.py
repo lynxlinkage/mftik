@@ -87,10 +87,10 @@ DRAIN_RPC_TIMEOUT_S = DRAIN_TIMEOUT_S + 5.0
 
 #: How long one ``td.account.trading`` request waits.
 #:
-#: The plan does not name it. One reconcile period is the bound: the
-#: next pass sends the same desired value, and the worker's handler is
-#: sequential, so a push still in flight is not a second switch.
-#: Provisional until that duration is confirmed.
+#: One reconcile period is the bound: the next pass sends the same
+#: desired value, and the worker's handler is sequential, so a push
+#: still in flight is not a second switch.
+#: Default; adjust from measurement (Appendix D).
 TRADING_PUSH_TIMEOUT_S = ACCOUNT_RECONCILE_PERIOD_S
 
 _ALIVE = frozenset(
@@ -99,12 +99,13 @@ _ALIVE = frozenset(
 
 
 def account_restart_intensity() -> RestartIntensity:
-    """The provisional bound passed to :class:`~mftik_td.controller.TdOrchestrator`.
+    """The bound passed to :class:`~mftik_td.controller.TdOrchestrator`.
 
-    The numbers live in :mod:`mftik_td.controller.defaults`. The call is
-    here, not in that package: the controller surface test treats a
-    ``RestartIntensity`` call there as the package choosing the numbers
-    (issue #286).
+    The numbers live in :mod:`mftik_td.controller.defaults` (Appendix D).
+    Current value. F42 changes the curve; B3-08 (#365) owns that change,
+    and B6-09 (#367) switches this call onto ``INFRA_RESTART``. The call
+    is here, not in the controller package: the surface test treats a
+    ``RestartIntensity`` call there as that package choosing the numbers.
     """
     return RestartIntensity(
         max_restarts=ACCOUNT_MAX_RESTARTS,

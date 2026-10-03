@@ -2079,3 +2079,77 @@ C.4 第 1 名那個 61 秒的 `test_td_orphan_reaper.py::test_a_revived_lease_lo
 ## 附錄 D：預設數值（F42，B3-09）
 
 #286 收容的暫定數值以現值為預設。B3-09（#366）把每個常數的名稱、值、位置、用途填進這裡，並拿掉代碼裡的 `pending Yi Te (#286)` 標記。之後要改值，以量測為依據，不再走決策流程。F42 改值的常數（重啟曲線、TD 帳號與 MD 連線的 heartbeat timeout）由 B3-08、B6-09、B8-02 改，也列在這張表。
+
+| 常數 | 值 | 位置 | 用途 | 依據 |
+| --- | --- | --- | --- | --- |
+| STS |  |  |  |  |
+| `HEARTBEAT_PERIOD_S` | `1.0` | `apps/sts/src/mftik_sts/session_worker/limits.py:HEARTBEAT_PERIOD_S` | session worker 對 shim 的 heartbeat 週期 | 預設值，依量測調整。低於 `SESSION_HB_TIMEOUT_S`（3 秒） |
+| `ALL_QUEUE_CAPACITY` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:ALL_QUEUE_CAPACITY` | 單一 `all` feed 佇列上限；溢位丟最舊 | #296。預設值，依量測調整 |
+| `MUST_DELIVER_CAPACITY` | `8192` | `apps/sts/src/mftik_sts/session_worker/limits.py:MUST_DELIVER_CAPACITY` | 共用 must-deliver FIFO；溢位讓 session fail | #296。與 `all` 佇列分開，行情溢位不能以同一個深度讓 session fail |
+| `TEMP_BUFFER_CAPACITY` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:TEMP_BUFFER_CAPACITY` | `amain` 傳入的 `all_capacity` | 跟隨 `ALL_QUEUE_CAPACITY`，不跟隨 `MUST_DELIVER_CAPACITY`：這是會丟最舊的暫存緩衝 |
+| `DROP_WARN_INTERVAL_S` | `1.0` | `apps/sts/src/mftik_sts/session_worker/limits.py:DROP_WARN_INTERVAL_S` | 同一 feed 丟棄警告的最小間隔 | 預設值，依量測調整。計畫只說 log 要限速，沒有給窗口 |
+| `MARK_RETENTION` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:MARK_RETENTION` | 記憶體內保留的 disposition mark 筆數 | #360。與佇列上限分開。預設值，依量測調整 |
+| `WARNING_RETENTION` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:WARNING_RETENTION` | 記憶體內保留的丟棄警告行數 | 預設值，依量測調整。丟棄計數本身不截斷 |
+| `SESSION_START_TIMEOUT_S` | `10.0` | `apps/sts/src/mftik_sts/controller/defaults.py:SESSION_START_TIMEOUT_S` | session worker 的 procman ready 計時 | 預設值，依量測調整。不是 F12 的 `on_start` 預算 |
+| `SESSION_HB_TIMEOUT_S` | `3.0` | `apps/sts/src/mftik_sts/controller/defaults.py:SESSION_HB_TIMEOUT_S` | session worker heartbeat 靜默後離開 RUNNING | F42 維持 STS 為 3 秒 |
+| `SESSION_STOP_GRACE_S` | `10.0` | `apps/sts/src/mftik_sts/controller/defaults.py:SESSION_STOP_GRACE_S` | stop 等到 kill 的寬限 | 等於 `ON_STOP_TIMEOUT_S`（F15、§5.3） |
+| `STS_CLEANUP_TIMEOUT_S` | `45.0` | `apps/sts/src/mftik_sts/controller/defaults.py:STS_CLEANUP_TIMEOUT_S` | controller 等一次 `cancel_session` | F46 寫的清場預算 45 秒 |
+| `SILENCE_S` | `10.0` | `apps/sts/src/mftik_sts/session_worker/availability.py:SILENCE_S` | 廣播靜默後把 feed 標 down、帳號標 unavailable | §5.6、F14。五次沒收到 2 秒廣播 |
+| `PROBE_TIMEOUT_S` | `8` | `apps/sts/src/mftik_sts/hostdisk/probe.py:PROBE_TIMEOUT_S` | 一次性子進程 import 探測的牆鐘 | 預設值，依量測調整。低於 §9.1 integration 上限 |
+| MD |  |  |  |  |
+| `FETCH_START_TIMEOUT_S` | `8.0` | `apps/md/src/mftik_md/defaults.py:FETCH_START_TIMEOUT_S` | fetch worker 的 ready 計時 | 預設值，依量測調整。留在 10 秒 integration 上限之內 |
+| `FETCH_HB_TIMEOUT_S` | `2.0` | `apps/md/src/mftik_md/defaults.py:FETCH_HB_TIMEOUT_S` | fetch worker heartbeat 靜默 | 預設值，依量測調整。不是 F42 要改的 MD 連線 timeout |
+| `FETCH_STOP_GRACE_S` | `2.0` | `apps/md/src/mftik_md/defaults.py:FETCH_STOP_GRACE_S` | fetch worker 的 SIGTERM 到 SIGKILL | §4.2：shim graceful stop 實測不到 1 秒 |
+| `FETCH_HEARTBEAT_PERIOD_S` | `0.25` | `apps/md/src/mftik_md/defaults.py:FETCH_HEARTBEAT_PERIOD_S` | fetch worker 寫 status pipe 的週期 | 預設值，依量測調整。低於 `FETCH_HB_TIMEOUT_S` |
+| `FETCH_RESTART_MAX` | `5` | `apps/md/src/mftik_md/defaults.py:FETCH_RESTART_MAX` | fetch worker 在窗口內允許的重啟次數 | 現值。F42 改為不設 FATAL（`max_restarts` 無上限），由 B3-08（#365）改 |
+| `FETCH_RESTART_WINDOW_S` | `600.0` | `apps/md/src/mftik_md/defaults.py:FETCH_RESTART_WINDOW_S` | 上面次數的窗口 | 現值。F42 改為連續 RUNNING 600 秒才歸零，由 B3-08（#365）改 |
+| `FETCH_MIN_BACKOFF_S` | `1.0` | `apps/md/src/mftik_md/defaults.py:FETCH_MIN_BACKOFF_S` | fetch 重啟 backoff 的起點 | 現值 1 秒，與 F42 起點相同。上限 60 秒與 ±20% jitter 由 B3-08（#365）改 |
+| `FETCH_RECONCILE_PERIOD_S` | `0.2` | `apps/md/src/mftik_md/defaults.py:FETCH_RECONCILE_PERIOD_S` | MD 進程查看 fetch slot 的週期 | 預設值，依量測調整 |
+| `FETCH_RESTART_INTENSITY` | `{"max_restarts": 5, "window_s": 600.0, "min_backoff_s": 1.0}` | `apps/md/src/mftik_md/fetch_ctl.py:FETCH_RESTART_INTENSITY` | fetch worker 的 `RestartIntensity` | 由上面三個常數組成。F42 曲線由 B3-08（#365）改 |
+| `_BEAT_INTERVAL_S` | `0.2` | `apps/md/src/mftik_md/conn_worker.py:_BEAT_INTERVAL_S` | paper 連線 worker 寫 status pipe 的週期 | 預設值，依量測調整。不是 B8-02 的 heartbeat timeout |
+| `_RESUBSCRIBE_PAUSE_S` | `0.05` | `apps/md/src/mftik_md/conn_worker.py:_RESUBSCRIBE_PAUSE_S` | paper 斷線後再訂閱前的停頓 | 預設值，依量測調整。B8-03 不把這個數字用到真實 venue |
+| MD 連線 heartbeat timeout | （尚無常數） | — | procman 對 MD 連線 worker 的 heartbeat timeout | 現值無（paper 測試傳 `None`）。F42 改為 10 秒，由 B8-02（#239）改 |
+| TD |  |  |  |  |
+| `ACCOUNT_START_TIMEOUT_S` | `8.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_START_TIMEOUT_S` | 帳號 worker 的 ready 計時 | 預設值，依量測調整 |
+| `ACCOUNT_HB_TIMEOUT_S` | `3.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_HB_TIMEOUT_S` | 帳號 worker 的 heartbeat timeout | 現值 3 秒。F42 改為 10 秒，由 B6-09（#367）改 |
+| `ACCOUNT_STOP_GRACE_S` | `2.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_STOP_GRACE_S` | 帳號 worker 的 stop grace | 預設值，依量測調整。§4.2 graceful stop 不到 1 秒 |
+| `ACCOUNT_RECONCILE_PERIOD_S` | `5.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_RECONCILE_PERIOD_S` | TD 進程 reconcile 週期 | 預設值，依量測調整 |
+| `ACCOUNT_MAX_RESTARTS` | `5` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_MAX_RESTARTS` | 帳號 worker 在窗口內允許的重啟次數 | 現值。F42 改為不設 FATAL，由 B3-08（#365）改；B6-09（#367）改用 `INFRA_RESTART` |
+| `ACCOUNT_RESTART_WINDOW_S` | `60.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_RESTART_WINDOW_S` | 上面次數的窗口 | 現值 60 秒。F42 的 stable window 是 600 秒，由 B3-08（#365）改 |
+| `ACCOUNT_MIN_BACKOFF_S` | `1.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_MIN_BACKOFF_S` | 帳號重啟 backoff 的起點 | 現值 1 秒，與 F42 起點相同。上限與 jitter 由 B3-08（#365）改 |
+| `DRAIN_TIMEOUT_S` | `30.0` | `apps/td/src/mftik_td/controller/defaults.py:DRAIN_TIMEOUT_S` | drain-replace 等待已在 handler 裡的呼叫 | 預設值，依量測調整。與 `WAIT_TIMEOUT_S` 相同 |
+| `QUIESCE_LEASE_S` | `10.0` | `apps/td/src/mftik_td/controller/defaults.py:QUIESCE_LEASE_S` | quiesce 後等待進程被停的租約 | 預設值，依量測調整。高於 2 秒 stop grace |
+| `BEAT_PERIOD_S` | `1.0` | `apps/td/src/mftik_td/account/heartbeat.py:BEAT_PERIOD_S` | 帳號 worker 寫 status pipe 的週期 | 預設值，依量測調整。短於 `ACCOUNT_HB_TIMEOUT_S` |
+| `BACKFILL_MAX_CONNECTIONS` | `2` | `apps/td/src/mftik_td/account/resident.py:BACKFILL_MAX_CONNECTIONS` | 一個帳號的 backfill 同時佔用的 resident HTTP 連線 | 預設值，依量測調整。低於各 adapter `POOL_LIMITS.max_connections`（100） |
+| `TRADING_PUSH_TIMEOUT_S` | `5.0` | `apps/td/src/mftik_td/supervise.py:TRADING_PUSH_TIMEOUT_S` | 一次 `td.account.trading` 請求的等待 | 等於 `ACCOUNT_RECONCILE_PERIOD_S`。預設值，依量測調整 |
+| API |  |  |  |  |
+| `_END_TIMEOUT_S` | `15.0` | `apps/api/src/mftik_api/orchestrate.py:_END_TIMEOUT_S` | `sts.session.end` 的 RPC 等待 | `ON_STOP_TIMEOUT_S` + `_ACCEPT_TIMEOUT_S`（10 + 5）。要高於 stop grace、低於 CLI 30 秒。預設值，依量測調整 |
+| common / procman |  |  |  |  |
+| `SETTLED_MAX_CONCURRENT` | `8` | `packages/common/src/mftik/broker/handler.py:SETTLED_MAX_CONCURRENT` | `serve` 同時跑的 `Detached` 回覆數 | 預設值，依量測調整 |
+| `_WAIT_POLL_S` | `1.0` | `packages/common/src/mftik/cli/run.py:_WAIT_POLL_S` | `mftik run --wait` 輪詢 session 的間隔 | 預設值，依量測調整。沒有客戶端截止（`on_start` 最長 3600 秒，F12） |
+| `_WAIT_MAX_MISSES` | `30` | `packages/common/src/mftik/cli/run.py:_WAIT_MAX_MISSES` | `--wait` 連續失敗幾次就放棄 | `round(DEFAULT_TIMEOUT_S / _WAIT_POLL_S)`。預設值，依量測調整 |
+| `BACKOFF_RATIO` | `2.0` | `packages/common/src/mftik/procman/decisions.py:BACKOFF_RATIO` | 重啟 backoff 的倍率 | F42 維持 ×2。上限、jitter、`stable_s`、`alert_after` 由 B3-08（#365）改；這一層目前沒有上限 |
+| `KIND_RSS_ESTIMATE_MIB` | `{("sts", "session"): 69, ("md", "conn"): 61, ("md", "fetch"): 60, ("td", "account"): 79}` | `packages/common/src/mftik/procman/spec.py:KIND_RSS_ESTIMATE_MIB` | 准入用的 worker RSS 估計（MiB） | §4.7、B4-09 實測（Pss，向上取整成 MiB） |
+| `SHIM_VMRSS_BYTES` | `14925824` | `packages/common/src/mftik/procman/decisions.py:SHIM_VMRSS_BYTES` | 每個被計入的 worker 另加的 shim RSS | §4.7、B3-01：14576 KiB |
+| exchange REST |  |  |  |  |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/binance/rest.py:KEEPALIVE_INTERVAL_S` | Binance spot／USD-M／COIN-M 共用的帳號 keepalive 間隔 | Binance REST 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/binance/rest.py:KEEPALIVE_EXPIRY_S` | Binance 連線池 keepalive expiry | 長於間隔，避免兩次 tick 之間拆 socket。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/binance/rest.py:POOL_LIMITS` | Binance httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/bybit/rest.py:KEEPALIVE_INTERVAL_S` | Bybit 帳號 keepalive 間隔 | Bybit v5 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/bybit/rest.py:KEEPALIVE_EXPIRY_S` | Bybit 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/bybit/rest.py:POOL_LIMITS` | Bybit httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/okx/rest.py:KEEPALIVE_INTERVAL_S` | OKX 帳號 keepalive 間隔 | OKX REST 文件沒有寫 HTTP idle close；文件裡的 30 秒是 WebSocket。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/okx/rest.py:KEEPALIVE_EXPIRY_S` | OKX 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/okx/rest.py:POOL_LIMITS` | OKX httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/bitget/rest.py:KEEPALIVE_INTERVAL_S` | Bitget 帳號 keepalive 間隔 | Bitget UTA REST 文件沒有寫 HTTP idle close；30 秒是請求新鮮度。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/bitget/rest.py:KEEPALIVE_EXPIRY_S` | Bitget 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/bitget/rest.py:POOL_LIMITS` | Bitget httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `60.0` | `packages/common/src/mftik/exchange/deribit/rest.py:KEEPALIVE_INTERVAL_S` | Deribit 帳號 keepalive 間隔 | Deribit 文件：HTTP 連線閒置 15 分鐘後到期，keep-alive 也在 15 分鐘被切斷。60 秒低於該上限 |
+| `KEEPALIVE_EXPIRY_S` | `180.0` | `packages/common/src/mftik/exchange/deribit/rest.py:KEEPALIVE_EXPIRY_S` | Deribit 連線池 keepalive expiry | 長於間隔，仍低於 Deribit 的 15 分鐘上限 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 180.0}` | `packages/common/src/mftik/exchange/deribit/rest.py:POOL_LIMITS` | Deribit httpx 連線池 | 連線數是 httpx 預設；expiry 跟隨上面的 180 秒。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/gate/spot/rest.py:KEEPALIVE_INTERVAL_S` | Gate spot 帳號 keepalive 間隔 | Gate API v4 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/gate/spot/rest.py:KEEPALIVE_EXPIRY_S` | Gate spot 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/gate/spot/rest.py:POOL_LIMITS` | Gate spot httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/gate/future/rest.py:KEEPALIVE_INTERVAL_S` | Gate futures 帳號 keepalive 間隔 | Gate API v4 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/gate/future/rest.py:KEEPALIVE_EXPIRY_S` | Gate futures 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/gate/future/rest.py:POOL_LIMITS` | Gate futures httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |

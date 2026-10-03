@@ -30,8 +30,11 @@ from mftik_sts.session_worker.errors import SessionFailed
 from mftik_sts.session_worker.events import Inbound, LogMark, StreamKind
 from mftik_sts.session_worker.ingress import Ingress
 from mftik_sts.session_worker.limits import (
+    ALL_QUEUE_CAPACITY,
     DROP_WARN_INTERVAL_S,
     MARK_RETENTION,
+    MUST_DELIVER_CAPACITY,
+    TEMP_BUFFER_CAPACITY,
     WARNING_RETENTION,
 )
 from mftik_sts.session_worker.process import (
@@ -80,7 +83,7 @@ def test_an_availability_notice_overflow_fails_and_drops_nothing(
     kind: StreamKind,
 ) -> None:
     """Notices are the must-deliver row B5-05 added. Same rule as TD."""
-    lane = Delivery(capacity=1)
+    lane = Delivery(all_capacity=1, must_capacity=1)
     lane.accept(_event(kind, kind.value, "kept", recv_ts=1))
     with pytest.raises(SessionFailed) as caught:
         lane.accept(_event(kind, kind.value, "extra", recv_ts=2))
@@ -99,7 +102,7 @@ def test_must_deliver_kinds_share_one_fifo_ahead_of_each_feed() -> None:
     data does not take a turn between them.
     """
     trade = "trade.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=8)
+    lane = Delivery(all_capacity=8, must_capacity=8)
     lane.accept(_event(StreamKind.TRADE, trade, "t1", seq=1, recv_ts=1))
     lane.accept(_event(StreamKind.TD, "td.7", "fill", recv_ts=2))
     lane.accept(_event(StreamKind.RPC_REPLY, "rpc", "ack", recv_ts=3))
@@ -115,7 +118,7 @@ def test_must_deliver_kinds_share_one_fifo_ahead_of_each_feed() -> None:
 def test_a_resync_stays_ahead_of_the_deferred_ready() -> None:
     """Offered in that order, both notices come out before the print."""
     trade = "trade.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=8)
+    lane = Delivery(all_capacity=8, must_capacity=8)
     lane.accept(_event(StreamKind.TRADE, trade, "t", seq=1))
     lane.accept(_event(StreamKind.RESYNC, "td.7", "resync"))
     lane.accept(_event(StreamKind.TD_NOTICE, "td.7", "ready"))
@@ -135,9 +138,9 @@ def test_a_saturated_market_does_not_hold_a_fill_or_overflow_it() -> None:
         "trade.Paper_Spot_ETHUSDT",
         "trade.Paper_Spot_SOLUSDT",
     )
-    lane = Delivery(capacity=4, clock=clock)
+    lane = Delivery(all_capacity=4, must_capacity=4, clock=clock)
     for feed in feeds:
-        for seq in range(lane.capacity):
+        for seq in range(lane.all_capacity):
             lane.accept(
                 _event(
                     StreamKind.TRADE,
@@ -147,7 +150,7 @@ def test_a_saturated_market_does_not_hold_a_fill_or_overflow_it() -> None:
                     recv_ts=clock.now(),
                 )
             )
-    for burst in range(lane.capacity * 3):
+    for burst in range(lane.all_capacity * 3):
         clock.advance(0.05)
         for feed in feeds:
             lane.accept(
@@ -174,7 +177,7 @@ def test_a_saturated_market_does_not_hold_a_fill_or_overflow_it() -> None:
         if event is None:
             break
         rest.append(event)
-    assert len(rest) == lane.capacity * len(feeds)
+    assert len(rest) == lane.all_capacity * len(feeds)
     assert all(event.kind is not StreamKind.TD for event in rest)
 
 
@@ -204,7 +207,11 @@ def test_strategy_yml_overrides_apply_and_cannot_move_must_deliver() -> None:
         StsCreateSessionRequest(session_id="abc123", created_by=1, strategy="noop")
     ) == {}
 
-    lane = Delivery(capacity=2, overrides={**overrides, "td.7": "latest"})
+    lane = Delivery(
+        all_capacity=2,
+        must_capacity=2,
+        overrides={**overrides, "td.7": "latest"},
+    )
     lane.accept(_event(StreamKind.TICKER, _TICKER, "a", seq=1, recv_ts=1))
     lane.accept(_event(StreamKind.TICKER, _TICKER, "b", seq=2, recv_ts=2))
     lane.accept(_event(StreamKind.TRADE, _TRADE, "old", seq=1, recv_ts=3))
@@ -271,7 +278,7 @@ def test_drops_are_counted_per_feed_and_published_on_the_snapshot() -> None:
     eth = "trade.Paper_Spot_ETHUSDT"
     ingress = Ingress(
         StsCreateSessionRequest(session_id="abc123", created_by=1, strategy="noop"),
-        capacity=1,
+        all_capacity=1, must_capacity=1,
     )
     lane = ingress.delivery
     lane.accept(_event(StreamKind.TRADE, btc, "b1", seq=1))
@@ -294,7 +301,7 @@ def test_drop_warnings_are_rate_limited_per_feed(
     """Every drop is counted. The log line for one feed waits out the window."""
     clock = FakeClock()
     feed = "trade.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=1, clock=clock)
+    lane = Delivery(all_capacity=1, must_capacity=1, clock=clock)
 
     def one(seq: int) -> None:
         lane.accept(_event(StreamKind.TRADE, feed, f"e{seq}", seq=seq, recv_ts=seq))
@@ -323,7 +330,7 @@ def test_marks_and_warnings_forget_the_oldest() -> None:
     """
     clock = FakeClock()
     feed = "trade.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=1, clock=clock)
+    lane = Delivery(all_capacity=1, must_capacity=1, clock=clock)
     total = MARK_RETENTION + 2
     for seq in range(total):
         clock.advance(0.001)
@@ -393,7 +400,7 @@ def test_seq_and_bar_open_come_from_the_envelope() -> None:
         assert parsed is not None
         return parsed
 
-    lane = Delivery(capacity=4)
+    lane = Delivery(all_capacity=4, must_capacity=4)
     later = bar(160, closed=False, seq=4)
     close = bar(100, closed=True, seq=3)
     assert later.bar_open == 160
@@ -446,3 +453,52 @@ async def test_dispatch_stamps_seq_and_age_on_the_hook_argument() -> None:
     assert seen[0].seq == 7
     assert seen[0].recv_ts == 0.0
     assert seen[0].age == 3
+
+
+def test_the_queue_bounds_are_independent() -> None:
+    """#296. An ``all`` feed and the must-deliver FIFO do not share a bound.
+
+    1024 ``all`` events do not fail the session. Must-deliver fails only
+    past 8192. An ``all`` overflow never evicts a must-deliver event.
+    ``MARK_RETENTION`` stays its own cap.
+    """
+    assert ALL_QUEUE_CAPACITY == 1024
+    assert MUST_DELIVER_CAPACITY == 8192
+    assert TEMP_BUFFER_CAPACITY == ALL_QUEUE_CAPACITY
+    assert MARK_RETENTION == 1024
+
+    feed = "trade.Paper_Spot_BTCUSDT"
+    market = Delivery(
+        all_capacity=ALL_QUEUE_CAPACITY,
+        must_capacity=MUST_DELIVER_CAPACITY,
+    )
+    for seq in range(ALL_QUEUE_CAPACITY):
+        market.accept(_event(StreamKind.TRADE, feed, f"m{seq}", seq=seq))
+    assert market.failed is False
+    assert market.dropped == 0
+    market.accept(_event(StreamKind.TRADE, feed, "extra", seq=ALL_QUEUE_CAPACITY))
+    assert market.failed is False
+    assert market.dropped == 1
+
+    must = Delivery(all_capacity=1, must_capacity=MUST_DELIVER_CAPACITY)
+    for index in range(MUST_DELIVER_CAPACITY):
+        must.accept(_event(StreamKind.TD, "td.7", f"t{index}"))
+    assert must.failed is False
+    with pytest.raises(SessionFailed) as caught:
+        must.accept(_event(StreamKind.TD, "td.7", "overflow"))
+    assert caught.value.reason == "td_overflow"
+    assert must.failed is True
+    assert must.mark("t0") is None
+    assert must.mark("overflow") is None
+
+    mixed = Delivery(all_capacity=1, must_capacity=2)
+    mixed.accept(_event(StreamKind.TD, "td.7", "fill"))
+    mixed.accept(_event(StreamKind.TRADE, feed, "old", seq=1))
+    mixed.accept(_event(StreamKind.TRADE, feed, "new", seq=2))
+    assert mixed.mark("old") is LogMark.DROPPED
+    assert mixed.mark("fill") is None
+    assert mixed.failed is False
+    taken = mixed.take()
+    assert taken is not None
+    assert taken.event_id == "fill"
+    assert mixed.mark("fill") is LogMark.DELIVERED

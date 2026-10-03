@@ -52,7 +52,7 @@ OOM_SCORE_ADJ: Mapping[tuple[str, str], int] = MappingProxyType(
 #: to the next MiB. ``session`` is the higher of idle and a loaded
 #: strategy. ``account`` is the higher of trading off and trading on.
 #: The shim is not in this table: admission adds one shim on top of
-#: every counted worker. Provisional (#286).
+#: every counted worker. Measured in §4.7 (Appendix D).
 KIND_RSS_ESTIMATE_MIB: Mapping[tuple[str, str], int] = MappingProxyType(
     {
         ("sts", "session"): 69,

@@ -26,12 +26,13 @@ must-deliver row. TD, ``feed_end``, RPC replies and availability
 notices stay ``all`` and fail on overflow no matter what string is
 passed.
 
-``capacity`` is the bound of one ``all`` feed queue and of the shared
-must-deliver queue. The plan does not give a number. Callers pass
-:data:`~mftik_sts.session_worker.limits.ALL_QUEUE_CAPACITY`, which is
-also :data:`~mftik_sts.session_worker.limits.MUST_DELIVER_CAPACITY`
-(provisional, #286). ``latest`` and ``kline`` do not use it: they
-conflate.
+``all_capacity`` is the bound of one ``all`` feed queue
+(:data:`~mftik_sts.session_worker.limits.ALL_QUEUE_CAPACITY`).
+``must_capacity`` is the bound of the shared must-deliver queue
+(:data:`~mftik_sts.session_worker.limits.MUST_DELIVER_CAPACITY`, #296).
+They are not the same number: an ``all`` feed drops its oldest, and a
+must-deliver overflow fails the session. ``latest`` and ``kline`` do
+not use either: they conflate. Neither argument has a default.
 
 Must-deliver kinds share one FIFO, so a fill and the RPC reply about
 the same order cannot swap, and a ``RESYNC`` stays ahead of the
@@ -132,6 +133,13 @@ class Overflow(StrEnum):
     FAIL = "fail"
 
 
+def _positive_capacity(name: str, value: object) -> int:
+    """An explicit queue bound. No default, and ``bool`` is not a count."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be an integer >= 1, got {value!r}")
+    return value
+
+
 def topic_of(feed: str) -> str:
     """``ticker.Paper_Spot_BTCUSDT`` → ``ticker``.
 
@@ -180,7 +188,7 @@ def delivery_mode(kind: StreamKind, override: str | None = None) -> str:
 
 
 def overflow_policy(kind: StreamKind, override: str | None = None) -> Overflow:
-    """What happens when ``kind``'s queue is past ``capacity``.
+    """What happens when ``kind``'s queue is past its bound.
 
     Must-deliver fails even if ``override`` says ``latest``. ``kline``
     and ``latest`` conflate. ``all`` drops the oldest. An override can
@@ -203,7 +211,8 @@ class Delivery:
     ``all`` queues are per feed, so one busy trade feed does not punch
     holes in another feed's ``seq``. ``latest`` is one slot per feed.
     ``kline`` is one slot per ``(feed, bar_open)``. Must-deliver kinds
-    share one FIFO of ``capacity``.
+    share one FIFO of ``must_capacity``. One ``all`` feed holds
+    ``all_capacity``.
 
     :meth:`log_records` stays empty. B5-02 persists the lines. The mark
     :meth:`mark` returns is the in-memory disposition only.
@@ -225,12 +234,13 @@ class Delivery:
     def __init__(
         self,
         *,
-        capacity: int,
+        all_capacity: int,
+        must_capacity: int,
         overrides: Mapping[str, str] | None = None,
         clock: Clock | None = None,
     ) -> None:
-        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
-            raise ValueError(f"capacity must be an integer >= 1, got {capacity!r}")
+        self.all_capacity = _positive_capacity("all_capacity", all_capacity)
+        self.must_capacity = _positive_capacity("must_capacity", must_capacity)
         overrides = dict(overrides or {})
         bad = {
             feed: mode for feed, mode in overrides.items() if mode not in DELIVERY_MODES
@@ -240,7 +250,6 @@ class Delivery:
                 "delivery override must be one of "
                 f"{sorted(DELIVERY_MODES)}, got {bad!r}"
             )
-        self.capacity = capacity
         self.overrides = overrides
         self._clock = clock
         self._lock = threading.Lock()
@@ -273,7 +282,7 @@ class Delivery:
         not an event this table can place.
 
         Raises :class:`SessionFailed` when the must-deliver queue is past
-        ``capacity``. The event that did not fit is not marked
+        ``must_capacity``. The event that did not fit is not marked
         ``dropped``. Events already accepted stay accepted. A later
         :meth:`accept` raises the same reason.
         """
@@ -400,7 +409,7 @@ class Delivery:
             )
 
     def _accept_must(self, event: Inbound) -> None:
-        if len(self._must) >= self.capacity:
+        if len(self._must) >= self.must_capacity:
             reason = f"{event.kind.value}_overflow"
             self._failed = True
             self._fail_reason = reason
@@ -410,7 +419,7 @@ class Delivery:
 
     def _accept_all(self, event: Inbound) -> None:
         queue = self._all.setdefault(event.feed, deque())
-        if len(queue) >= self.capacity:
+        if len(queue) >= self.all_capacity:
             oldest = queue.popleft()
             self._remember_mark(oldest.event_id, LogMark.DROPPED)
             self._dropped += 1

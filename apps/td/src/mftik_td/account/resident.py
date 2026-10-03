@@ -72,11 +72,11 @@ logger = logging.getLogger(__name__)
 #: clients use when they build their own. Not a new setting.
 _CLIENT_TIMEOUT_S = 10.0
 
-# provisional, pending Yi Te (#286)
 #: HTTP requests one account's backfill may hold on the resident pool
 #: at once. Every adapter's ``POOL_LIMITS.max_connections`` is larger
 #: (100), so an order still has a free connection. One run per account
 #: is a separate guard.
+#: Default; adjust from measurement (Appendix D).
 BACKFILL_MAX_CONNECTIONS = 2
 
 

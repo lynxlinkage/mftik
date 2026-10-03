@@ -1,9 +1,9 @@
 """Each venue's warm-pool request is a public read, and the expiry outlasts it.
 
-The numbers are provisional (pending Yi Te, #286). What this locks is
-the shape B6-01 asked for: the interval is the adapter's, it is shorter
-than that adapter's ``keepalive_expiry``, and the request is a public
-GET. Paper has no HTTP pool.
+The numbers are the Appendix D defaults. What this locks is the shape
+B6-01 asked for: the interval is the adapter's, it is shorter than
+that adapter's ``keepalive_expiry``, and the request is a public GET.
+Paper has no HTTP pool.
 """
 
 from __future__ import annotations

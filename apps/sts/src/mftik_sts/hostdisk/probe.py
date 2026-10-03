@@ -18,7 +18,8 @@ from typing import Literal
 from mftik_sts.hostdisk.replica import TreeReplica, require_digest
 
 #: Long enough for one interpreter to import the SDK, short of the
-#: integration call cap (§9.1). Provisional, pending Yi Te (#286).
+#: integration call cap (§9.1).
+#: Default; adjust from measurement (Appendix D).
 PROBE_TIMEOUT_S = 8
 
 #: Same sentence the running sync uses when the directory is not there.

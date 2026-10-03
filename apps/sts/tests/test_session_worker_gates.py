@@ -62,7 +62,7 @@ def _td(event_id: str) -> Inbound:
 
 def _open(capacity: int) -> tuple[Ingress, StrategyRunner]:
     """Ingress in ``on_ready``. Delivery is held. Orders are already allowed."""
-    ingress = Ingress(_spec(), capacity=capacity)
+    ingress = Ingress(_spec(), all_capacity=capacity, must_capacity=capacity)
     ingress.start()
     runner = StrategyRunner(ingress, Strategy())
     runner.start()
@@ -295,7 +295,7 @@ def test_td_only_overflow_fails_the_session() -> None:
 
 
 def test_latest_keeps_the_newest_book() -> None:
-    ingress = Ingress(_spec(), capacity=1)
+    ingress = Ingress(_spec(), all_capacity=1, must_capacity=1)
     ingress.start()
     runner = StrategyRunner(ingress, Strategy())
     runner.start()

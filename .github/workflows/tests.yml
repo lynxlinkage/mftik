@@ -50,6 +50,9 @@ jobs:
       - name: Lint
         run: uv run --all-packages ruff check packages apps conftest.py
 
+      - name: No pending Yi Te markers
+        run: uv run --all-packages python scripts/check_pending_markers.py
+
       # Also gates the release. It lived only there until a PR that added two
       # endpoints went green here and broke main on merge — a PR must not pass
       # a weaker suite than a release runs. Early, since it needs no service.

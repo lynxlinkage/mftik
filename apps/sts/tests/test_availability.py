@@ -508,7 +508,7 @@ def test_notices_survive_a_market_data_flood() -> None:
     """
     ingress = Ingress(
         StsCreateSessionRequest(session_id="abc123", created_by=1, strategy="noop"),
-        capacity=2,
+        all_capacity=2, must_capacity=2,
     )
     ingress.start()
     runner = StrategyRunner(ingress, Strategy())
