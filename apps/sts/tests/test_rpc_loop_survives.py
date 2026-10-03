@@ -27,6 +27,10 @@ from mftik.protocol import (
 )
 from mftik_sts import app as sts_app
 
+# B2-05: borrows NATS to test STS ``run_rpc`` surviving a bad iteration.
+# Direct handler call: B4-02 (#202), which replaces the loop with ``serve``.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -43,6 +47,9 @@ async def _health(broker: Broker) -> HealthStatus:
     return HealthStatus.model_validate(reply.payload)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_the_loop_rebuilds_itself_after_an_unexpected_failure(
     broker: Broker, monkeypatch: pytest.MonkeyPatch
@@ -73,17 +80,12 @@ async def test_the_loop_rebuilds_itself_after_an_unexpected_failure(
 
 
 async def run_rpc_under_test(broker: Broker, stop: asyncio.Event) -> None:
-    # ``sessions`` is only ever passed through to the handlers, and health —
-    # the one call an operator makes to ask whether the subject is being
-    # served at all — is the handler that does not touch it.
-    await sts_app.run_rpc(
-        broker,
-        None,  # type: ignore[arg-type]
-        stop,
-        subject=Topics.STS,
-    )
+    await sts_app.run_rpc(broker, stop, subject=Topics.STS)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_shutdown_still_ends_the_loop(broker: Broker) -> None:
     """A loop that will not stop is the other way to lose a restart."""

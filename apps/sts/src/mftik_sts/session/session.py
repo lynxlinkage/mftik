@@ -1,4 +1,4 @@
-"""STS session — pub/sub lease + TD OMS / recon + MD wiring."""
+"""STS session — TD OMS / recon + MD wiring."""
 
 from __future__ import annotations
 
@@ -8,72 +8,29 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mftik.broker import Broker, RequestTimeoutError
-from mftik.exchange.models import (
-    AggTrade,
-    Balance,
-    BestQuote,
-    FeedEnd,
-    Fill,
-    FundingRate,
-    Greeks,
-    Kline,
-    Liquidation,
-    OpenInterest,
-    Order,
-    OrderBook,
-    Ticker,
-    Trade,
-)
-from mftik.exchange.oms import Position
 from mftik.protocol import (
     ANY_INSTANCE,
-    LEASE_MISS_LIMIT,
-    MD_AGG_TRADE,
-    MD_BEST_QUOTE,
     MD_BESTQUOTE_RESULT,
-    MD_FEED_END,
     MD_FUNDING_HISTORY_RESULT,
-    MD_FUNDING_RATE,
-    MD_GREEKS,
-    MD_KLINE,
+    MD_INTENT_DELETE,
     MD_KLINES_RESULT,
-    MD_LEASE_ACK,
-    MD_LIQUIDATION,
-    MD_OPEN_INTEREST,
     MD_OPEN_INTEREST_RESULT,
-    MD_ORDERBOOK,
     MD_ORDERBOOK_RESULT,
-    MD_SESSION_DETACH,
-    MD_TICKER,
-    MD_TRADE,
     ON_STOP_TIMEOUT_S,
-    STS_LEASE_HEARTBEAT,
-    TD_BALANCE_UPDATE,
-    TD_CANCEL_REJECT,
-    TD_FILL,
-    TD_LEASE_ACK,
-    TD_ORDER_REJECT,
-    TD_ORDER_UPDATE,
-    TD_POSITION_UPDATE,
+    TD_INTENT_DELETE,
     TD_RECON_DONE,
-    TD_SESSION_DETACH,
-    CancelReject,
-    Envelope,
-    LeaseAck,
-    LeaseHeartbeat,
+    IntentOwner,
     MdBestQuoteResult,
-    MdDetachRequest,
-    MdDetachRequestEnvelope,
     MdFundingHistoryResult,
+    MdIntentDelete,
+    MdIntentDeleteEnvelope,
     MdKlinesResult,
-    MdLeaseAck,
     MdOpenInterestResult,
     MdOrderBookResult,
-    OrderReject,
     ReconDone,
     TdAccountRef,
-    TdDetachRequest,
-    TdDetachRequestEnvelope,
+    TdIntentDelete,
+    TdIntentDeleteEnvelope,
     Topics,
     UntypedEnvelope,
     load_md,
@@ -83,38 +40,18 @@ from mftik.protocol import (
     publish_sts_log,
     td_api_ids_of,
 )
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.eventlog import EventLog
 from mftik.symbols import SymbolClient
 from pydantic import BaseModel
 
-from mftik_sts.spawn import write_parent_beat
+from mftik_sts.session_worker.dispatch import MD_HANDLERS, dispatch_md, dispatch_td
 
 logger = logging.getLogger(__name__)
 
 #: ``(session_id, reason, failed)`` — the manager tears the session down and
 #: records the terminal status.
 ExitHandler = Callable[[str, str, bool], Awaitable[None]]
-
-#: ``(session_id, key, value)`` — persist one fact for a later rebuild.
-RememberHandler = Callable[[str, str, str], Awaitable[None]]
-
-#: MD message type → (strategy hook, payload model). Feed topics plus
-#: control events MD publishes on ``md.{session_id}`` (``md.feed.end``);
-#: anything else on that stream is logged and dropped.
-MD_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
-    MD_TICKER: ("on_ticker", Ticker),
-    MD_ORDERBOOK: ("on_order_book", OrderBook),
-    MD_KLINE: ("on_kline", Kline),
-    MD_TRADE: ("on_trade", Trade),
-    MD_AGG_TRADE: ("on_agg_trade", AggTrade),
-    MD_BEST_QUOTE: ("on_best_quote", BestQuote),
-    MD_LIQUIDATION: ("on_liquidation", Liquidation),
-    MD_FUNDING_RATE: ("on_funding_rate", FundingRate),
-    MD_OPEN_INTEREST: ("on_open_interest", OpenInterest),
-    MD_GREEKS: ("on_greeks", Greeks),
-    MD_FEED_END: ("on_feed_end", FeedEnd),
-}
 
 #: Query result type → (strategy hook, payload model). Separate from
 #: :data:`MD_HANDLERS` and from the feed channel: these arrive on the session's
@@ -134,51 +71,17 @@ MD_FETCH_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
     ),
 }
 
-#: TD global message type → (strategy hook, payload model).
-TD_GLOBAL_HANDLERS: dict[str, tuple[str, type[BaseModel]]] = {
-    TD_ORDER_UPDATE: ("on_order_update", Order),
-    TD_FILL: ("on_fill", Fill),
-    TD_ORDER_REJECT: ("on_order_reject", OrderReject),
-    TD_CANCEL_REJECT: ("on_cancel_reject", CancelReject),
-    TD_BALANCE_UPDATE: ("on_balance_update", Balance),
-    TD_POSITION_UPDATE: ("on_position_update", Position),
-}
-
-#: Fan-out types that can change a watched cid's readiness. After the
-#: strategy hook returns, these wake :meth:`StrategyOms.wait_cids`.
-_OMS_WAIT_TYPES = frozenset(
-    {TD_ORDER_UPDATE, TD_FILL, TD_ORDER_REJECT, TD_CANCEL_REJECT}
-)
-
-
 #: ``api_id`` → the TD instance allowed to use that credential.
 TdInstanceLookup = Callable[[int], Awaitable[str | None]]
 
-#: How many missed heartbeat intervals an attached peer may go silent
-#: before this session gives up on it. Same fuse both ways: one drop is a
-#: lost core message, three is a dead peer. Armed by the first
-#: acknowledgement from each instance (MD) or api_id (TD) rather than at
-#: start — counting from zero would fail every deploy.
-PEER_MISS_LIMIT = LEASE_MISS_LIMIT
-
-#: How far past its timeout a heartbeat wait may return and still be the
-#: timeout. A healthy ``wait_for`` on uvloop comes back within microseconds
-#: of the interval. Past this, the loop was not running: that slice of the
-#: wait was not observed, and the ack clocks move forward by the lateness
-#: only. Stamping them to now would refresh a dead peer on every overrun.
-#: Measured on the wait alone — the publish in the same turn already makes
-#: a whole iteration longer than the interval, and treating that as a stall
-#: would shift the clocks on every beat.
-HEARTBEAT_LATE_S = 0.05
-
-#: How long a detach may wait for a reply. The lease is the real teardown;
-#: this is promptness. Must stay well under the old two-attempt five-second
-#: wait that used to hold a stop open.
+#: How long a detach may wait for a reply. Promptness, not the teardown
+#: itself. Must stay well under the old two-attempt five-second wait that
+#: used to hold a stop open.
 DETACH_TIMEOUT_S = 1.5
 
 
 class StsSession:
-    """Strategy session with TD/MD pub/sub links and fencing lease heartbeat."""
+    """Strategy session with TD/MD pub/sub links."""
 
     def __init__(
         self,
@@ -192,14 +95,11 @@ class StsSession:
         md_ids: list[str] | None = None,
         md: dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
-        heartbeat_interval: float = 1.0,
         symbols: SymbolClient | None = None,
         on_exit: ExitHandler | None = None,
-        remember: RememberHandler | None = None,
         event_log: EventLog | None = None,
         strategy_type: str | None = None,
         td_instance: TdInstanceLookup | None = None,
-        md_ack_grace: float | None = None,
     ) -> None:
         self.session_id = session_id
         self.broker = broker
@@ -216,16 +116,14 @@ class StsSession:
         else:
             self.td = load_td(list(td_api_ids or []))
         #: ``api_id`` → the TD instance holding that account, for addressing
-        #: a detach. Getting it wrong costs the lease's grace and nothing else
-        #: — both sides tear down on a heartbeat that stops — but a detach sent
-        #: to a subject nobody serves sits in its list rather than vanishing,
-        #: so it is worth addressing properly.
+        #: a detach. A detach sent to a subject nobody serves sits in its list
+        #: rather than vanishing, so it is worth addressing properly.
         self._td_instance_lookup = td_instance
         #: Instance name → feeds, for addressing attach and detach.
         self.md = load_md(md) if md is not None else load_md(md_ids)
-        #: Feed → the MD instance that answered attach (or the first lease
-        #: ack, for an unpinned ``*``). Named YAML instances do not need
-        #: this: ``StrategyTape`` reads them off :attr:`md` before attach.
+        #: Feed → the MD instance that answered attach. Named YAML instances
+        #: do not need this: ``StrategyTape`` reads them off :attr:`md`
+        #: before attach.
         self.md_owners: dict[str, str] = {}
         #: Every feed, flat, whatever instance holds it. This is what a
         #: strategy reads — ``TwapStrategy``, ``OneCancelOther`` and
@@ -235,12 +133,10 @@ class StsSession:
         #: not change.
         self.md_ids = md_feeds_of(self.md)
         self.st_paras = dict(st_paras or {})
-        self.heartbeat_interval = heartbeat_interval
         #: Symbol plane reads. Strategies round their own prices and sizes,
         #: so they need tick/step/notional at hand — TD does not check.
         self.symbols = symbols or SymbolClient(broker)
         self._on_exit = on_exit
-        self._remember = remember
         #: Audit trail of every event this session was handed and every call it
         #: made. Off unless ``STS_EVENTLOG_DIR`` is set — see
         #: :mod:`mftik.strategy.eventlog`. Built before ``bind`` so oms / mds / tape
@@ -258,29 +154,7 @@ class StsSession:
         self._exit_requested = False
         self._exit_reason: str | None = None
         self._exit_failed = False
-        self._token = 0
-        self._ack_tokens: dict[int, int] = {}
-        self._md_ack_token: int | None = None
-        #: Instance name → when it last showed it was still talking, on this
-        #: loop's clock. A lease ack or a processed feed print both count.
-        #: Prints do not arm a new key — quiet books still rely on
-        #: ``MdLeaseAck``. Keyed per instance because a session's feeds may
-        #: be split across MDs: one of them going quiet is the case worth
-        #: catching, and a single timestamp would be kept fresh by whichever
-        #: one was still talking.
-        self._md_acks: dict[str, float] = {}
-        #: ``api_id`` → when that TD last acknowledged. Same arming rule as
-        #: MD: a quiet TD stops the strategy, but only after it has acked
-        #: once. Attach is what catches a TD that never answers.
-        self._td_acks: dict[int, float] = {}
-        #: How long the previous heartbeat ``wait_for`` actually took.
-        #: ``None`` until the first wait returns. The next pass compares it
-        #: to the interval to tell a stall from a beat that merely published.
-        self._heartbeat_wait_s: float | None = None
-        self._md_ack_grace = md_ack_grace
-        self._md_lease_logged = False
         self._on_stop_task: asyncio.Task[Any] | None = None
-        self._recon_sent: set[int] = set()
 
     @property
     def td_api_ids(self) -> list[int]:
@@ -376,10 +250,6 @@ class StsSession:
         )
 
         self._tasks = [
-            asyncio.create_task(
-                self._lease_heartbeat_loop(),
-                name=f"sts-{self.session_id}-lease",
-            ),
             # Unconditional, unlike the feed pump below. A query needs no
             # subscription and no attach, so a session that asked for no market
             # data can still make one — and its answer has to have somewhere to
@@ -416,7 +286,10 @@ class StsSession:
         self.event_log.record("lifecycle", "on_start", dir="self")
         await self.strategy.on_start()
         self.event_log.record("lifecycle", "on_ready", dir="self")
-        await self.strategy.on_ready()
+        # Nothing is waited on before this, so nothing can be missing yet. The
+        # ingress that computes readiness, and the report that can be non-empty,
+        # arrive with the session worker (IF-05).
+        await self.strategy.on_ready(Ready())
         await self._publish_log(
             f"session started strategy={self.strategy_name} "
             f"td={self.td_api_ids} md={self.md_ids}"
@@ -428,13 +301,6 @@ class StsSession:
             self.td_api_ids,
             self.md_ids,
         )
-
-    async def remember(self, key: str, value: str) -> None:
-        """Persist one fact for this session — see ``Strategy.remember``."""
-        if self._remember is None:
-            return
-        self.event_log.record("remember", key, dir="out", value=value)
-        await self._remember(self.session_id, key, value)
 
     def request_exit(
         self, reason: str = "strategy_exit", *, failed: bool = False
@@ -476,16 +342,6 @@ class StsSession:
                 self.stop(), name=f"sts-{self.session_id}-exit-stop"
             )
 
-    def _fail_from_infrastructure(self, what: str) -> None:
-        """End the session as ``failed`` after a pump or lease loop died.
-
-        These loops do not come back: once ``subscribe`` or the heartbeat
-        publish raises, the session keeps its row marked live while receiving
-        nothing and holding no lease. Ending it makes that visible instead of
-        leaving a session that looks running and is not.
-        """
-        self.request_exit(f"{what} stopped: session can no longer run", failed=True)
-
     async def stop(self) -> None:
         if self._destroyed:
             return
@@ -496,9 +352,8 @@ class StsSession:
         # being true the moment the detach below lands, leaving the order
         # resting at the venue with nothing left to manage it.
         await self._run_on_stop()
-        # Then the detaches, still ahead of the heartbeat stopping: TD and MD
-        # expire a lease that goes quiet, and being told is a cleaner ending
-        # than being timed out.
+        # Then the detaches: being told is a cleaner ending than being left
+        # attached to a session that has stopped answering.
         await self._publish_detaches()
         self._stop.set()
         self.strategy.timer.close()
@@ -568,28 +423,30 @@ class StsSession:
         is taken by whichever process is serving the subject, and one that is
         down leaves it there for the next.
 
-        Sent without a reply because there is nothing to learn from one. The
-        lease is what actually ends an attach: both domains watch this
-        session's heartbeat and run the identical teardown when it stops — MD
-        after 3 seconds, TD after 5 — so a detach that never lands costs those
-        seconds and nothing else. What this buys is promptness and a reason on
-        the row (``sts_stop`` rather than ``lease_expired``), neither of which
-        is worth holding a stop open for.
+        Sent without a reply because there is nothing to learn from one. What
+        this buys is promptness and a reason on the row, which is not worth
+        holding a stop open for.
 
         It used to be request-reply with two five-second attempts per attach,
         which is up to ten seconds of a stopping session's life spent waiting
         to save MD three — and an ERROR when it timed out, for a teardown that
         was about to happen anyway.
         """
+        # This path is the leftover session object (B4-03 replaces it). It
+        # does not know which STS instance it is running on, so the owner
+        # carries an empty instance. Nothing production calls it.
+        owner = IntentOwner(sts_instance="", session_id=self.session_id)
         posts = [
             self._post_detach(
                 what=f"td api_id={api_id}",
                 subject=Topics.td(await self._detach_instance(api_id)),
-                envelope=TdDetachRequestEnvelope.wrap(
-                    TdDetachRequest(
-                        session_id=self.session_id, api_id=api_id
+                envelope=TdIntentDeleteEnvelope.wrap(
+                    TdIntentDelete(
+                        session_id=self.session_id,
+                        api_ids=[api_id],
+                        owner=owner,
                     ),
-                    type=TD_SESSION_DETACH,
+                    type=TD_INTENT_DELETE,
                     source="sts",
                     session_id=self.session_id,
                 ),
@@ -605,9 +462,12 @@ class StsSession:
                         if instance == ANY_INSTANCE
                         else Topics.md(instance)
                     ),
-                    envelope=MdDetachRequestEnvelope.wrap(
-                        MdDetachRequest(session_id=self.session_id),
-                        type=MD_SESSION_DETACH,
+                    envelope=MdIntentDeleteEnvelope.wrap(
+                        MdIntentDelete(
+                            session_id=self.session_id,
+                            owner=owner,
+                        ),
+                        type=MD_INTENT_DELETE,
                         source="sts",
                         session_id=self.session_id,
                     ),
@@ -684,157 +544,10 @@ class StsSession:
                 "STS detach log failed session=%s", self.session_id
             )
 
-    def _heartbeat_overslept(self) -> bool:
-        """The last heartbeat wait returned late enough to be a stall."""
-        waited = self._heartbeat_wait_s
-        if waited is None:
-            return False
-        return waited > self.heartbeat_interval + HEARTBEAT_LATE_S
-
-    def _shift_peer_acks(self, waited: float) -> None:
-        """Credit a late heartbeat wait, and only the part that was late.
-
-        ``ack = min(now, ack + (waited - interval))``. The loop could not
-        read acks during the overrun, so that slice is not silence. Moving
-        the clocks all the way to now is a different claim: every peer just
-        answered. A strategy that overruns every beat would then keep a
-        dead peer fresh forever.
-
-        Only keys that have already acked. An empty map stays empty, so a
-        peer that has never answered is still not watched. MD and TD share
-        the stall: shifting one leaves the other's stale check to fail the
-        session for a silence it also could not see.
-        """
-        late = waited - self.heartbeat_interval
-        now = asyncio.get_running_loop().time()
-        moved = 0
-        for acks in (self._md_acks, self._td_acks):
-            for key in acks:
-                acks[key] = min(now, acks[key] + late)
-                moved += 1
-        if moved == 0:
-            return
-        logger.info(
-            "STS heartbeat wait took %.3fs against an interval of %.3fs; "
-            "shifted %d peer ack clock(s) by %.3fs session=%s",
-            waited,
-            self.heartbeat_interval,
-            moved,
-            late,
-            self.session_id,
-        )
-
-    def _peer_grace(self) -> float:
-        """Silence a peer may keep after its first ack.
-
-        Tests pass ``md_ack_grace`` as an absolute window. Production counts
-        :data:`PEER_MISS_LIMIT` of this session's heartbeat interval.
-        """
-        if self._md_ack_grace is not None:
-            return self._md_ack_grace
-        return self.heartbeat_interval * PEER_MISS_LIMIT
-
-    async def _lease_heartbeat_loop(self) -> None:
-        """Publish fencing heartbeats on sts.td.* and/or sts.md.*."""
-        while not self._stop.is_set():
-            # The parent times this byte. A loop blocked before the next
-            # iteration stops writing, which is the silence a conditional
-            # kill is allowed to act on. No fd outside a worker: no-op.
-            write_parent_beat()
-            self._token += 1
-            hb = LeaseHeartbeat(
-                session_id=self.session_id,
-                token=self._token,
-                interval=self.heartbeat_interval,
-            )
-            env = Envelope[LeaseHeartbeat].wrap(
-                hb,
-                type=STS_LEASE_HEARTBEAT,
-                source="sts",
-                session_id=self.session_id,
-            )
-            try:
-                if self.td_api_ids:
-                    await self.broker.publish(
-                        Topics.sts_td_session(self.session_id), env
-                    )
-                if self.md_ids:
-                    await self.broker.publish(
-                        Topics.sts_md_session(self.session_id), env
-                    )
-            except Exception:
-                logger.exception(
-                    "STS lease heartbeat failed session=%s", self.session_id
-                )
-                self._fail_from_infrastructure("lease heartbeat")
-                return
-
-            # A stall leaves these clocks old while the acks that would
-            # refresh them are still queued. The heartbeat task can wake
-            # before either pump drains, and both peers look dead. Credit
-            # the lateness, then judge what remains: a peer that stays
-            # quiet still expires, one interval of silence at a time.
-            waited = self._heartbeat_wait_s
-            if waited is not None and self._heartbeat_overslept():
-                self._shift_peer_acks(waited)
-
-            # Armed per instance / api_id on the first ack. One quiet MD of
-            # two stops the session; a quiet TD does too — there is no book
-            # in a cache to keep trading against.
-            grace = self._peer_grace()
-            stale_md = self._stale_keys(self._md_acks, grace)
-            if stale_md:
-                logger.error(
-                    "STS lost market data from %s session=%s",
-                    ", ".join(stale_md),
-                    self.session_id,
-                )
-                await self._publish_log(
-                    f"no market-data acknowledgement from {', '.join(stale_md)} "
-                    f"for {grace:.0f}s",
-                    level="error",
-                )
-                self._fail_from_infrastructure(
-                    f"md feed from {', '.join(stale_md)}"
-                )
-                return
-            stale_td = self._stale_keys(self._td_acks, grace)
-            if stale_td:
-                names = [f"api_id={api}" for api in stale_td]
-                logger.error(
-                    "STS lost trading desk from %s session=%s",
-                    ", ".join(names),
-                    self.session_id,
-                )
-                await self._publish_log(
-                    f"no trading-desk acknowledgement from {', '.join(names)} "
-                    f"for {grace:.0f}s",
-                    level="error",
-                )
-                self._fail_from_infrastructure(
-                    f"td from {', '.join(names)}"
-                )
-                return
-
-            wait_started = asyncio.get_running_loop().time()
-            try:
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=self.heartbeat_interval
-                )
-            except TimeoutError:
-                self._heartbeat_wait_s = (
-                    asyncio.get_running_loop().time() - wait_started
-                )
-                continue
-            self._heartbeat_wait_s = None
-
     async def _pump_md_session(self) -> None:
         topic = Topics.md_session(self.session_id)
         try:
             async for env in self.broker.subscribe(topic, stop=self._stop):
-                if env.type == MD_LEASE_ACK:
-                    await self._on_md_lease_ack(env)
-                    continue
                 if env.type in MD_HANDLERS:
                     await self._on_market_data(env)
                     continue
@@ -842,10 +555,12 @@ class StsSession:
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Logged and nothing more. This pump does not come back, so the
+            # session is now running without market data — B5-05 turns that
+            # into a notification.
             logger.exception(
                 "STS md session pump failed session=%s", self.session_id
             )
-            self._fail_from_infrastructure("md feed")
 
     async def _pump_fetch_replies(self) -> None:
         """Deliver query answers to ``on_fetch_klines``.
@@ -904,159 +619,16 @@ class StsSession:
                 result.query_id,
             )
 
-    async def _on_md_lease_ack(self, env: UntypedEnvelope) -> None:
-        self._record_in("lease", env)
-        try:
-            ack = MdLeaseAck.model_validate(env.payload)
-            self._md_ack_token = ack.token
-        except Exception:
-            return
-        # Under the plane name when the sender does not say: a single-process
-        # node calls itself ``md``, so an MD that predates the field is tracked
-        # as the one instance it is rather than not tracked at all.
-        instance = ack.instance or "md"
-        first = instance not in self._md_acks
-        self._touch_md_ack(instance)
-        # Unpinned feeds have no name in the YAML. The first ack is the
-        # first moment we know who took them — too late for on_start, but
-        # enough for a later read.
-        for feed in self.md.get(ANY_INSTANCE, []):
-            self.md_owners.setdefault(feed, instance)
-        if first and self._md_acks:
-            self.event_log.record(
-                "lease", "md_ack_armed", dir="self", what=instance
-            )
-        if self._md_lease_logged:
-            return
-        self._md_lease_logged = True
-        await self._publish_log("MD lease established")
-
-    def _touch_md_ack(self, instance: str) -> None:
-        """Stamp that ``instance`` is still talking, on this loop's clock.
-
-        Lease acks call this to arm and to refresh. Feed prints call it
-        only after the instance is already in :attr:`_md_acks` — a burst
-        of ticks is the same fact as an ack for liveness, but not for
-        first contact.
-        """
-        self._md_acks[instance] = asyncio.get_running_loop().time()
-
-    def _refresh_md_ack_from_print(self, env: UntypedEnvelope) -> None:
-        """Treat a dequeued feed print as liveness for its MD instance.
-
-        Under a burst the pump may apply ticks for longer than the ack
-        grace without running :meth:`_on_md_lease_ack`. The peer is
-        clearly still delivering; counting the print avoids a false
-        MD-death. Does not arm — a book that has gone quiet still needs
-        lease acks.
-        """
-        instance = self._md_instance_for_print(env)
-        if instance is None:
-            if len(self._md_acks) != 1:
-                return
-            instance = next(iter(self._md_acks))
-        if instance in self._md_acks:
-            self._touch_md_ack(instance)
-
-    def _md_instance_for_print(self, env: UntypedEnvelope) -> str | None:
-        """Which attached MD this print belongs to, if we can tell.
-
-        The envelope does not name the writer (``source`` is the plane).
-        The feed key does: owners recorded at attach / first unpinned
-        ack, then pinned :attr:`md`. Unresolved is None, not a guess —
-        guessing would keep a dead instance alive from the other's tape.
-        """
-        feed = self._md_feed_key_for_print(env)
-        if feed is None:
-            return None
-        owner = self.md_owners.get(feed)
-        if owner:
-            return owner
-        for instance, feeds in self.md.items():
-            if instance == ANY_INSTANCE:
-                continue
-            if feed in feeds:
-                return instance
-        return None
-
-    def _md_feed_key_for_print(self, env: UntypedEnvelope) -> str | None:
-        payload = env.payload
-        if not isinstance(payload, dict):
-            return None
-        ticker = payload.get("universal_ticker")
-        if not isinstance(ticker, str) or not ticker:
-            return None
-        if env.type == MD_KLINE:
-            interval = payload.get("interval")
-            if not isinstance(interval, str) or not interval:
-                return None
-            topic = f"kline_{interval}"
-        else:
-            topic = env.type.removeprefix("md.")
-            if not topic or topic == env.type:
-                return None
-        return Topics.md_feed(topic, ticker)
-
-    def _stale_keys(self, seen: dict[Any, float], grace: float) -> list[Any]:
-        """Peers that have acked once and then gone quiet.
-
-        Only keys that have acknowledged at least once are considered.
-        Arming on the first ACK is what makes this safe to run from the
-        moment the session starts: a session begins heartbeating before
-        the peer has attached to hear it.
-        """
-        if not seen:
-            return []
-        now = asyncio.get_running_loop().time()
-        return sorted(
-            key for key, at in seen.items() if now - at > grace
-        )
-
     async def _on_market_data(self, env: UntypedEnvelope) -> None:
-        self._refresh_md_ack_from_print(env)
-        name, model = MD_HANDLERS[env.type]
-        # The wire dict, not the model built from it. It is what arrived, it
-        # costs nothing to record — the parse has already happened, upstream —
-        # and a payload that fails validation below is exactly the one worth
-        # having on disk in the shape it came in.
-        self._record_in("md", env, hook=name)
-        try:
-            payload = model.model_validate(env.payload)
-        except Exception as exc:
-            self.event_log.record(
-                "error",
-                "payload_invalid",
-                dir="self",
-                hook=name,
-                type=env.type,
-                env_id=env.id,
-                error=repr(exc),
-            )
-            logger.exception(
-                "invalid md payload session=%s type=%s",
-                self.session_id,
-                env.type,
-            )
-            return
-        handler = getattr(self.strategy, name)
-        try:
-            await handler(payload)
-        except Exception as exc:
-            self._record_hook_failed(name, env, exc)
-            logger.exception(
-                "strategy %s failed session=%s type=%s",
-                name,
-                self.session_id,
-                env.type,
-            )
+        # Decode and the hook live with the session worker. This shell
+        # swallows a hook exception so the event log can record it and
+        # the session continues; the worker does not.
+        await dispatch_md(self.strategy, self.event_log, env, swallow=True)
 
     async def _pump_td_session(self, api_id: int) -> None:
         topic = Topics.td_session(api_id, self.session_id)
         try:
             async for env in self.broker.subscribe(topic, stop=self._stop):
-                if env.type == TD_LEASE_ACK:
-                    await self._on_lease_ack(api_id, env)
-                    continue
                 if env.type == TD_RECON_DONE:
                     await self._on_recon_done(env)
                     continue
@@ -1064,12 +636,12 @@ class StsSession:
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Logged and nothing more — see :meth:`_pump_md_session`.
             logger.exception(
                 "STS td session pump failed session=%s api_id=%s",
                 self.session_id,
                 api_id,
             )
-            self._fail_from_infrastructure(f"td session feed api_id={api_id}")
 
     async def _pump_td_global(self, api_id: int) -> None:
         topic = Topics.td_global(api_id)
@@ -1079,115 +651,20 @@ class StsSession:
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Logged and nothing more — see :meth:`_pump_md_session`.
             logger.exception(
                 "STS td global pump failed session=%s api_id=%s",
                 self.session_id,
                 api_id,
             )
-            self._fail_from_infrastructure(f"td global feed api_id={api_id}")
 
     async def _on_td_global(self, api_id: int, env: UntypedEnvelope) -> None:
-        entry = TD_GLOBAL_HANDLERS.get(env.type)
-        if entry is None:
+        # Same dispatch as the session worker. ``False`` is a type no
+        # hook claims; the shell still logs that on its own channel.
+        if not await dispatch_td(
+            self.strategy, self.event_log, api_id, env, swallow=True
+        ):
             self._on_message(f"global-{api_id}", env)
-            return
-        name, model = entry
-        # Recorded before ``owns`` has a say — that filter belongs to the
-        # strategy, and an audit trail that only kept this session's own fills
-        # could not show the account moving underneath it.
-        self._record_in("td", env, hook=name, api_id=api_id)
-        try:
-            payload = model.model_validate(env.payload)
-        except Exception as exc:
-            self.event_log.record(
-                "error",
-                "payload_invalid",
-                dir="self",
-                hook=name,
-                type=env.type,
-                env_id=env.id,
-                api_id=api_id,
-                error=repr(exc),
-            )
-            logger.exception(
-                "invalid td global payload session=%s api_id=%s type=%s",
-                self.session_id,
-                api_id,
-                env.type,
-            )
-            return
-        handler = getattr(self.strategy, name)
-        # Inflight tracking is session-owned: submit marks the cid, and
-        # these events are the only thing that can clear it. The strategy
-        # hook still sees the same payload; it must not be the sole writer.
-        if name == "on_order_update":
-            self.strategy.oms.note_order(payload)
-        elif name == "on_order_reject":
-            self.strategy.oms.note_reject(
-                getattr(payload, "error_code", None),
-                getattr(payload, "client_order_id", None),
-            )
-        elif name == "on_cancel_reject":
-            self.strategy.oms.note_gone(
-                getattr(payload, "client_order_id", None)
-            )
-        try:
-            await handler(api_id, payload)
-        except Exception as exc:
-            self._record_hook_failed(name, env, exc, api_id=api_id)
-            logger.exception(
-                "strategy %s failed session=%s api_id=%s type=%s",
-                name,
-                self.session_id,
-                api_id,
-                env.type,
-            )
-        finally:
-            # After the hook: a fill's hedge runs before on_stop's waiter
-            # proceeds to cancel. Still signal if the hook raised — a
-            # wedged strategy must not strand wait_cids until its timeout.
-            if env.type in _OMS_WAIT_TYPES:
-                self.strategy.oms.signal(
-                    api_id,
-                    getattr(payload, "client_order_id", None),
-                    payload if isinstance(payload, Order) else None,
-                )
-
-    async def _on_lease_ack(self, api_id: int, env: UntypedEnvelope) -> None:
-        # The closest thing this system has to a login: TD has accepted the
-        # lease and this session may now trade the account.
-        self._record_in("lease", env, api_id=api_id)
-        try:
-            ack = LeaseAck.model_validate(env.payload)
-            self._ack_tokens[api_id] = ack.token
-        except Exception:
-            return
-        first = api_id not in self._td_acks
-        self._td_acks[api_id] = asyncio.get_running_loop().time()
-        if first:
-            self.event_log.record(
-                "lease", "td_ack_armed", dir="self", api_id=api_id
-            )
-        # First ACK means TD session is established → Strategy sends Recon.
-        if api_id in self._recon_sent:
-            return
-        self._recon_sent.add(api_id)
-        try:
-            await self.strategy.send_recon(api_id)
-            await self._publish_log(
-                f"TD lease established — sent recon api_id={api_id}"
-            )
-            logger.info(
-                "STS sent recon session=%s api_id=%s",
-                self.session_id,
-                api_id,
-            )
-        except Exception:
-            logger.exception(
-                "STS send_recon failed session=%s api_id=%s",
-                self.session_id,
-                api_id,
-            )
 
     async def _on_recon_done(self, env: UntypedEnvelope) -> None:
         self._record_in("recon", env, hook="on_recon_done")

@@ -84,7 +84,7 @@ from mftik.protocol import (
     Topics,
 )
 from mftik.protocol.reject_codes import describe
-from mftik.strategy import Strategy
+from mftik.strategy import Ready, Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S
 from mftik.strategy.timer import TimerToken
 
@@ -189,10 +189,6 @@ def _positive(raw: dict[str, Any], name: str, where: str) -> Decimal:
 
 
 class OneCancelOther(Strategy):
-    #: Restorable. Nothing has to be remembered: the pair is in ``st_paras``
-    #: and what became of it is in recon — see :meth:`on_rebuild`.
-    rebuildable = True
-
     def __init__(self) -> None:
         super().__init__()
         self._arm_token: TimerToken | None = None
@@ -271,25 +267,8 @@ class OneCancelOther(Strategy):
             self._on_arm_timeout,
         )
 
-    async def on_ready(self) -> None:
+    async def on_ready(self, ready: Ready) -> None:
         await self.log("OneCancelOther ready — waiting for TD recon")
-
-    async def on_rebuild(self, remembered: dict[str, str]) -> None:
-        """This pair ran before. Nothing to take back — recon has all of it.
-
-        ``remembered`` is empty by design. An OCO's whole state is either
-        configuration, which ``st_paras`` still holds, or the fate of two
-        orders, which only the venue knows: recon reports what is resting,
-        what filled and what is gone. There is no third kind of fact here the
-        way there is in a chase, whose clock and slippage anchor no order
-        carries.
-
-        What this does change is the meaning of what recon brings. Any order
-        of ours in it is one *this session* left behind, to be taken back
-        rather than watched from the outside.
-        """
-        self._restoring = True
-        await self.log("OneCancelOther restoring — waiting for recon")
 
     async def _adopt(self, api_id: int, msg: ReconDone) -> bool:
         """Take back the pair this session left at the venue.

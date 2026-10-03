@@ -20,6 +20,10 @@ from mftik.protocol import (
 )
 from mftik.strategy.ledger import StrategyLedger
 
+# B2-05: borrows NATS to test leverage through the strategy ledger. Direct
+# handler call: B6-02 (#220).
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -70,6 +74,9 @@ async def _serve_once(
         return
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_ensure_leverage_caches_a_successful_ack(broker: Broker) -> None:
     ledger = _ledger(broker, 7)
     stop = asyncio.Event()
@@ -93,6 +100,9 @@ async def test_ensure_leverage_skips_rpc_on_cache_hit(broker: Broker) -> None:
     assert value == Decimal("12")
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_ensure_leverage_maps_a_refusal(broker: Broker) -> None:
     ledger = _ledger(broker, 7)
     stop = asyncio.Event()

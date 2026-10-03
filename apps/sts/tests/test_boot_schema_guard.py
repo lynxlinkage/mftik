@@ -23,6 +23,11 @@ from mftik_db.schema import SchemaTooOld
 from mftik_sts import app
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_schema_that_is_too_old_stops_the_process(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -36,6 +41,9 @@ async def test_a_schema_that_is_too_old_stops_the_process(
     assert "STS will not start" in caplog.text
 
 
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_database_that_is_not_up_yet_is_waited_for(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -57,6 +65,11 @@ async def test_a_database_that_is_not_up_yet_is_waited_for(
     assert "connection refused" in caplog.text
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_database_that_never_answers_stops_the_process(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -73,6 +86,9 @@ async def test_a_database_that_never_answers_stops_the_process(
     assert "could not be read" in caplog.text
 
 
+@pytest.mark.real_sleep(
+    reason="STS schema check still sleeps on the wall clock"
+)
 async def test_a_migration_that_lands_mid_wait_is_picked_up(
     monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,6 +121,31 @@ async def test_the_window_is_configurable(
     assert app._schema_wait_s() == 45.0
     monkeypatch.setenv(app.SCHEMA_WAIT_ENV, "soon")
     assert app._schema_wait_s() == app.SCHEMA_WAIT_S
+
+
+def test_the_process_supervisor_takes_the_pin_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """B3-07: this plane passes the pin path; it does not read the env itself."""
+    pin = tmp_path / "pinned-releases"
+    seen: dict[str, object] = {}
+
+    class _Supervisor:
+        def __init__(self, work_dir, *, plane, instance, pin_path=None, budget=None):
+            seen["work_dir"] = work_dir
+            seen["plane"] = plane
+            seen["instance"] = instance
+            seen["pin_path"] = pin_path
+            seen["budget"] = budget
+
+    monkeypatch.setattr("mftik.procman.Supervisor", _Supervisor)
+    monkeypatch.setattr("mftik.procman.pinned_releases_path", lambda: pin)
+    app._open_supervisor()
+    assert seen["plane"] == "sts"
+    assert seen["instance"] == app.INSTANCE
+    assert seen["pin_path"] == pin
+    assert seen["budget"] is None
+    assert seen["work_dir"] == app._supervisor_work_dir("sts", app.INSTANCE)
 
 
 async def test_amain_returns_without_serving_anything(

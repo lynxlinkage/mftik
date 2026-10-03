@@ -15,7 +15,7 @@ export function authEnvEnabled(value: string | undefined): boolean {
  *
  * The API still answers 401 and never redirects — it does not see a
  * navigation to /board. The frontend container does, and that is the only
- * place a document redirect can live. See docs/Auth.md.
+ * place a document redirect can live. See docs/archive/Auth.md.
  */
 export function documentNeedsLogin(status: DocumentAuth, pathname: string): boolean {
 	if (pathname === LOGIN_PATH || pathname.startsWith(`${LOGIN_PATH}/`)) return false;

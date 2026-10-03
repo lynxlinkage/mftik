@@ -19,6 +19,10 @@ from mftik.exchange.bybit.public import BybitPublicClient, venue_interval
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.tickers import Category, UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
 
@@ -215,6 +219,9 @@ async def test_two_consumers_share_one_venue_subscription(
         assert (await asyncio.wait_for(second.__anext__(), 2)).trade_id == "trade-1"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_resubscribes_a_shared_topic_once(
     bybit_public: FakeBybit,
 ) -> None:
@@ -272,6 +279,9 @@ async def test_the_book_stream_yields_whole_books(
     assert second.asks[0].price == Decimal("60001")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_gapped_book_resubscribes_instead_of_publishing(
     bybit_public: FakeBybit,
 ) -> None:
@@ -287,8 +297,13 @@ async def test_a_gapped_book_resubscribes_instead_of_publishing(
         await bybit_public.push(
             "orderbook.50.BTCUSDT", _book(99, [["2", "1"]], []), kind="delta"
         )
+        # The resubscribe is its own task: the subscribe frame goes out only
+        # after the unsubscribe ack, so both have to be present before we look.
         for _ in range(200):
-            if bybit_public.frames_for("unsubscribe"):
+            if (
+                bybit_public.frames_for("unsubscribe")
+                and len(bybit_public.frames_for("subscribe")) == 2
+            ):
                 break
             await asyncio.sleep(0.01)
 
@@ -387,6 +402,9 @@ async def test_book_deltas_do_not_subscribe_a_sibling_when_one_topic_is_folded(
         )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_folder_joining_a_raw_held_topic_resyncs_once(
     bybit_public: FakeBybit,
 ) -> None:
@@ -431,6 +449,9 @@ async def test_two_delta_consumers_share_and_neither_is_replayed(
         assert (await asyncio.wait_for(second.__anext__(), 2))[0] == "snapshot"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_gap_on_a_shared_fold_resyncs_exactly_once(
     bybit_public: FakeBybit,
 ) -> None:
@@ -488,6 +509,9 @@ async def test_an_unsupported_depth_is_refused_locally(
     assert not bybit_public.subscribed
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_reconnect_resubscribes_and_rebuilds_the_book(
     bybit_public: FakeBybit,
 ) -> None:
@@ -523,6 +547,9 @@ def _client(stub: FakeBybit, product: str = "spot") -> BybitPublicClient:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_connector_stamps_the_instrument_it_was_asked_for(
     bybit_public: FakeBybit,
 ) -> None:
@@ -544,6 +571,9 @@ async def test_the_connector_stamps_the_instrument_it_was_asked_for(
     assert trade.category is Category.SPOT
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_two_books_are_distinguishable_on_one_hook(
     bybit_public: FakeBybit,
 ) -> None:
@@ -574,6 +604,9 @@ async def test_the_two_books_are_distinguishable_on_one_hook(
     assert first.symbol == second.symbol == "BTCUSDT"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_ticker_delta_with_no_price_is_not_published(
     bybit_public: FakeBybit,
 ) -> None:
@@ -604,6 +637,9 @@ async def test_a_client_is_refused_a_ticker_from_another_venue(
             await client.fetch_ticker(UniversalTicker.parse("Binance_Spot_BTCUSDT"))
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_liquidations_arrive_stamped_with_the_perp(
     bybit_public: FakeBybit,
 ) -> None:
@@ -644,6 +680,9 @@ async def test_spot_has_no_liquidation_stream(bybit_public: FakeBybit) -> None:
             client.stream_liquidation(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_funding_snapshot_uses_the_envelope_stamp(
     bybit_public: FakeBybit,
 ) -> None:
@@ -669,6 +708,9 @@ async def test_a_funding_snapshot_uses_the_envelope_stamp(
     assert not hasattr(row, "next_funding_time")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_funding_only_delta_feeds_funding_not_the_ticker(
     bybit_public: FakeBybit,
 ) -> None:
@@ -698,6 +740,9 @@ async def test_a_funding_only_delta_feeds_funding_not_the_ticker(
     assert quote.last == Decimal("60000")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_ticker_and_funding_share_one_venue_subscription(
     bybit_public: FakeBybit,
 ) -> None:
@@ -737,6 +782,9 @@ async def test_spot_has_no_funding_rate_stream(bybit_public: FakeBybit) -> None:
             client.stream_funding_rate(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_open_interest_only_delta_feeds_oi_not_the_ticker(
     bybit_public: FakeBybit,
 ) -> None:
@@ -767,6 +815,9 @@ async def test_an_open_interest_only_delta_feeds_oi_not_the_ticker(
     assert quote.last == Decimal("60000")
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_a_single_open_interest_delta_feeds_oi(
     bybit_public: FakeBybit,
 ) -> None:
@@ -788,6 +839,9 @@ async def test_a_single_open_interest_delta_feeds_oi(
     assert interest.ts == 1_700_000_000.0
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_quoted_delta_without_open_interest_yields_neither_oi(
     bybit_public: FakeBybit,
 ) -> None:
@@ -814,6 +868,9 @@ async def test_a_quoted_delta_without_open_interest_yields_neither_oi(
     size_task.cancel()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_ticker_and_open_interest_share_one_venue_subscription(
     bybit_public: FakeBybit,
 ) -> None:
@@ -851,6 +908,9 @@ async def test_spot_has_no_open_interest_stream(bybit_public: FakeBybit) -> None
             client.stream_open_interest(UniversalTicker.parse("Bybit_Spot_BTCUSDT"))
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_dated_future_has_an_open_interest_stream(
     bybit_public: FakeBybit,
 ) -> None:

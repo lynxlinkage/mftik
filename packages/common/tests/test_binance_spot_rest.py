@@ -98,6 +98,8 @@ def params_of(request: httpx.Request) -> dict[str, str]:
 # --- signing ---------------------------------------------------------------
 
 
+# Ed25519 verify; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_history_reads_are_signed_the_way_the_venue_verifies_them() -> None:
     """Ed25519 over the query string that was sent, key named in the header.
 

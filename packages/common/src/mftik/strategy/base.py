@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from mftik.exchange.models import (
@@ -20,31 +21,33 @@ from mftik.exchange.models import (
     Ticker,
     Trade,
 )
-from mftik.exchange.oms import Position
+from mftik.exchange.oms import OmsView, Position
 from mftik.protocol import (
-    STS_RECON,
     CancelReject,
-    Envelope,
     MdBestQuoteResult,
     MdFundingHistoryResult,
     MdKlinesResult,
     MdOpenInterestResult,
     MdOrderBookResult,
     OrderReject,
-    Recon,
     ReconDone,
-    Topics,
     publish_sts_log,
 )
 from mftik.strategy.artifacts import StrategyArtifacts
+from mftik.strategy.budget import HookSlow
 from mftik.strategy.client_order_id import VERSION, session_id_of, version_of
 from mftik.strategy.ledger import StrategyLedger
+from mftik.strategy.md import FeedState, StrategyMd
 from mftik.strategy.mds import StrategyMds
+from mftik.strategy.offload import OffloadPool
 from mftik.strategy.oms import StrategyOms
+from mftik.strategy.ready import Ready
 from mftik.strategy.session import SessionView
 from mftik.strategy.symbols import StrategySymbols
 from mftik.strategy.tape import StrategyTape
+from mftik.strategy.td import AccountState, StrategyTd
 from mftik.strategy.timer import Timer
+from mftik.strategy.universe import UniverseChange
 
 
 class Strategy:
@@ -53,22 +56,69 @@ class Strategy:
     Session ↔ Strategy is 1-1. Override hooks as needed.
 
     Process control (wired):
-        on_start, on_ready, on_stop
-        on_rebuild(remembered) — this session ran before; runs before
-        on_start. remembered is what remember() wrote (st_facts)
+        on_start, on_ready(ready), on_stop
         exit() — natural end → session stop → on_stop → status "done"
         fail(reason) — same teardown, but status "failed" and reason is
         persisted for the UI
-        remember(key, value) — keep a fact a rebuilt session could not
-        re-derive; handed back to on_rebuild
+        ``on_start`` may be long and may be synchronous, and it may not trade:
+        TD has not been subscribed and nothing has reconciled, so order entry
+        will raise :class:`~mftik.strategy.errors.NotReady` there (the gate
+        itself lands with the session worker — IF-06 defines the exception).
+        ``on_ready`` fires once, and fires even when a feed is missing — what
+        is missing is in ``ready.missing_feeds`` and what to do about it is the
+        strategy's call. See :mod:`mftik.strategy.ready`.
+
+    Heavy computation (interface only — IF-06, lands in B5-03):
+        await self.offload(func, *args) — run it off the strategy loop so
+        fills, timers and on_stop keep being served while it runs
+        await self.offload(func, *args, isolate=True) — in a child process,
+        for pure-Python work or anything with a memory risk
+        pool = await self.offload_pool(init=..., init_args=...) then
+        await pool.call(func, *args) — a child process with state loaded once
+        See :mod:`mftik.strategy.offload`. This replaces the old breathe /
+        slice_deadline pacing: hand over the whole computation rather than
+        cutting it into slices.
+
+    Availability, not content (the session worker delivers these):
+        on_md_update(feed, state, reason) — "live" | "down"
+        on_td_update(api_id, state, reason) — "ready" | "degraded" |
+        "unavailable"
+        self.md.state(feed) / self.td.state(api_id) — ask at any moment
+        Losing a feed or an account does not fail the session; the platform
+        notifies and the strategy decides. An ``unavailable`` account refuses
+        submits and cancels locally. These hooks carry connection and
+        availability only: prices arrive on on_ticker and friends, orders
+        on on_order_update.
+
+    Selector universes (interface only — IF-06, lands in B9):
+        on_universe_change(name, change) — change.added / removed / epoch, and
+        change.current for a rolling future
+        self.md.universe(name) / self.md.current(name)
+        A ``select:`` block in strategy.yml names a shape — the two nearest
+        expiries, the front quarterly — and the platform derives the members.
+        A contract sends nothing before its ``added`` and nothing after its
+        ``removed``.
 
     TD recon (wired):
-        send_recon (auto on first lease ACK), on_recon_done
+        on_recon_done
         self.oms — read OMS snapshots from ``td.oms.{api_id}``
         self.ledger — read balances from ``td.ledger.{api_id}``; TD owns
         them, so this is a view: available() is free minus TD's pre-locks.
         Contract strategies also call ledger.ensure_leverage(ticker) so TD
         caches per-symbol leverage for perp pre-locks (notional / leverage).
+
+    Gaps in the event stream (the session worker delivers ``on_resync``):
+        on_resync(api_id, cause, view) — the platform reconciled because the
+        stream may have a hole in it (the session's own NATS connection
+        reconnected, or the account worker rebuilt its book from the venue).
+        ``view`` is that worker's settled ``oms.view``: UNKNOWN orders were
+        chased before the hook ran. Correct whatever was accumulated from
+        events against it. A ``td.error`` (the trading layer is closed, or
+        the payload was refused) or a timeout skips the hook. That skip is
+        not an empty book.
+        await self.oms.view(settled=True) — the same convergence on demand,
+        for a strategy that needs UNKNOWN orders resolved before it acts.
+        Strategies do not reconcile themselves: there is no send_recon.
 
     Order entry — request-reply on ``td.order.{api_id}`` (wired):
         submit_order / cancel_order return True once TD acks the request.
@@ -149,37 +199,6 @@ class Strategy:
         assume. Empty from the right MD is a normal answer — nothing was
         holding the feed, or recording is off.
 
-    Yielding while you compute — ``breathe`` / ``slice_deadline`` (import them):
-        A hook is a coroutine on the session's own loop, and the heartbeat
-        task that watches MD's acknowledgements is another task on it. A
-        hook that does not await keeps that task from running, and once an
-        acknowledgement has gone unseen for ``LEASE_HEARTBEAT_INTERVAL_S``
-        × ``LEASE_MISS_LIMIT`` the session fails itself with ``md feed from
-        {instance} stopped: session can no longer run`` (``{instance}`` is
-        the MD's name — ``md`` by default). That window is ~3s and it is
-        measured from the last acknowledgement, not from where the stall
-        began, so stay well under it. A read of 200k prints is easily past
-        it, and a loop over one has to hand the loop back as it goes::
-
-            from mftik.strategy import breathe, slice_deadline
-
-            tape = await self.tape.read(ticker, topic="aggtrade")
-            deadline = slice_deadline()
-            for print_ in tape.records:
-                deadline = await breathe(deadline)
-                self._fold(print_)
-
-        ``breathe`` only suspends once the slice it was given is spent, so
-        the cost per record is a clock read, not a reschedule. Hold the
-        value it returns and pass it back — that is the next deadline. The
-        same applies to anything else long in a hook, tape or not.
-
-        ``read(..., on_print=...)`` is the exception: the read breathes
-        before every record, and that clock check counts whatever the
-        previous callback spent, so an ordinary callback — which may be a
-        plain sync function — needs nothing added. If one call of it is
-        long, make the callback ``async`` and breathe inside it.
-
     Artifacts — opaque bytes on this STS's disk (wired):
         self.artifacts.read(path) / stat(path) / write(path, body)
         self.artifacts.reading(path) / writing(path) — the same object as a
@@ -187,8 +206,8 @@ class Strategy:
         One relative path is one object. ``weights/model.pt`` is not
         ``sessions/{session_id}/weights/model.pt``. A missing key is None;
         a key that is not a relative path raises. These read or replace a
-        whole object — ``on_start``, ``on_stop``, ``on_rebuild``, not a
-        hot hook. See :mod:`mftik.strategy.artifacts`.
+        whole object — ``on_start``, ``on_stop``, not a hot hook. See
+        :mod:`mftik.strategy.artifacts`.
 
     Event log (wired, nothing to call):
         Every event reaching a hook here, and every order, cancel and query
@@ -203,14 +222,6 @@ class Strategy:
         second reaches the UI.
     """
 
-    #: Whether a session running this strategy may be restored after STS
-    #: restarts. Off until the class implements :meth:`on_rebuild`: a rebuilt
-    #: strategy that does not know it was ever away treats recon as a clean
-    #: account and starts over, placing orders alongside the ones it left
-    #: resting at the venue. Readiness is a property of the strategy, not of
-    #: whoever set the environment variable.
-    rebuildable: bool = False
-
     def __init__(self) -> None:
         self.session: SessionView | None = None
         #: Qualified registry key (``CrossArb``, ``private::Tiny``). Set in
@@ -221,6 +232,17 @@ class Strategy:
         self.oms = StrategyOms()
         #: On-demand market-data reads — history the feeds do not carry.
         self.mds = StrategyMds()
+        #: Whether the feeds are live, and which contracts a ``select:`` block
+        #: chose. Not market data, and not ``self.mds``: that one asks a venue
+        #: a question, this one asks the platform about the subscriptions this
+        #: session holds.
+        self.md = StrategyMd()
+        #: Whether an account can trade right now. What it holds is
+        #: :attr:`oms` and :attr:`ledger`.
+        self.td = StrategyTd()
+        #: How often a hook has blocked the strategy loop past the warning
+        #: line (F15). Written by the platform, read by the status progress.
+        self.hook_slow = HookSlow()
         #: Read-only balances from TD's ledger (available / free / prelock).
         self.ledger = StrategyLedger()
         #: Recorded trade history from MD, for warming up on what this session
@@ -251,6 +273,8 @@ class Strategy:
             self.registry_key = qualified
         self.oms.bind(self)
         self.mds.bind(self)
+        self.md.bind(self)
+        self.td.bind(self)
         self.ledger.bind(self)
         self.tape.bind(self)
         self.artifacts.bind(self)
@@ -321,58 +345,101 @@ class Strategy:
     async def on_start(self) -> None:
         """Called when the session starts strategy infrastructure."""
 
-    async def on_ready(self) -> None:
-        """Called after start when the session is ready to run."""
+    async def on_ready(self, ready: Ready) -> None:
+        """Called once, when everything the session declared is ready (F12).
+
+        Order entry opens here: by this point every account has reconciled, so
+        ``self.oms`` and ``self.ledger`` describe what is actually held, and a
+        submit before this raises :class:`~mftik.strategy.errors.NotReady`.
+
+        It fires even when market data did not all arrive. TD is a hard
+        condition and a session whose accounts did not reconcile fails instead
+        of reaching here; MD is a soft one, and whatever is still missing is in
+        ``ready.missing_feeds`` for the strategy to judge — wait, trade the legs
+        it has, or :meth:`fail`. See :class:`mftik.strategy.ready.Ready`.
+
+        A restarted session arrives here with positions it did not open (R3):
+        ``restart: on_failure`` cleans up resting orders, not exposure.
+        """
 
     async def on_stop(self) -> None:
         """Called when the session is shutting down."""
 
-    async def on_rebuild(self, remembered: dict[str, str]) -> None:
-        """Called when this session ran before and is being restored.
+    # --- availability (F14, §5.6) -------------------------------------------
+    #
+    # Connectivity, not content. A feed going down does not fail the session and
+    # an account going away does not either: the platform forwards what MD and
+    # TD say about themselves, and what to do about it is the strategy's.
 
-        STS calls this from the rebuild scan, before :meth:`on_start`, so
-        every later hook already sees whatever this restores — including
-        :meth:`on_recon_done`, which is where a strategy has to know these
-        orders are its own. Recon follows as usual, and what it brings is
-        *yours*: the orders it reports are the ones this session placed
-        before the restart, not another session's. ``remembered`` carries
-        whatever was written with :meth:`remember`.
+    async def on_md_update(
+        self, feed: str, state: FeedState, reason: str
+    ) -> None:
+        """Handle a feed becoming ``"live"`` or ``"down"``.
 
-        Restore from those two, not from a saved copy of your own attributes.
-        Anything the venue can tell you (resting orders, fills, position) must
-        come from recon, because between the restart and now an order can have
-        filled, been cancelled or been rejected, and a stale copy would have
-        you act on something that is no longer true.
+        Connectivity only. This hook does not carry a book, a trade, or any
+        other market-data print — those stay on their own hooks.
 
-        The class must also set :attr:`rebuildable`. Without that the scan
-        leaves the session interrupted: a strategy that does not know it was
-        away treats recon as a clean account and places beside what it left
-        resting.
+        ``reason`` is why the feed moved: the venue dropped the socket, the
+        connection worker changed incarnation, the broadcasts went silent,
+        the session's own broker reconnected.
+
+        There is no gap notification (F23). A strategy that needs to know what
+        it missed records the ``down`` and works it out from the ``live`` that
+        follows; on an ``all`` feed, ``event.seq`` is the other half of that.
+
+        A composite feed is ``down`` when any of its atoms is, and ``live`` only
+        when all of them are back (F19). Terminal endings are not here —
+        expiry and delisting arrive as :meth:`on_feed_end`.
+        """
+
+    async def on_td_update(
+        self, api_id: int, state: AccountState, reason: str
+    ) -> None:
+        """Handle an account becoming ``"ready"``, ``"degraded"`` or
+        ``"unavailable"``.
+
+        Availability only. Fills, rejects and order updates stay on their own
+        hooks; this one does not carry them.
+
+        ``degraded`` means orders can still be sent but confirmations will be
+        late — submits are not refused, because a strategy that has to flatten
+        is better served by a slow answer than by none. ``unavailable`` means
+        submits and cancels are refused locally and never sent.
+
+        An account coming back from ``unavailable`` because its worker was
+        replaced arrives as :meth:`on_resync` first, then ``ready``.
         """
 
     # --- TD recon ----------------------------------------------------------
 
-    async def send_recon(self, api_id: int) -> None:
-        """Ask TD for an async OMS snapshot for ``api_id``.
-
-        TD answers with :meth:`on_recon_done` from its current book when clean,
-        or after it has settled any UNKNOWN orders. This does not ask TD to
-        hit the venue on behalf of the strategy.
-        """
-        if self.session is None:
-            raise RuntimeError("strategy is not bound to a session")
-        await self.session.broker.publish(
-            Topics.sts_td_session(self.session.session_id),
-            Envelope[Recon].wrap(
-                Recon(session_id=self.session.session_id, api_id=api_id),
-                type=STS_RECON,
-                source=f"strategy.{self.registry_key}",
-                session_id=self.session.session_id,
-            ),
-        )
-
     async def on_recon_done(self, msg: ReconDone) -> None:
         """Handle reconciliation-complete from TD. OMS is in ``self.oms``."""
+
+    async def on_resync(self, api_id: int, cause: str, view: OmsView) -> None:
+        """Handle a book that had to be rebuilt, or a stream that may have a
+        hole in it (F13).
+
+        Only ever after :meth:`on_ready`, and only from the platform — a
+        strategy does not ask for this. Two causes:
+
+        ``"reconnect"``
+            The session's own broker connection dropped. Fills and order
+            updates published while it was gone were not retained.
+        ``"account_reset"``
+            The TD account worker changed incarnation and rebuilt its book from
+            the venue.
+
+        ``view`` is the account worker's settled ``oms.view``, read on the
+        ingress, off this thread. UNKNOWN orders were chased first. Anything
+        the strategy accumulated from events should be corrected against it
+        rather than trusted: a chase that missed a fill will otherwise
+        re-send an order for size it already has. The hook is not called
+        when that read is refused or times out, so a missing call is not
+        an empty book.
+
+        TD's own reconcile after a venue reconnect does not arrive here. Its
+        findings reach the strategy as ordinary order updates.
+        """
 
     # --- private events (td.{api_id}.global) --------------------------------
     #
@@ -412,6 +479,15 @@ class Strategy:
     # One hook per md feed topic. A session only receives what it subscribed
     # to in ``md_ids`` (``topic.UniversalTicker``). Session validates wire JSON
     # into the shared ``mftik.exchange.models`` shapes before the hook runs.
+    #
+    # The object the hook receives also answers ``recv_ts`` and ``age``
+    # (§5.3). ``recv_ts`` is when the ingress received the frame. ``age``
+    # is how many seconds that was, computed when the strategy reads it.
+    # MD objects also answer ``seq``: the connection worker's per-atom
+    # sequence from the envelope (F25). ``None`` means that frame carried
+    # no sequence. A hole on an ``all`` feed is a loss the strategy notices
+    # itself. A hole on ``latest`` is conflation, not a loss (F23). TD
+    # payloads answer ``seq`` with ``None``. Nothing here mints a sequence.
 
     async def on_ticker(self, ticker: Ticker) -> None:
         """Handle ticker updates from MD — 24h stats + top of book.
@@ -546,6 +622,25 @@ class Strategy:
             level="warning",
         )
 
+    async def on_universe_change(self, name: str, change: UniverseChange) -> None:
+        """Handle a ``select:`` block's membership moving (F33).
+
+        ``name`` is the ``select:`` name from ``strategy.yml`` (``btc_chain``).
+        ``change.added`` and ``change.removed`` are the contracts that joined
+        and left, ``change.epoch`` orders one change against the next, and
+        ``change.current`` is a rolling future's front contract — a roll comes
+        through here too, not through a hook of its own.
+
+        A contract in ``added`` is already subscribed when this is called, and a
+        contract in ``removed`` sends nothing after it returns, including
+        anything already queued (I-SEL1). So a strategy can key its own state on
+        this hook without a window where an event arrives for a contract it has
+        not set up, or for one it has torn down.
+
+        The old contract of a roll stays in the universe until it expires, and
+        arrives in ``removed`` after an :meth:`on_feed_end`.
+        """
+
     # --- query answers -----------------------------------------------------
     #
     # One hook per kind of query, each firing once per ``mds.fetch_*`` call and
@@ -622,6 +717,65 @@ class Strategy:
         ``qty`` of zero is a real print.
         """
 
+    # --- heavy computation (F9, §5.5) ---------------------------------------
+
+    async def offload(
+        self, func: Callable[..., Any], /, *args: Any, isolate: bool = False
+    ) -> Any:
+        """Run ``func(*args)`` off the strategy loop and return its result.
+
+        For anything that would otherwise occupy the loop long enough to matter
+        to the strategy itself — a fit, an inference, folding a tape. While it
+        runs the loop is free, so fills, timers and a stop still get served, and
+        a hook that awaits this is not counted as blocked (F15).
+
+        ``isolate=False`` (default) uses a thread, which suits work that
+        releases the GIL — numpy, torch — and needs no pickling. It cannot be
+        interrupted: at teardown the await is cancelled and the thread runs on.
+
+        ``isolate=True`` uses a child process, which suits pure-Python work, C
+        extensions that hold the GIL, and anything that might exhaust memory.
+        ``func`` and ``args`` have to be picklable and ``func`` has to be
+        importable at module level, and the child is killable. It raises
+        :class:`~mftik.strategy.errors.OffloadWorkerLost` if the child dies.
+
+        ``func`` must not call the SDK. Pass what it needs and return what it
+        produced; in thread mode it must not mutate the strategy either, which
+        is still running its own loop alongside. Parallelism comes from
+        ``limits.offload_threads`` / ``limits.offload_processes``.
+
+        Raises :class:`NotImplementedError` until B5-03.
+        """
+        raise NotImplementedError("IF-06")
+
+    async def offload_pool(
+        self,
+        *,
+        init: Callable[..., Any] | None = None,
+        init_args: tuple[Any, ...] = (),
+        workers: int = 1,
+    ) -> OffloadPool:
+        """A process pool that keeps what ``init`` loaded, between calls.
+
+        ``init(*init_args)`` runs once in each worker and its return value is
+        handed to every :meth:`~mftik.strategy.offload.OffloadPool.call` as the
+        first argument — so a model is loaded once in the child rather than
+        pickled on every call::
+
+            self.ml = await self.offload_pool(init=load_model, init_args=(p,))
+            signal = await self.ml.call(predict, features)
+
+        ``workers`` is how many child processes to run.
+
+        Usable from ``on_start``, which is where a warm-up of this kind belongs.
+        The workers are part of the session's process tree: counted against its
+        memory at admission, killed with it, and rebuilt — ``init`` and all — if
+        one is lost.
+
+        Raises :class:`NotImplementedError` until B5-03.
+        """
+        raise NotImplementedError("IF-06")
+
     # --- helpers -----------------------------------------------------------
 
     def exit(self, reason: str = "strategy_exit") -> None:
@@ -645,24 +799,6 @@ class Strategy:
         if self.session is None:
             raise RuntimeError("strategy is not bound to a session")
         self.session.request_exit(reason, failed=True)
-
-    async def remember(self, key: str, value: str) -> None:
-        """Persist one fact so a rebuilt session can have it back.
-
-        For what a restart destroys and nothing else can supply — the price a
-        chase anchored its slippage guard on, the moment a clock started.
-        Configuration is already kept (``st_paras``) and anything the venue
-        knows comes back through recon; this is for neither.
-
-        Write at the moment the fact becomes true, not on the way out: a
-        process that is killed outright runs no shutdown code, and that is
-        exactly the case a rebuild exists for. Facts written here are expected
-        to be established once and never change — re-``remember``ing a moving
-        value stores something that will be wrong by the time it is read.
-        """
-        if self.session is None:
-            raise RuntimeError("strategy is not bound to a session")
-        await self.session.remember(key, value)
 
     async def log(self, message: str, *, level: str = "info", **extra: Any) -> None:
         if self.session is None:

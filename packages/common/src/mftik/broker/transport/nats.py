@@ -131,6 +131,23 @@ class NatsTransport(BrokerTransport):
             )
             self._owns_connection = True
 
+    def set_reconnect_handlers(
+        self,
+        *,
+        disconnected: Any = None,
+        reconnected: Any = None,
+    ) -> None:
+        """Replace the callbacks nats-py awaits on a drop and a reconnect.
+
+        The client reads the attributes when the event happens, so setting
+        them after :meth:`connect` is enough. Callers must pass coroutines
+        the client can await, and those coroutines must not request on this
+        same connection.
+        """
+        client = self.nc
+        client._disconnected_cb = disconnected  # noqa: SLF001
+        client._reconnected_cb = reconnected  # noqa: SLF001
+
     async def close(self) -> None:
         if self._nc is not None and self._owns_connection:
             with contextlib.suppress(Exception):
@@ -148,6 +165,40 @@ class NatsTransport(BrokerTransport):
     async def publish(self, topic: str, raw: str) -> None:
         await self.nc.publish(self._fanout_subject(topic), raw.encode())
 
+    async def publish_with_reply(self, subject: str, raw: str, *, reply: str) -> None:
+        """Publish on the RPC subject and force the bytes onto the socket.
+
+        ``nc.request`` replies on the same connection. The strategy thread
+        publishes here and waits on a future the ingress completes, because
+        a hook can hold this loop longer than the ack timeout. Without the
+        flush the publish sits in the client buffer until that hook
+        returns, and the ack is late for a reason that is not TD.
+        """
+        await self.nc.publish(
+            self._rpc_subject(subject), raw.encode(), reply=reply
+        )
+        await self._drain_pending()
+
+    async def flush(self) -> None:
+        """Force buffered publishes out. See :meth:`publish_with_reply`."""
+        await self._drain_pending()
+
+    async def subscribe_core(
+        self,
+        subjects: Sequence[str],
+        *,
+        stop: asyncio.Event | None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(subject, raw)`` for subjects that are already NATS subjects.
+
+        Fan-out goes through :meth:`subscribe`, which adds the ``ps``
+        prefix. A reply inbox does not: TD answers ``msg.reply`` as the
+        subject it was given.
+        """
+        async for item in self._consume(list(subjects), stop=stop, ready=ready):
+            yield item
+
     async def subscribe(
         self,
         topics: Sequence[str],
@@ -160,10 +211,14 @@ class NatsTransport(BrokerTransport):
             yield item
 
     async def psubscribe(
-        self, patterns: Sequence[str], *, stop: asyncio.Event | None
+        self,
+        patterns: Sequence[str],
+        *,
+        stop: asyncio.Event | None,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[tuple[str, str]]:
         subjects = [f"{self._prefix}.ps.{p}" for p in patterns]
-        async for item in self._consume(subjects, stop=stop, ready=None):
+        async for item in self._consume(subjects, stop=stop, ready=ready):
             yield item
 
     async def _drain_pending(self) -> None:

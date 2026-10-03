@@ -5,9 +5,14 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from bitget_stub import API_KEY, API_SECRET, PASSPHRASE, FakeBitget
 from mftik.exchange.bitget.account import BitgetPrivateStream
 from mftik.exchange.bitget.channels import orders
+
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
 
 
 async def _until(predicate, *, timeout: float = 2.0) -> None:
@@ -53,6 +58,9 @@ async def test_two_consumers_share_one_uta_orders_subscription(
         assert (await asyncio.wait_for(second.__anext__(), 2)).symbol == "BTCPERP"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_re_logs_in_before_any_subscribe(bitget: FakeBitget) -> None:
     async with _feed(bitget) as feed:
         await feed.subscribe_orders()

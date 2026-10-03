@@ -139,8 +139,15 @@ class BackfillExecutor:
         *,
         tickers: Sequence[str] = (),
         reason: str = "",
+        client: Any = None,
     ) -> BackfillOutcome:
-        """Walk ``api_id``'s history. Never raises; refusals come back as data."""
+        """Walk ``api_id``'s history. Never raises; refusals come back as data.
+
+        ``client`` is the resident pool's HTTP client when the account
+        worker runs the walk. ``None`` means the reader opens its own,
+        which is the TD-process fallback. The reader must not close a
+        client it was given.
+        """
         token = uuid.uuid4().hex
         if not await self._lock(api_id, token):
             logger.info("TD backfill skipped api_id=%s: already running", api_id)
@@ -148,7 +155,7 @@ class BackfillExecutor:
                 api_id=api_id, reason="another run holds this account"
             )
         try:
-            return await self._run_locked(api_id, tickers, reason)
+            return await self._run_locked(api_id, tickers, reason, client)
         except Exception as exc:
             logger.exception("TD backfill failed api_id=%s", api_id)
             return BackfillOutcome(api_id=api_id, ok=False, reason=str(exc))
@@ -156,7 +163,11 @@ class BackfillExecutor:
             await self._unlock(api_id, token)
 
     async def _run_locked(
-        self, api_id: int, tickers: Sequence[str], reason: str
+        self,
+        api_id: int,
+        tickers: Sequence[str],
+        reason: str,
+        client: Any,
     ) -> BackfillOutcome:
         row = await self._load_api(api_id)
         if row is None:
@@ -164,7 +175,7 @@ class BackfillExecutor:
                 api_id=api_id, ok=False, reason=f"no api row for {api_id}"
             )
         try:
-            reader = await self._factory.create(row.venue, row)
+            reader = await self._factory.create(row.venue, row, client=client)
         except NoHistoryReaderError as exc:
             # Not a failure: the venue simply cannot be re-read, and the record
             # goes on saying so by leaving its cursors where they are.

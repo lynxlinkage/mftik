@@ -27,6 +27,9 @@ from mftik.strategy import Strategy
 from mftik.strategy.oms import WAIT_CIDS_TIMEOUT_S, StrategyOms
 from mftik_sts.session.session import StsSession
 
+# B2-05: borrows NATS to test ``wait_cids``. Direct handler call: B6-08 (#226).
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -163,6 +166,9 @@ async def test_wait_cids_times_out_while_still_pending(broker: Broker) -> None:
         await book.close()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_signal_wakes_wait_cids(broker: Broker) -> None:
     book = _Book(broker)
@@ -184,6 +190,9 @@ async def test_a_signal_wakes_wait_cids(broker: Broker) -> None:
         await book.close()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_dropped_terminal_uses_the_fan_out_order(
     broker: Broker,
@@ -212,6 +221,9 @@ async def test_a_dropped_terminal_uses_the_fan_out_order(
         await book.close()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_every_cid_must_match(broker: Broker) -> None:
     book = _Book(broker)
@@ -241,6 +253,9 @@ async def test_wait_cids_rejects_a_negative_timeout(broker: Broker) -> None:
         await oms.wait_cids(7, "x", until=_not_pending, timeout=-1)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_td_fan_out_wakes_wait_cids(broker: Broker) -> None:
     """Session dispatch signals OMS after the strategy hook returns."""
@@ -255,7 +270,6 @@ async def test_td_fan_out_wakes_wait_cids(broker: Broker) -> None:
             created_by=1,
             strategy=strategy,
             td_api_ids=[7],
-            heartbeat_interval=0.1,
         )
 
         async def publish_new() -> None:
@@ -278,6 +292,9 @@ async def test_td_fan_out_wakes_wait_cids(broker: Broker) -> None:
         await book.close()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_raising_hook_still_wakes_wait_cids(broker: Broker) -> None:
     book = _Book(broker)
@@ -298,7 +315,6 @@ async def test_a_raising_hook_still_wakes_wait_cids(broker: Broker) -> None:
             created_by=1,
             strategy=strategy,
             td_api_ids=[7],
-            heartbeat_interval=0.1,
         )
 
         async def publish_new() -> None:
@@ -321,6 +337,9 @@ async def test_a_raising_hook_still_wakes_wait_cids(broker: Broker) -> None:
         await book.close()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_an_order_reject_clears_a_pending_cid(broker: Broker) -> None:
     book = _Book(broker)
@@ -334,7 +353,6 @@ async def test_an_order_reject_clears_a_pending_cid(broker: Broker) -> None:
             created_by=1,
             strategy=strategy,
             td_api_ids=[7],
-            heartbeat_interval=0.1,
         )
 
         async def reject() -> None:

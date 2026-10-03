@@ -58,6 +58,32 @@ def test_untyped_envelope_accepts_dict_payload() -> None:
     assert restored.payload["last"] == 1.0
 
 
+def test_seq_is_optional_and_roundtrips() -> None:
+    """MD per-atom seq (F25). A frame that omits it still parses, and ``pv`` stays."""
+    plain = UntypedEnvelope.wrap(
+        {"symbol": "BTCUSDT"},
+        type="md.orderbook",
+        source="md/conn/Paper/public/0",
+    )
+    assert plain.seq is None
+    assert UntypedEnvelope.from_json(plain.to_json()).seq is None
+
+    omitted = (
+        '{"id":"a","type":"md.orderbook","source":"md","pv":2,"ts":1,"payload":{}}'
+    )
+    assert UntypedEnvelope.from_json(omitted).seq is None
+
+    stamped = UntypedEnvelope.wrap(
+        {"symbol": "BTCUSDT"},
+        type="md.orderbook",
+        source="md/conn/Paper/public/0",
+        seq=3,
+    )
+    assert stamped.seq == 3
+    assert stamped.pv == plain.pv
+    assert UntypedEnvelope.from_json(stamped.to_json()).seq == 3
+
+
 def test_envelope_is_frozen() -> None:
     env = HeartbeatEnvelope.wrap(Heartbeat(), type="heartbeat", source="md")
     try:

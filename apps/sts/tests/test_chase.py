@@ -33,6 +33,10 @@ from mftik.protocol import (
 )
 from mftik_sts.impl.chase import IOC_MAX_SLICES, ChaseOrder, _floor_hint
 
+# §9.1 component (chase.py still sleeps on the wall clock).
+# Slow cases miss the 50 ms unit cap; 500 ms still applies.
+pytestmark = pytest.mark.component
+
 BTCUSDT = SymbolInfo(
     universal_ticker="Paper_Spot_BTCUSDT",
     base="BTC",
@@ -184,9 +188,6 @@ class FakeSession:
         #: Reasons the strategy ended as ``failed`` rather than ``done``.
         self.failures: list[str] = []
 
-        #: What the strategy asked to have kept for a rebuild.
-        self.remembered: dict[str, str] = {}
-
     def request_exit(self, reason: str, *, failed: bool = False) -> None:
         self.exits.append(reason)
         if failed:
@@ -197,9 +198,6 @@ class FakeSession:
         if len(ids) != 1:
             raise RuntimeError(f"needs exactly one td account, got {ids}")
         return ids[0]
-
-    async def remember(self, key: str, value: str) -> None:
-        self.remembered[key] = value
 
 
 class FakeTimer:
@@ -490,6 +488,9 @@ async def test_a_partial_fill_keeps_chasing_the_remainder() -> None:
     assert strat.oms.submitted[1]["qty"] == Decimal("0.06")
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_expiry_ends_the_session() -> None:
     strat = _strategy(expiry_s=30, must_exec=False)
@@ -505,6 +506,9 @@ async def test_expiry_ends_the_session() -> None:
     assert all(o["type"] is OrderType.LIMIT for o in strat.oms.submitted)
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_expiry_with_must_exec_sweeps_the_rest_with_ioc() -> None:
     strat = _strategy(qty=Decimal("0.1"), expiry_s=30, must_exec=True)
@@ -531,6 +535,12 @@ async def test_expiry_with_must_exec_sweeps_the_rest_with_ioc() -> None:
     assert strat.session.exits == ["chase_expired"]
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_takes_one_level_at_a_time() -> None:
     """Slice by slice off the touch, rather than one walk down the book."""
@@ -553,6 +563,12 @@ async def test_the_sweep_takes_one_level_at_a_time() -> None:
     assert strat._remaining() == Decimal("0")
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_reprices_off_a_fresher_quote_each_slice() -> None:
     """Quotes keep arriving while the sweep pauses; each slice reads the last."""
@@ -575,6 +591,12 @@ async def test_the_sweep_reprices_off_a_fresher_quote_each_slice() -> None:
     assert slices[-1]["price"] == Decimal("50010")
 
 
+# chase.py wall-clock sleep; over the 500 ms component cap.
+# B5 rewrites this onto FakeClock.
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_gives_up_rather_than_looping_forever() -> None:
     """must_exec is a promise the venue can still refuse to let us keep."""
@@ -591,6 +613,9 @@ async def test_the_sweep_gives_up_rather_than_looping_forever() -> None:
     assert strat.session.exits == ["chase_expired"]
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_slippage_past_extreme_bps_ends_the_session() -> None:
     strat = _strategy(side="buy", extreme_bps=50, must_exec=False)
@@ -615,6 +640,9 @@ async def test_slippage_is_measured_in_the_direction_that_costs() -> None:
     assert strat.session.exits == []
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_a_sell_slips_when_the_bid_falls() -> None:
     strat = _strategy(side="sell", extreme_bps=50)
@@ -640,6 +668,9 @@ async def test_a_complete_fill_at_expiry_sends_no_market_order() -> None:
     assert len(strat.oms.submitted) == before
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_it_ends_only_once() -> None:
     strat = _strategy(expiry_s=30, must_exec=True)
@@ -746,6 +777,9 @@ async def test_any_other_td_refusal_also_stops() -> None:
     assert strat.session.failures == ["chase_refused"]
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_stops_on_a_refusal_instead_of_burning_its_budget() -> None:
     strat = _strategy(qty=Decimal("0.1"), expiry_s=30, must_exec=True)
@@ -804,6 +838,9 @@ async def test_exactly_enough_is_enough() -> None:
     assert strat.session.exits == []
 
 
+@pytest.mark.real_sleep(
+    reason="chase.py still sleeps on the wall clock"
+)
 @pytest.mark.asyncio
 async def test_the_sweep_checks_the_ledger_too() -> None:
     strat = _strategy(qty=Decimal("0.1"), expiry_s=30, must_exec=True)
@@ -878,129 +915,20 @@ async def test_the_recon_deadline_is_a_no_op_once_armed() -> None:
     assert strat.session.exits == []
 
 
-# --- rebuild ---------------------------------------------------------------
-
-
-def _restorable(**paras) -> ChaseOrder:
-    """A chase that has not been armed — as one is when it is rebuilt.
-
-    ``owns`` discriminates here, unlike in :func:`_strategy`: adopting orders
-    on rebuild rests entirely on it, and a stub that says yes to everything
-    would hide the one thing these tests are checking.
-    """
-    strat = _strategy(**paras)
+@pytest.mark.asyncio
+async def test_arming_sets_the_clock_and_the_anchor() -> None:
+    """Both live in this process only: recon starts the expiry clock, and the
+    first quote after it is what the slippage guard measures against."""
+    strat = _strategy()
     strat._armed = False
     strat._started_ms = None
     strat._ref_start = None
-    strat.owns = lambda cid: str(cid).startswith("mine-")  # type: ignore[method-assign]
-    return strat
 
-
-@pytest.mark.asyncio
-async def test_arming_keeps_the_clock_and_the_anchor() -> None:
-    """Both are set once and seen by nothing outside the process, so they are
-    written when they become true rather than on the way out."""
-    strat = _restorable()
     await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
     await strat.on_best_quote(_quote("49999", "50000"))
 
-    assert strat.session.remembered["started_ms"] == str(strat._started_ms)
-    assert strat.session.remembered["ref_start"] == "50000"
-
-
-@pytest.mark.asyncio
-async def test_a_rebuilt_chase_does_not_restart_its_expiry_budget() -> None:
-    strat = _restorable(expiry_s=30)
-    started = strat.timer.now_ms() - 25_000
-
-    await strat.on_rebuild(
-        {"started_ms": str(started), "ref_start": "50000"}
-    )
-    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
-
-    assert strat._started_ms == started
-    # 25 of the 30 seconds are already gone; five more end it.
-    assert not strat._expired()
-    strat.timer.advance_s(6)
-    assert strat._expired()
-
-
-@pytest.mark.asyncio
-async def test_a_rebuilt_chase_keeps_the_slippage_it_already_ran() -> None:
-    """Re-anchoring on the current quote would forget how far the market has
-    already moved against it and grant a fresh allowance."""
-    strat = _restorable(extreme_bps=50)
-    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
-    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
-
-    # The market moved 40bps away while STS was down.
-    await strat.on_best_quote(_quote("50199", "50200"))
-
+    assert strat._started_ms == strat.timer.now_ms()
     assert strat._ref_start == Decimal("50000")
-    assert strat._slippage_bps() == pytest.approx(Decimal("40"), abs=Decimal("0.5"))
-
-
-@pytest.mark.asyncio
-async def test_a_rebuilt_chase_adopts_what_it_left_resting() -> None:
-    """The resting order comes from recon, not from anything remembered: only
-    the venue knows whether it survived the outage."""
-    strat = _restorable()
-    cid = "mine-1"
-    resting = _update(cid, "0.03", OrderStatus.PARTIALLY_FILLED)
-
-    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
-    await strat.on_recon_done(
-        ReconDone(session_id="s1", api_id=7, oms=OmsView(orders={cid: resting}))
-    )
-
-    assert strat._open_cid == cid
-    assert strat._open_price == Decimal("50000")
-    assert strat._filled_qty() == Decimal("0.03")
-
-
-@pytest.mark.asyncio
-async def test_an_order_that_finished_while_away_is_counted_not_adopted() -> None:
-    strat = _restorable()
-    cid = "mine-2"
-    filled = _update(cid, "0.1", OrderStatus.FILLED)
-
-    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
-    await strat.on_recon_done(
-        ReconDone(session_id="s1", api_id=7, oms=OmsView(orders={cid: filled}))
-    )
-
-    assert strat._open_cid is None
-    assert strat._filled_qty() == Decimal("0.1")
-
-
-@pytest.mark.asyncio
-async def test_another_sessions_orders_are_not_adopted() -> None:
-    """`owns()` is what makes this safe, and it works because the rebuild kept
-    the session's cid slot."""
-    strat = _restorable()
-    theirs = _update("theirs-1", "0.05", OrderStatus.NEW)
-
-    await strat.on_rebuild({"started_ms": "1", "ref_start": "50000"})
-    await strat.on_recon_done(
-        ReconDone(
-            session_id="s1", api_id=7, oms=OmsView(orders={"theirs-1": theirs})
-        )
-    )
-
-    assert strat._open_cid is None
-    assert strat._filled_qty() == Decimal("0")
-
-
-@pytest.mark.asyncio
-async def test_unreadable_facts_do_not_stop_the_rebuild() -> None:
-    """A fact that cannot be parsed is worth a warning, not a dead session."""
-    strat = _restorable()
-    await strat.on_rebuild({"started_ms": "not-a-number", "ref_start": "junk"})
-    await strat.on_recon_done(ReconDone(session_id="s1", api_id=7, oms=OmsView()))
-
-    assert strat._armed
-    # Fell back to arming fresh rather than refusing to come back.
-    assert strat._ref_start is None
 
 
 # --- sizing against the venue's floor ---------------------------------------

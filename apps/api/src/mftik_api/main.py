@@ -13,6 +13,7 @@ from mftik_api.alert_match import run_alert_match
 from mftik_api.auth import AuthMiddleware, auth_router
 from mftik_api.backfill_cron import run_backfill_cron
 from mftik_api.log_persist import run_log_persist
+from mftik_api.procman_reports import run_procman_reports
 from mftik_api.registry_catchup import serve_registry_catchup
 from mftik_api.routes import (
     alerts_router,
@@ -30,6 +31,7 @@ from mftik_api.routes import (
     sts_router,
     sym_router,
     td_router,
+    workers_router,
 )
 from mftik_api.ws import (
     board_bridge,
@@ -84,6 +86,8 @@ async def lifespan(app: FastAPI):
     catchup_task = asyncio.create_task(
         serve_registry_catchup(broker, catchup_stop)
     )
+    report_stop = asyncio.Event()
+    report_task = asyncio.create_task(run_procman_reports(report_stop))
     try:
         yield
     finally:
@@ -91,7 +95,14 @@ async def lifespan(app: FastAPI):
         match_stop.set()
         backfill_stop.set()
         catchup_stop.set()
-        for task in (persist_task, match_task, backfill_task, catchup_task):
+        report_stop.set()
+        for task in (
+            persist_task,
+            match_task,
+            backfill_task,
+            catchup_task,
+            report_task,
+        ):
             try:
                 await asyncio.wait_for(task, timeout=10)
             except (TimeoutError, asyncio.CancelledError):
@@ -134,6 +145,7 @@ app.include_router(audits_router)
 app.include_router(logs_router)
 app.include_router(board_router)
 app.include_router(alerts_router)
+app.include_router(workers_router)
 
 
 @app.websocket("/ws/board")
@@ -173,7 +185,7 @@ def run() -> None:
     # means uvloop whenever uvloop imports — which it always has here, because
     # it arrives as a ``uvicorn[standard]`` extra. So this changes no behaviour;
     # it removes an accident. The domains now say the same thing at their own
-    # entrypoints (docs/EventLoop.md), and a node running one loop on purpose is
+    # entrypoints (docs/archive/EventLoop.md), and a node running one loop on purpose is
     # worth more than a node running the right one by luck: with ``auto``, a
     # dependency bump that dropped the extra would move the API off uvloop and
     # nothing would say so but a latency graph.

@@ -103,11 +103,6 @@ holding of the base asset belongs to whoever put it there. The strategy starts
 flat, counts its own fills, and never sends ``reduce_only`` — TD refuses a spot
 order carrying it, which is the correct answer to asking for a guarantee spot
 cannot give.
-
-**Rebuild.** Off. The position is real and recon would report it, but reasoning
-about a restored position against an indicator rebuilt from a different stretch
-of tape is a decision this strategy has not been given. See
-:meth:`~mftik.strategy.Strategy.on_rebuild`.
 """
 
 from __future__ import annotations
@@ -133,7 +128,6 @@ from mftik.exchange.oms import Position
 from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol import CancelReject, OrderReject, ReconDone, SymbolInfo
 from mftik.strategy import Strategy
-from mftik.strategy.tape import breathe, slice_deadline
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +258,6 @@ class _BarBuilder:
 
 class MacdDollarBars(Strategy):
     """MACD on dollar bars. Long only, IOC through the touch."""
-
-    rebuildable = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -416,18 +408,13 @@ class MacdDollarBars(Strategy):
         # The read does not keep the prints. What can overlap the live feed
         # is only the tail, so that is all that stays after each one is folded.
         seen_tail: deque[str] = deque(maxlen=_OVERLAP_GUARD)
-        deadline = slice_deadline()
         handler_error: Exception | None = None
 
-        async def on_print(record: Trade) -> None:
-            nonlocal deadline, handler_error
+        def on_print(record: Trade) -> None:
+            nonlocal handler_error
             if handler_error is not None:
                 return
             try:
-                # Still this task, on the loop the lease heartbeat is waiting
-                # on. The read yields while it parses; folding the print has
-                # to yield too, or the stall just moves here.
-                deadline = await breathe(deadline)
                 self._ingest(record)
                 if record.trade_id:
                     seen_tail.append(record.trade_id)

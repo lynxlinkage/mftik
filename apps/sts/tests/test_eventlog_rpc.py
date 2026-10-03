@@ -12,7 +12,6 @@ import asyncio
 import base64
 import gzip
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from broker_harness import a_broker
@@ -33,6 +32,10 @@ from mftik.protocol import (
 from mftik.strategy.eventlog import DIR_ENV
 from mftik_sts.rpc import dispatch
 
+# B2-05: borrows NATS to test operator event-log reads. Direct handler
+# call: B5-11 (#277). B5-02 (#211) changes the file layout those reads follow.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -42,20 +45,20 @@ async def broker() -> Broker:
 
 @pytest.fixture
 async def sts_rpc(broker: Broker):
-    """A running STS RPC server, with a stub session manager."""
+    """A running STS RPC server.
+
+    ``instance`` is part of the interface: a part says whose disk it is on,
+    so a read of it can be addressed there.
+    """
     stop = asyncio.Event()
-    live: dict[str, object] = {}
-    # ``instance`` is part of the interface now: a part says whose disk
-    # it is on, so a read of it can be addressed there.
-    sessions = SimpleNamespace(get=live.get, instance="sts")
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=sessions)
+            await dispatch(req, instance="sts")
 
     task = asyncio.create_task(serve())
     await asyncio.sleep(0.02)
-    yield live
+    yield
     stop.set()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
@@ -104,6 +107,9 @@ def _write_parts(tmp_path: Path, session_id: str) -> dict[str, bytes]:
     return bodies
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_info_lists_the_parts_oldest_first(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:
@@ -126,6 +132,9 @@ async def test_info_lists_the_parts_oldest_first(
     assert info.live is False
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_info_separates_off_from_absent(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:
@@ -142,18 +151,9 @@ async def test_info_separates_off_from_absent(
     assert absent.parts == []
 
 
-async def test_info_flags_a_session_still_running(
-    broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
-) -> None:
-    """A download of a live session is a prefix, and should say so."""
-    monkeypatch.setenv(DIR_ENV, str(tmp_path))
-    _write_parts(tmp_path, "s1")
-    sts_rpc["s1"] = object()
-
-    info = StsEventLogInfo.model_validate((await _info(broker, "s1")).payload)
-    assert info.live is True
-
-
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_read_returns_the_bytes_gzipped(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:
@@ -169,6 +169,11 @@ async def test_read_returns_the_bytes_gzipped(
     assert chunk.eof is True
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+# private NATS plus a real sleep; over the 50 ms unit cap.
+@pytest.mark.integration
 async def test_chunks_concatenate_into_one_valid_gzip(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:
@@ -192,6 +197,9 @@ async def test_chunks_concatenate_into_one_valid_gzip(
     assert gzip.decompress(blob) == body
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_part_that_was_not_listed_is_refused(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:
@@ -206,6 +214,9 @@ async def test_a_part_that_was_not_listed_is_refused(
         assert RpcError.model_validate(reply.payload).code == "not_found"
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_reading_past_the_end_is_empty_and_final(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:
@@ -220,6 +231,9 @@ async def test_reading_past_the_end_is_empty_and_final(
     assert chunk.eof is True
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_read_cannot_ask_for_an_unbounded_slice(
     broker: Broker, sts_rpc, tmp_path: Path, monkeypatch
 ) -> None:

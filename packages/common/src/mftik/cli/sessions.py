@@ -48,6 +48,25 @@ def stop_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def render_log_page(body: object) -> None:
+    """Print one ``GET /logs/sts/{id}`` page, oldest line first.
+
+    The API pages newest-first. ``mftik logs`` and a finished ``mftik run``
+    share this so the two dumps read the same.
+    """
+    rows: list[object] = []
+    if isinstance(body, dict):
+        raw = body.get("logs") or []
+        if isinstance(raw, list):
+            rows = raw
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        level = str(row.get("level") or "info")
+        message = str(row.get("message") or "")
+        print(f"{level}  {message}")
+
+
 def logs(args: argparse.Namespace) -> int:
     _, client = connected(args.profile)
     with client:
@@ -55,12 +74,7 @@ def logs(args: argparse.Namespace) -> int:
             follow_logs(client, args.session_id)
             return 0
         body = client.get(f"/logs/sts/{args.session_id}")
-    rows = list(body.get("logs") or [])
-    # The API pages newest-first. A dump is read top to bottom in time.
-    for row in reversed(rows):
-        level = str(row.get("level") or "info")
-        message = str(row.get("message") or "")
-        print(f"{level}  {message}")
+    render_log_page(body)
     return 0
 
 

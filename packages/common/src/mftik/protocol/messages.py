@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mftik.exchange.delivery_stamp import HasDelivery
 from mftik.exchange.models import (
     BestQuote,
     FundingRate,
@@ -23,7 +24,13 @@ from mftik.exchange.tickers import Category, UniversalTicker
 from mftik.protocol.envelope import Envelope
 from mftik.protocol.query_codes import QueryCode
 from mftik.protocol.reject_codes import RejectCode
-from mftik.protocol.strategy_yml import TdAccountRef, load_md
+from mftik.protocol.strategy_yml import (
+    RESTART_MODES,
+    RESTART_NEVER,
+    RESTART_ON_FAILURE,
+    TdAccountRef,
+    load_md,
+)
 
 
 class Heartbeat(BaseModel):
@@ -71,7 +78,7 @@ class HealthStatus(BaseModel):
     Carries what a presence registry would have held, and carries it *fresher*:
     these are read off the answering process at the moment it answers, where a
     TTL'd key would be up to its whole TTL out of date. See
-    ``docs/Instances.md``.
+    ``docs/archive/Instances.md``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -136,27 +143,6 @@ class RpcError(BaseModel):
     message: str
 
 
-class TdAttachRequest(BaseModel):
-    """API → TD: attach trading api_id to an STS session."""
-
-    model_config = ConfigDict(frozen=True)
-
-    api_id: int
-    session_id: str
-    created_by: int
-    timeout: float = 30.0
-
-
-class TdAttachResult(BaseModel):
-    """TD → API: attach succeeded (lease heartbeat observed)."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    api_id: int
-    refcount: int
-
-
 class TdBackfill(BaseModel):
     """Anyone → TD: re-read this account's history from the venue.
 
@@ -195,41 +181,16 @@ class TdBackfillResult(BaseModel):
     reason: str = ""
 
 
-class TdDetachRequest(BaseModel):
-    """STS → TD: drop this attach (refcount --), and say so.
-
-    Request-reply rather than a message on the session stream, for the same
-    reason order entry is: the sender needs to learn whether it landed. A
-    detach published to ``sts.td.{session}`` is read by one subscriber per
-    link and acted on only by the one whose api_id it names — so if that
-    link's reader is gone, the message is dropped by the sibling that did
-    read it, and nothing anywhere records that the attach was never closed.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    api_id: int
-    reason: str = "sts_stop"
-
-
-class TdDetachResult(BaseModel):
-    """TD → STS: the attach is closed; ``refcount`` is what is left."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    api_id: int
-    refcount: int
-
-
-# Backward-compatible aliases used by older call sites / tests.
-CreateSessionRequest = TdAttachRequest
-CreateSessionResult = TdAttachResult
-
-
 class StsCreateSessionRequest(BaseModel):
-    """API → STS: create strategy session (API-minted session_id)."""
+    """API → STS: ``sts.session.start`` (was ``sts.session.create``).
+
+    The reply is an accept. ``on_start`` has not run, and the caller
+    learns what happened afterwards from ``sts.session.status`` (F12,
+    §8.1). The body is the session spec the API has just written: which
+    strategy, which accounts, which feeds, and how a crash is restarted.
+    It does not name where the strategy's code comes from. That identity
+    is its own three axes (F39) and is not a field here (IF-16).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -238,11 +199,8 @@ class StsCreateSessionRequest(BaseModel):
     strategy: str
     td: dict[str, TdAccountRef] = Field(default_factory=dict)
     #: Instance name → feed keys. ``{"*": [...]}`` is every feed, unpinned —
-    #: see :data:`mftik.protocol.strategy_yml.ANY_INSTANCE`.
-    #:
-    #: A plain list is accepted and read as unpinned. This crosses the wire
-    #: between the API and STS, so a rolling upgrade has one of each running
-    #: for a while and the older half sends a list.
+    #: see :data:`mftik.protocol.strategy_yml.ANY_INSTANCE`. A plain list is
+    #: accepted and read as unpinned.
     md: dict[str, list[str]] = Field(default_factory=dict)
 
     @field_validator("md", mode="before")
@@ -250,42 +208,53 @@ class StsCreateSessionRequest(BaseModel):
     def _md_shape(cls, value: Any) -> dict[str, list[str]]:
         return load_md(value)
     st_paras: dict[str, Any] = Field(default_factory=dict)
-    #: ``always`` | ``never`` — see ``StrategySpec.restart``.
-    restart: str = "always"
-    #: Qualified registry key (``CrossArb``, ``private::Tiny``). Optional so
-    #: an old API and a new STS can pass each other during a rolling upgrade.
+    #: ``never`` | ``on_failure``. Same vocabulary and default as
+    #: ``StrategySpec.restart`` (F11): a request that says nothing is not
+    #: restarted. ``always`` was rebuild, and it is refused.
+    restart: str = RESTART_NEVER
+
+    @field_validator("restart", mode="before")
+    @classmethod
+    def _restart_mode(cls, value: Any) -> str:
+        if value is None:
+            return RESTART_NEVER
+        mode = str(value).strip()
+        if mode == "always":
+            raise ValueError(
+                "always is gone. It meant rebuild, which nothing does any "
+                f"more. restart is {RESTART_NEVER!r} (the default) or "
+                f"{RESTART_ON_FAILURE!r}, which starts a fresh run from "
+                "on_start."
+            )
+        if mode not in RESTART_MODES:
+            raise ValueError(
+                f"restart must be one of {sorted(RESTART_MODES)}, got {value!r}"
+            )
+        return mode
+    #: Qualified registry key (``CrossArb``, ``private::Tiny``). Null when
+    #: the deploy never recorded one.
     type: str | None = None
-    #: The submitted ``strategy.yml``. Same upgrade window as ``type``.
+    #: The submitted ``strategy.yml``, when the caller sent it.
     yaml_text: str | None = None
-    #: Which STS the deploy *asked for*, not which one took it.
-    #:
-    #: The distinction is the whole point. If the row recorded where a session
-    #: happened to land, an unpinned deploy would become pinned the moment it
-    #: ran — and if that instance were later retired the session would never
-    #: rebuild, despite nobody ever having asked for it to run there. Null
-    #: means the deploy did not care, and anyone may rebuild it.
+    #: Which STS the deploy asked for. Null means it named none. This is
+    #: not the process that happened to accept the start.
     instance: str | None = None
 
 
 class StsCreateSessionResult(BaseModel):
-    """STS → API: strategy session created.
+    """STS → API: ``sts.session.start`` was accepted (§8.1, F12).
 
-    ``status`` is not always ``live``. A strategy that rejects its
-    configuration does so in ``on_start`` / ``on_ready`` — which run before
-    this reply is sent — so the session can be over before the caller has
-    heard that it began. Saying so here is what lets a deploy stop at that
-    point instead of attaching feeds to a session that is already gone and
-    learning about it, half a minute later, as a lease timeout.
+    ``status`` is ``starting``. ``on_start`` has not run. Later progress
+    is ``sts.session.status``, not a second field on this reply. The old
+    reply waited for ``on_start`` and could already be ``failed``; that
+    wait is the timeout this rename removes.
     """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    strategy: str
-    #: ``live`` | ``failed`` | ``done``.
-    status: str = "live"
-    #: Why it is not live. The strategy's own words, meant for an operator.
-    reason: str | None = None
+    #: ``starting``. The accept, not the outcome.
+    status: str = "starting"
 
 
 class ListSessionsRequest(BaseModel):
@@ -793,23 +762,53 @@ class StsArtifactAck(BaseModel):
     ok: bool = True
 
 
+class StsStatusProgress(BaseModel):
+    """What the ingress puts on a status snapshot while a hook runs (§5.2).
+
+    Authority for the numbers is the session worker's ingress (§3.3,
+    "hook 進度、offload 進度、交付的丟棄計數"). ``hook`` is the hook it is
+    inside, ``elapsed_s`` how long that hook has been on the clock, and
+    ``dropped`` how many delivered events the ingress has discarded.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    hook: str | None = None
+    elapsed_s: float | None = None
+    dropped: int = 0
+
+
 class StsSessionStatus(BaseModel):
-    """STS → UI: one session's control-plane state, as a full snapshot.
+    """STS → listeners: one session's status, as a full snapshot.
 
-    Deliberately not a delta (``{"event": "stopped"}``): pub/sub drops messages
-    whenever nobody is subscribed, and a consumer that has to replay
-    transitions to know where it stands ends up permanently wrong after one
-    missed line. A snapshot is idempotent — apply the newest one per
-    ``session_id`` and the state is right no matter what was missed.
+    Deliberately not a delta. Pub/sub drops messages whenever nobody is
+    subscribed, and a consumer that replays transitions ends up wrong
+    after one missed line. Apply the newest snapshot per ``session_id``.
 
-    Every field here is also on :class:`SessionInfo`, so the REST snapshot the
-    UI loads first and the events it applies afterwards agree by construction.
+    The v2 phase vocabulary is ``pending``, ``starting``, ``running``,
+    ``stopping``, ``done``, ``failed``, and ``restarting`` (§5.2). Older
+    rows still say ``live``, ``interrupted``, and ``ack``; the field is a
+    string so both parse. ``interrupted`` is not produced any more (F10).
+    Reading the rows that already say it belongs to B10.
+
+    ``generation``, ``observed_generation``, ``worker_incarnation``,
+    ``restart_count`` and ``conditions`` are the Status columns (§8.4,
+    §3.3). ``generation`` here is the session's reconcile generation, not
+    an extras generation. ``worker_incarnation`` is the incarnation §3.3
+    names. ``conditions`` is the condition name to its current value
+    (``MdReady`` → ``12/14``). ``progress`` is the ingress's hook report.
+
+    Published on ``sts.status.{session_id}`` (§5.2). The aggregate
+    ``status.sts`` subject stays for the existing UI socket.
+
+    This payload does not carry ``strategy_digest`` or ``env_generation``.
+    Those two axes are IF-16.
     """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    #: live | done | failed | interrupted | ack
+    #: See the class docstring for the vocabulary.
     status: str
     strategy: str | None = None
     reason: str | None = None
@@ -818,105 +817,12 @@ class StsSessionStatus(BaseModel):
     #: Qualified registry key (``CrossArb``, ``private::Tiny``). Not the
     #: short ``strategy`` name. Null when the deploy never recorded one.
     type: str | None = None
-
-
-#: How often STS publishes a fencing heartbeat. Peers that have not heard
-#: one yet use this so attach-before-first-hb still has a timeout.
-LEASE_HEARTBEAT_INTERVAL_S = 1.0
-
-#: Missed intervals before a fenced link is dead. One drop is a lost core
-#: message; three is the fuse. 1 Hz → ~3s.
-LEASE_MISS_LIMIT = 3
-
-
-class LeaseHeartbeat(BaseModel):
-    """STS fencing lease heartbeat on ``sts.td.*`` / ``sts.md.*``."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    token: int
-    #: Seconds between heartbeats. A peer that has armed on this message
-    #: counts :data:`LEASE_MISS_LIMIT` of these, not a separate grace.
-    interval: float = LEASE_HEARTBEAT_INTERVAL_S
-
-
-class LeaseAck(BaseModel):
-    """TD → STS fencing lease ACK on ``td.{api_id}.{session_id}``."""
-
-    model_config = ConfigDict(frozen=True)
-
-    api_id: int
-    session_id: str
-    token: int
-
-
-class MdLeaseAck(BaseModel):
-    """MD → STS fencing lease ACK on ``md.{session_id}``.
-
-    Names its sender because a session's feeds may be split across MD
-    instances, and every one of them acknowledges on the same channel. Without
-    it STS could tell that *somebody* was still there but not that one of them
-    had stopped — which is the case that matters, since a session receiving
-    half its feeds keeps trading on the half it still gets.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    token: int
-    #: Which MD sent this. Optional so an MD that has not been upgraded yet
-    #: still acknowledges; it is then tracked under the plane name, which is
-    #: what a single-process node calls itself anyway.
-    instance: str | None = None
-
-
-class MdAttachRequest(BaseModel):
-    """API → MD: attach STS session with market-data subscriptions."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    created_by: int
-    subscriptions: list[str] = Field(default_factory=list)
-    timeout: float = 30.0
-
-
-class MdAttachResult(BaseModel):
-    """MD → API: attach succeeded (lease heartbeat observed)."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    subscriptions: list[str] = Field(default_factory=list)
-    refcounts: dict[str, int] = Field(default_factory=dict)
-    #: Which MD answered. A warm-up read in ``on_start`` cannot wait for
-    #: the first :class:`MdLeaseAck`, so the attach result is what the
-    #: session routes ``md.tape.tail`` on. Empty only on a mixed-version
-    #: reply that predates the field — treat that as unroutable.
-    instance: str = ""
-
-
-class MdDetachRequest(BaseModel):
-    """STS → MD: drop this session's attach, and say so.
-
-    Request-reply for the same reason as :class:`TdDetachRequest` — the
-    session stream's only reader is the lease loop, so a detach published
-    there is lost exactly when it matters most.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    reason: str = "sts_stop"
-
-
-class MdDetachResult(BaseModel):
-    """MD → STS: the attach is closed and its feeds released."""
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
+    conditions: dict[str, str] = Field(default_factory=dict)
+    generation: int | None = None
+    observed_generation: int | None = None
+    worker_incarnation: int | None = None
+    restart_count: int | None = None
+    progress: StsStatusProgress | None = None
 
 
 class MdTapeRecord(BaseModel):
@@ -1188,19 +1094,6 @@ class MdOpenInterestResult(MdFetchResult):
     open_interest: OpenInterest | None = None
 
 
-class Recon(BaseModel):
-    """STS → TD: request an async OMS snapshot for ``api_id``.
-
-    TD answers from its current book when clean, or after settling UNKNOWN
-    orders. This is not a request to hit the venue on the strategy's behalf.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    session_id: str
-    api_id: int
-
-
 class ReconDone(BaseModel):
     """TD → STS: book snapshot ready (OMS also on ``td.oms.{api_id}``)."""
 
@@ -1339,11 +1232,21 @@ class TdLedgerViewRequest(BaseModel):
 
 
 class TdOmsViewRequest(BaseModel):
-    """STS → TD: live orders and positions on ``td.account.{api_id}``."""
+    """STS → TD: live orders and positions on ``td.account.{api_id}``.
+
+    ``settled`` defaults to false: the book as it stands, including any
+    ``UNKNOWN`` order, answered from TD memory without waiting on the
+    venue (§7.1). ``settled=True`` waits until those orders converge, or
+    until the wait times out, and then answers with the book as it
+    stands (F13). The account-worker handler is
+    ``mftik_td.account.OmsHandler.view`` (IF-11). Making the wait real
+    is B6-08. Callers that omit the field keep the unsettled read.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     api_id: int
+    settled: bool = False
 
 
 class TdOmsOrderRequest(BaseModel):
@@ -1355,7 +1258,7 @@ class TdOmsOrderRequest(BaseModel):
     client_order_id: str
 
 
-class OrderReject(BaseModel):
+class OrderReject(HasDelivery, BaseModel):
     """TD → STS: submit rejected (publish on ``td.{api_id}.global``).
 
     ``error_code`` says who refused it and why in terms that hold across
@@ -1377,7 +1280,7 @@ class OrderReject(BaseModel):
     error_code: int | str = RejectCode.NONE
 
 
-class CancelReject(BaseModel):
+class CancelReject(HasDelivery, BaseModel):
     """TD → STS: cancel rejected (publish on ``td.{api_id}.global``).
 
     Same fields as :class:`OrderReject`, and the same rule: read
@@ -1400,17 +1303,12 @@ LogEnvelope = Envelope[Log]
 HealthCheckEnvelope = Envelope[HealthCheck]
 HealthStatusEnvelope = Envelope[HealthStatus]
 RpcErrorEnvelope = Envelope[RpcError]
-TdAttachRequestEnvelope = Envelope[TdAttachRequest]
-TdAttachResultEnvelope = Envelope[TdAttachResult]
-TdDetachRequestEnvelope = Envelope[TdDetachRequest]
-TdDetachResultEnvelope = Envelope[TdDetachResult]
-CreateSessionRequestEnvelope = TdAttachRequestEnvelope
-CreateSessionResultEnvelope = TdAttachResultEnvelope
 StsCreateSessionRequestEnvelope = Envelope[StsCreateSessionRequest]
 StsCreateSessionResultEnvelope = Envelope[StsCreateSessionResult]
 StsSessionControlRequestEnvelope = Envelope[StsSessionControlRequest]
 StsSessionControlResultEnvelope = Envelope[StsSessionControlResult]
 StsSessionStatusEnvelope = Envelope[StsSessionStatus]
+StsStatusProgressEnvelope = Envelope[StsStatusProgress]
 StsRegistryReloadRequestEnvelope = Envelope[StsRegistryReloadRequest]
 StsRegistryReloadResultEnvelope = Envelope[StsRegistryReloadResult]
 StsRegistrySyncRequestEnvelope = Envelope[StsRegistrySyncRequest]
@@ -1441,9 +1339,6 @@ StsArtifactDeleteRequestEnvelope = Envelope[StsArtifactDeleteRequest]
 StsArtifactAckEnvelope = Envelope[StsArtifactAck]
 ListSessionsRequestEnvelope = Envelope[ListSessionsRequest]
 ListSessionsResultEnvelope = Envelope[ListSessionsResult]
-LeaseHeartbeatEnvelope = Envelope[LeaseHeartbeat]
-LeaseAckEnvelope = Envelope[LeaseAck]
-ReconEnvelope = Envelope[Recon]
 ReconDoneEnvelope = Envelope[ReconDone]
 StsDetachEnvelope = Envelope[StsDetach]
 OrderSubmitEnvelope = Envelope[OrderSubmit]
@@ -1456,11 +1351,6 @@ TdOmsViewRequestEnvelope = Envelope[TdOmsViewRequest]
 TdOmsOrderRequestEnvelope = Envelope[TdOmsOrderRequest]
 OrderRejectEnvelope = Envelope[OrderReject]
 CancelRejectEnvelope = Envelope[CancelReject]
-MdLeaseAckEnvelope = Envelope[MdLeaseAck]
-MdAttachRequestEnvelope = Envelope[MdAttachRequest]
-MdAttachResultEnvelope = Envelope[MdAttachResult]
-MdDetachRequestEnvelope = Envelope[MdDetachRequest]
-MdDetachResultEnvelope = Envelope[MdDetachResult]
 MdTapeRecordEnvelope = Envelope[MdTapeRecord]
 MdTapeTailRequestEnvelope = Envelope[MdTapeTailRequest]
 MdTapeTailChunkEnvelope = Envelope[MdTapeTailChunk]
@@ -1482,10 +1372,10 @@ MdOpenInterestResultEnvelope = Envelope[MdOpenInterestResult]
 # Envelope.type constants for control-plane RPC
 TD_HEALTH = "td.health"
 TD_ERROR = "td.error"
-TD_SESSION_ATTACH = "td.session.attach"
-TD_SESSION_DETACH = "td.session.detach"
-TD_SESSION_LIST = "td.session.list"
-TD_LEASE_ACK = "td.lease.ack"
+#: Was ``td.session.attach``. Idempotent registration, with an owner (§8.3).
+TD_INTENT_PUT = "td.intent.put"
+#: Was ``td.session.detach``.
+TD_INTENT_DELETE = "td.intent.delete"
 TD_RECON_DONE = "td.recon.done"
 TD_OMS_VIEW = "td.oms.view"
 TD_OMS_ORDER = "td.oms.order"
@@ -1500,6 +1390,27 @@ TD_ORDER_REJECT = "td.order.reject"
 TD_CANCEL_REJECT = "td.cancel.reject"
 TD_BALANCE_UPDATE = "td.balance.update"
 TD_POSITION_UPDATE = "td.position.update"
+#: Account-worker availability broadcast (§5.6). Subject is
+#: ``td.account.state.{api_id}``, not this string.
+TD_ACCOUNT_STATE = "td.account.state"
+#: Desired and observed trading-layer bit (F35). Subject is
+#: ``td.account.{api_id}``, not this string. The request carries the
+#: controller's desired ``active``; the ack carries what the worker
+#: observed after applying it.
+TD_ACCOUNT_TRADING = "td.account.trading"
+#: Operator drain-replace of one account (F27). Subject is ``td.{instance}``,
+#: not this string. The request names the account; the reply is whether the
+#: new incarnation is up.
+TD_ACCOUNT_DRAIN = "td.account.drain"
+#: Account worker: refuse new submits and wait for in-flight calls (F27).
+#: Subject is ``td.account.{api_id}``, not this string. Not the operator
+#: request — that one is :data:`TD_ACCOUNT_DRAIN` on the control subject.
+TD_TRADING_DRAIN = "td.trading.drain"
+#: Published on ``td.{api_id}.global`` after a new incarnation rebuilds
+#: the ledger (§7.1).
+TD_ACCOUNT_RESET = "td.account.reset"
+#: Served on ``td.order.{api_id}`` (F10).
+TD_ORDER_CANCEL_SESSION = "td.order.cancel_session"
 
 # Paper engine RPC / streams
 PAPER = "paper"
@@ -1587,12 +1498,16 @@ class PaperFetchTickerRequest(BaseModel):
 
 STS_HEALTH = "sts.health"
 STS_ERROR = "sts.error"
-STS_SESSION_CREATE = "sts.session.create"
+#: Was ``sts.session.create``. Async accept (§8.1, F12).
+STS_SESSION_START = "sts.session.start"
 STS_SESSION_LIST = "sts.session.list"
-STS_SESSION_STOP = "sts.session.stop"
-#: Parent-only. The API sends this after ``sts.session.stop`` on the
+#: Was ``sts.session.stop``. Served on ``sts.ctl.{session_id}``.
+STS_SESSION_END = "sts.session.end"
+#: Parent-only. The API sends this after ``sts.session.end`` on the
 #: worker's control subject goes unanswered. The worker does not serve it:
-#: a blocked loop is the reason the first call timed out.
+#: a blocked loop is the reason the first call timed out. B0-03 marks the
+#: type 刪除; the constant is still registered until the Supervisor takes
+#: the kill over (IF-04).
 STS_SESSION_FORCE_STOP = "sts.session.force_stop"
 STS_SESSION_FAIL = "sts.session.fail"
 STS_SESSION_STATUS = "sts.session.status"
@@ -1644,21 +1559,28 @@ STOP_CONTROL_TIMEOUT_S = ON_STOP_TIMEOUT_S + 5.0
 #: write the row. This covers that write, not another ``on_stop``.
 STOP_FORCE_RPC_TIMEOUT_S = 5.0
 
-STS_LEASE_HEARTBEAT = "sts.lease.heartbeat"
-STS_HEARTBEAT = STS_LEASE_HEARTBEAT  # alias for older names
-STS_RECON = "sts.recon"
 STS_DETACH = "sts.detach"
 STS_ORDER_SUBMIT = "sts.order.submit"
 STS_ORDER_CANCEL = "sts.order.cancel"
 STS_ENSURE_LEVERAGE = "sts.ensure_leverage"
+#: Supervisor liveness report (§8.2). Subject is
+#: ``procman.report.{plane}.{instance}``. The shape is
+#: :class:`mftik.protocol.v2.ProcmanReport`. B3-04 publishes it.
+PROCMAN_REPORT = "procman.report"
 
 MD_HEALTH = "md.health"
 MD_ERROR = "md.error"
-MD_SESSION_ATTACH = "md.session.attach"
-MD_SESSION_DETACH = "md.session.detach"
+#: Was ``md.session.attach``. Idempotent, with an owner (§8.3).
+MD_INTENT_PUT = "md.intent.put"
+#: Was ``md.session.detach``.
+MD_INTENT_DELETE = "md.intent.delete"
+#: Runtime subscribe / unsubscribe (§8.3). ``md.subscribe`` had no
+#: production sender; this is the new message, not a rename of one.
+MD_INTENT_PATCH = "md.intent.patch"
+#: ``md.session.list`` stays. B0-03 marks it 保留: the list becomes a
+#: read of ``md_intents``, and the type string does not change.
 MD_SESSION_LIST = "md.session.list"
 MD_TAPE_TAIL = "md.tape.tail"
-MD_LEASE_ACK = "md.lease.ack"
 MD_ORDERBOOK = "md.orderbook"
 MD_TICKER = "md.ticker"
 MD_TRADE = "md.trade"
@@ -1669,6 +1591,12 @@ MD_LIQUIDATION = "md.liquidation"
 MD_FUNDING_RATE = "md.funding_rate"
 MD_OPEN_INTEREST = "md.open_interest"
 MD_GREEKS = "md.greeks"
+#: Connection-worker broadcast on ``md.w.{instance}.{worker_id}`` (§5.6).
+MD_WORKER_STATE = "md.worker.state"
+#: One atom's observed state, on the same ``md.w.*`` subject (§6.3).
+MD_ATOM_STATE = "md.atom.state"
+#: Selector transition on ``md.universe.{session_id}`` (§6.4).
+MD_UNIVERSE = "md.universe"
 #: A feed subscription reached a terminal outcome. Not a subscribed
 #: topic — MD publishes one per ``(session, topic)`` on
 #: ``md.{session_id}`` for the sessions that held that topic.

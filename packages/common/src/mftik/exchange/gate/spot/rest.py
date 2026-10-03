@@ -57,6 +57,25 @@ MAX_CANDLES = 1000
 #: Most history rows ``my_trades`` / ``orders`` return per page.
 MAX_HISTORY = 1000
 
+#: How often an account worker reads public server time. Gate's API v4
+#: docs do not state an HTTP idle close.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_INTERVAL_S = 30.0
+#: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
+#: the socket between ticks. httpx's own default is 5s.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_EXPIRY_S = 90.0
+#: ``GET /api/v4/spot/time``. Public. No key.
+KEEPALIVE_PATH = f"{API_PREFIX}/spot/time"
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
+POOL_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+    keepalive_expiry=KEEPALIVE_EXPIRY_S,
+)
+
 
 class _GateRestTransport:
     """httpx lifecycle and error decoding, shared by the signed/public pair."""
@@ -76,7 +95,9 @@ class _GateRestTransport:
     async def connect(self) -> None:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout
+                base_url=self.base_url,
+                timeout=self.timeout,
+                limits=POOL_LIMITS,
             )
             self._owns_client = True
 
@@ -298,6 +319,13 @@ class GateSpotPublicRest(_GateRestTransport):
             raise GateRestError(200, "not_found", f"no ticker for {currency_pair}")
         return GateTicker.model_validate(rows[0]).to_ticker(ticker)
 
+    async def server_time(self) -> float:
+        """``GET /spot/time`` — the venue clock, in seconds."""
+        row = await self._get("/spot/time")
+        if not isinstance(row, dict) or row.get("server_time") in (None, ""):
+            raise GateRestError(200, "not_found", "no server_time")
+        return float(row["server_time"]) / 1000.0
+
     async def fetch_order_book(
         self, currency_pair: str, *, ticker: UniversalTicker, depth: int = 10
     ) -> OrderBook:
@@ -396,6 +424,11 @@ def _dec(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await GateSpotPublicRest(client=client).server_time()
+
+
 def _to_order(row: dict[str, Any], ticker: UniversalTicker) -> Order:
     """REST order rows share the trading-call reply shape (``status``-based)."""
     return GateOrderAck.model_validate(row).to_order(ticker)
@@ -404,8 +437,13 @@ def _to_order(row: dict[str, Any], ticker: UniversalTicker) -> Order:
 __all__ = [
     "API_PREFIX",
     "GATE_SPOT_REST_URL",
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
+    "POOL_LIMITS",
     "GateRestError",
     "GateSpotPublicRest",
     "GateSpotRest",
+    "keepalive",
     "sign_rest",
 ]

@@ -24,6 +24,8 @@ import logging
 from decimal import Decimal
 from typing import Any
 
+import httpx
+
 from mftik.exchange.binance.future.listing import PERPETUAL, TRADING, to_listed
 from mftik.exchange.binance.future.models import (
     BinanceFutureDepth,
@@ -35,6 +37,9 @@ from mftik.exchange.binance.future.models import (
 from mftik.exchange.binance.future.protocol import BINANCE_FUTURE_REST_URL
 from mftik.exchange.binance.models import secs
 from mftik.exchange.binance.rest import (
+    KEEPALIVE_EXPIRY_S,
+    KEEPALIVE_INTERVAL_S,
+    POOL_LIMITS,
     BinanceRestError,
     BinanceRestTransport,
     BinanceSignedRest,
@@ -46,6 +51,10 @@ from mftik.symbols.listed import ListedInstrument
 logger = logging.getLogger(__name__)
 
 API_PREFIX = "/fapi/v1"
+
+#: Wire path of the public read. Interval and pool limits are the shared
+#: Binance numbers in :mod:`mftik.exchange.binance.rest`.
+KEEPALIVE_PATH = f"{API_PREFIX}/time"
 
 #: Most candles ``/fapi/v1/klines`` returns in one call. Asking for more is a
 #: 400, not a truncated answer.
@@ -178,6 +187,18 @@ class BinanceFuturePublicRest(BinanceRestTransport):
             **fields,
         )
 
+    async def server_time(self) -> float:
+        """``GET /fapi/v1/time`` — the venue clock, in seconds."""
+        row = await self._get(KEEPALIVE_PATH)
+        if not isinstance(row, dict) or row.get("serverTime") in (None, ""):
+            raise BinanceFutureRestError(200, None, "no serverTime")
+        return float(row["serverTime"]) / 1000.0
+
+
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await BinanceFuturePublicRest(client=client).server_time()
+
 
 class BinanceFutureRest(BinanceSignedRest):
     """The signed reads futures has nowhere else, or wants off a socket.
@@ -305,10 +326,15 @@ def _first(payload: Any) -> dict[str, Any]:
 
 __all__ = [
     "API_PREFIX",
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
     "MAX_KLINES",
     "PERPETUAL",
+    "POOL_LIMITS",
     "TRADING",
     "BinanceFuturePublicRest",
     "BinanceFutureRest",
     "BinanceFutureRestError",
+    "keepalive",
 ]

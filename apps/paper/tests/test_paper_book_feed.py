@@ -22,6 +22,11 @@ from mftik.exchange import PaperExchange
 from mftik.protocol import PAPER_ORDER_BOOK, Topics
 from mftik_paper.app import _pump_order_book, _tick_order_book, _watch
 
+# B2-05: borrows NATS to test the paper book pump. Product topics become
+# atoms in B7-02g (#234). ``test_a_dying_task_is_reported`` does not open
+# NATS; it stays on this mark with the file.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -54,6 +59,9 @@ async def _first_book(broker: Broker, symbol: str, timeout: float):  # noqa: ANN
     return task, stop
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_quiet_venue_still_publishes_its_book(
     broker: Broker, exchange: PaperExchange
 ) -> None:
@@ -77,6 +85,9 @@ async def test_a_quiet_venue_still_publishes_its_book(
     assert env.payload["bids"] and env.payload["asks"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_change_reaches_redis(
     broker: Broker, exchange: PaperExchange
 ) -> None:
@@ -100,6 +111,9 @@ async def test_a_change_reaches_redis(
     assert env.payload["universal_ticker"].endswith("BTCUSDT")
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_the_pump_survives_its_first_call(
     broker: Broker, exchange: PaperExchange
 ) -> None:

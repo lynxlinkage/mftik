@@ -98,7 +98,7 @@ def auth_enabled() -> bool:
     that chain locks everyone out with no way back in, because the chain
     answers ``POST /auth/login/password`` with 401 before FastAPI sees it.
     This flag is what lets the module land as small PRs instead of a
-    long-lived branch. See docs/Auth.md.
+    long-lived branch. See docs/archive/Auth.md.
     """
     return os.getenv("MFTIK_AUTH_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
 

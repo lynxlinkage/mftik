@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from broker_harness import a_broker
@@ -41,6 +40,10 @@ from mftik.protocol import (
 from mftik.strategy.artifacts import DIR_ENV, reset_store
 from mftik_sts.rpc import dispatch
 
+# B2-05: borrows NATS to test operator artifact RPC. Direct handler call:
+# B5-11 (#277). B5-07 (#216) moves the strategy-side write, not this path.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -53,11 +56,10 @@ async def serving(broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv(DIR_ENV, str(tmp_path))
     reset_store()
     stop = asyncio.Event()
-    sessions = SimpleNamespace(get=lambda _sid: None, instance="sts-jp")
 
     async def serve() -> None:
         async for req in broker.serve(Topics.sts("sts-jp"), stop=stop):
-            await dispatch(req, sessions=sessions)
+            await dispatch(req, instance="sts-jp")
 
     task = asyncio.create_task(serve())
     await asyncio.sleep(0.02)
@@ -72,6 +74,9 @@ async def _ask(broker: Broker, envelope):  # noqa: ANN001
     return await broker.request(Topics.sts("sts-jp"), envelope, timeout=5.0)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_chunked_put_lists_and_reads_back(
     broker: Broker, serving: Path
@@ -188,6 +193,9 @@ async def test_a_chunked_put_lists_and_reads_back(
     assert not (serving / "weights" / "model.pt").exists()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_an_upload_under_sessions_is_refused(
     broker: Broker, serving: Path
@@ -206,6 +214,9 @@ async def test_an_upload_under_sessions_is_refused(
     assert list(serving.rglob("*.part")) == []
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 async def test_a_key_that_is_a_directory_is_answered_not_dropped(
     broker: Broker, serving: Path

@@ -12,7 +12,6 @@ import asyncio
 import base64
 import binascii
 import logging
-from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
@@ -52,9 +51,6 @@ from mftik.strategy.artifacts import (
     get_store,
 )
 
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
-
 logger = logging.getLogger(__name__)
 
 #: Ceiling on one slice, whatever was asked for. A caller does not get to
@@ -62,14 +58,10 @@ logger = logging.getLogger(__name__)
 MAX_CHUNK_BYTES = 1_048_576
 
 
-def _instance(sessions: SessionManager | None) -> str | None:
-    return sessions.instance if sessions is not None else None
-
-
 async def handle_artifact_list(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
     try:
         payload = StsArtifactListRequest.model_validate(req.envelope.payload)
@@ -100,7 +92,7 @@ async def handle_artifact_list(
                     )
                     for row in rows
                 ],
-                instance=_instance(sessions),
+                instance=instance,
             ),
             type=STS_ARTIFACT_LIST,
             source="sts",
@@ -112,9 +104,9 @@ async def handle_artifact_list(
 async def handle_artifact_read(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         payload = StsArtifactReadRequest.model_validate(req.envelope.payload)
     except Exception as exc:
@@ -153,9 +145,9 @@ async def handle_artifact_read(
 async def handle_artifact_begin(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         payload = StsArtifactBeginRequest.model_validate(req.envelope.payload)
     except Exception as exc:
@@ -182,9 +174,9 @@ async def handle_artifact_begin(
 async def handle_artifact_chunk(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         payload = StsArtifactChunkRequest.model_validate(req.envelope.payload)
     except Exception as exc:
@@ -226,9 +218,9 @@ async def handle_artifact_chunk(
 async def handle_artifact_commit(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         payload = StsArtifactCommitRequest.model_validate(req.envelope.payload)
     except Exception as exc:
@@ -263,9 +255,9 @@ async def handle_artifact_commit(
 async def handle_artifact_abort(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         payload = StsArtifactTokenRequest.model_validate(req.envelope.payload)
     except Exception as exc:
@@ -289,9 +281,9 @@ async def handle_artifact_abort(
 async def handle_artifact_delete(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     try:
         payload = StsArtifactDeleteRequest.model_validate(req.envelope.payload)
     except Exception as exc:

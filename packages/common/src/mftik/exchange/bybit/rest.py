@@ -90,6 +90,26 @@ MAX_HISTORY = 100
 #: Most rows ``/v5/market/funding/history`` returns in one call.
 MAX_FUNDING_HISTORY = 200
 
+#: How often an account worker reads public server time. Bybit's v5
+#: integration guide does not state an HTTP idle close.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_INTERVAL_S = 30.0
+#: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
+#: the socket between ticks. httpx's own default is 5s.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_EXPIRY_S = 90.0
+#: ``GET /v5/market/time``. Public. No key. Same path as
+#: :meth:`BybitPublicRest.server_time`.
+KEEPALIVE_PATH = ch.MARKET_TIME
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
+POOL_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+    keepalive_expiry=KEEPALIVE_EXPIRY_S,
+)
+
 #: What a unified trading account is called. A classic account's spot wallet is
 #: ``SPOT``; Bybit has been migrating everyone to ``UNIFIED`` for years, so it
 #: is the default and the other is a constructor argument.
@@ -114,7 +134,9 @@ class _BybitRestTransport:
     async def connect(self) -> None:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout
+                base_url=self.base_url,
+                timeout=self.timeout,
+                limits=POOL_LIMITS,
             )
             self._owns_client = True
 
@@ -398,6 +420,11 @@ class BybitPublicRest(_BybitRestTransport):
         return float(result.get("timeNano", 0) or 0) / 1e9 or float(
             result.get("timeSecond", 0) or 0
         )
+
+
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await BybitPublicRest(client=client).server_time()
 
 
 class BybitRest(_BybitRestTransport):
@@ -704,9 +731,14 @@ class BybitRest(_BybitRestTransport):
 
 
 __all__ = [
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
     "MAX_INSTRUMENT_PAGE",
     "MAX_KLINES",
+    "POOL_LIMITS",
     "UNIFIED",
+    "keepalive",
     "BybitPublicRest",
     "BybitRest",
 ]

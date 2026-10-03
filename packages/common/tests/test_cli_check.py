@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from mftik.cli.app import EXIT_ERROR, main
+
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -159,6 +163,77 @@ def test_bad_yml_in_the_tree_is_refused(tmp_path: Path, capsys) -> None:
     assert "strategy.yml" in capsys.readouterr().err
 
 
+def test_it_reads_back_the_policy_the_document_asked_for(
+    tmp_path: Path, capsys
+) -> None:
+    """Every one of these has a default, so the lines appear either way. That is
+    the point: an author who never wrote ``start_timeout_s`` still has one, and
+    seeing the number here beats meeting it as a failure reason."""
+    dest = _tree(tmp_path, _TINY)
+    cfg = tmp_path / "deploy.yml"
+    cfg.write_text("td: {}\nmd: []\nsts: {}\n")
+
+    assert main(["check", str(dest), str(cfg)]) == 0
+    out = capsys.readouterr().out
+    assert "restart never" in out
+    assert "start_timeout_s 60, ready_timeout_s 30" in out
+    assert "offload_threads 2" in out
+    assert "memory_mb unset" in out
+
+
+def test_it_recognises_the_new_fields(tmp_path: Path, capsys) -> None:
+    """The gate is offline, so this is the only place a selector, a delivery
+    override or a restart budget is checked before a node sees it."""
+    dest = _tree(tmp_path, _TINY)
+    cfg = tmp_path / "deploy.yml"
+    cfg.write_text(
+        """
+td: {}
+md:
+  md-jp:
+    - feed: trade.Deribit_Perp_BTCUSD
+      delivery: latest
+    - select: btc_chain
+      kind: option_chain
+      venue: Deribit
+      underlying: BTC
+      ref: ticker.Deribit_Perp_BTCUSD
+      expiries: {nearest: 2, min_tte: 2h}
+      strikes: {atm: 5}
+      topics: [ticker, greeks]
+restart: on_failure
+max_restarts: 3
+restart_window_s: 120
+start_timeout_s: 900
+ready_timeout_s: 45
+limits:
+  memory_mb: 2048
+  offload_processes: 2
+sts: {}
+"""
+    )
+
+    assert main(["check", str(dest), str(cfg)]) == 0
+    out = capsys.readouterr().out
+    assert "restart on_failure (at most 3 in 120s, each a fresh on_start)" in out
+    assert "start_timeout_s 900, ready_timeout_s 45" in out
+    assert "offload_processes 2" in out
+    assert "memory_mb 2048" in out
+    assert "select btc_chain (option_chain) Deribit BTC, topics ticker, greeks" in out
+    assert "delivery trade.Deribit_Perp_BTCUSD → latest" in out
+
+
+def test_an_illegal_new_field_is_refused_before_a_node_is_reached(
+    tmp_path: Path, capsys
+) -> None:
+    dest = _tree(tmp_path, _TINY)
+    cfg = tmp_path / "deploy.yml"
+    cfg.write_text("td: {}\nmd: []\nstart_timeout_s: 99999\nsts: {}\n")
+
+    assert main(["check", str(dest), str(cfg)]) == EXIT_ERROR
+    assert "start_timeout_s: must be between 1 and 3600" in capsys.readouterr().err
+
+
 def test_illegal_md_is_refused(tmp_path: Path, capsys) -> None:
     dest = _tree(tmp_path, _TINY)
     cfg = tmp_path / "deploy.yml"
@@ -196,6 +271,8 @@ def test_on_initialized_refusal_is_named(tmp_path: Path, capsys) -> None:
     assert "Traceback" not in err
 
 
+# imports the tree and formats a traceback; over the 50 ms unit cap
+@pytest.mark.component
 def test_traceback_shows_where_the_strategy_raised(tmp_path: Path, capsys) -> None:
     """The message alone rarely locates a line in somebody's own code."""
     dest = _tree(tmp_path, _QTY)

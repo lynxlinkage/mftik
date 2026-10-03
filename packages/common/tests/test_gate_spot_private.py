@@ -21,6 +21,10 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.tickers import InvalidTickerError, UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 
@@ -499,6 +503,9 @@ async def test_venue_rejection_becomes_order_error(
             )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_streams_convert_to_shared_models(
     gate: FakeGate, rest_stub: FakeGateRest
 ) -> None:

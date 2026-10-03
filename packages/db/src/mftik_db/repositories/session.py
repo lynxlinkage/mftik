@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
 
@@ -37,9 +37,6 @@ def _fold_instance_counts(rows: Sequence[Any]) -> dict[str, dict[str, int]]:
 
 
 class _SessionListMixin(BaseRepository[RowT], Generic[RowT]):
-    async def mark_done(self, *args: Any, **kwargs: Any) -> RowT | None:
-        raise NotImplementedError
-
     async def list_sessions(
         self,
         *,
@@ -200,9 +197,19 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         td: dict[str, Any] | None = None,
         md_ids: list[str] | dict[str, list[str]] | None = None,
         st_paras: dict[str, Any] | None = None,
-        restart: str = "always",
+        restart: str = "never",
         instance: str | None = None,
+        strategy_digest: str | None = None,
+        env_generation: int | None = None,
     ) -> StsSessionRow:
+        """Insert a live session.
+
+        ``restart`` defaults to ``never`` (F11). The column also stores
+        ``on_failure``, and a historical ``always`` if a caller still
+        passes one. ``strategy_digest`` and ``env_generation`` default
+        to null so a caller that has not resolved a pin leaves the
+        columns empty.
+        """
         row = StsSessionRow(
             session_id=session_id,
             created_by=created_by,
@@ -213,11 +220,27 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
             md_ids=md_ids if md_ids is not None else [],
             st_paras=dict(st_paras or {}),
             restart=restart,
-            rebuild_count=0,
-            st_facts={},
             status=SessionStatus.LIVE.value,
+            strategy_digest=strategy_digest,
+            env_generation=env_generation,
         )
         return await self.add(row)
+
+    async def list_nonterminal(self) -> Sequence[StsSessionRow]:
+        """Rows whose status is not :meth:`SessionStatus.terminal`.
+
+        ``done``, ``failed``, ``interrupted`` and ``ack`` are terminal.
+        ``live`` and any later non-terminal word stay. Order is
+        ``session_id``.
+        """
+        terminal = tuple(SessionStatus.terminal())
+        stmt = (
+            select(StsSessionRow)
+            .where(StsSessionRow.status.notin_(terminal))
+            .order_by(StsSessionRow.session_id)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
 
     async def mark_finished(
         self,
@@ -247,7 +270,7 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         )
 
     async def mark_live(self, session_id: str) -> StsSessionRow | None:
-        """Put a terminal session back to ``live`` — the rebuild path.
+        """Put a terminal session back to ``live``.
 
         Clears ``finished_at`` and ``reason`` along with the status: a session
         that is running again has no end and no reason for one, and leaving
@@ -262,52 +285,6 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
         await self.session.flush()
         return row
 
-    async def bump_rebuild_count(self, session_id: str) -> int:
-        """Count one rebuild attempt and return the new total.
-
-        Written before the attempt, not after: a rebuild that takes the
-        process down with it has to count, because that is precisely the loop
-        the cap exists to break.
-        """
-        row = await self.get_by_session_id(session_id)
-        if row is None:
-            return 0
-        row.rebuild_count = int(row.rebuild_count or 0) + 1
-        await self.session.flush()
-        return row.rebuild_count
-
-    async def reset_rebuild_count(self, session_id: str) -> StsSessionRow | None:
-        """Forget the attempts behind a rebuild that turned out to work.
-
-        The cap counts attempts so a strategy that takes the process down with
-        it is not restored into the same crash forever. A session that came
-        back and then ran is not that: it has answered the question the count
-        was asking, and leaving the total standing would retire a healthy
-        session on some later restart it had nothing to do with.
-        """
-        row = await self.get_by_session_id(session_id)
-        if row is None:
-            return None
-        row.rebuild_count = 0
-        await self.session.flush()
-        return row
-
-    async def remember(
-        self, session_id: str, key: str, value: str
-    ) -> StsSessionRow | None:
-        """Record one fact a strategy established while running.
-
-        Reassigns the dict rather than mutating it: a plain JSON column does
-        not track in-place changes, so an update written through the existing
-        object would be silently dropped.
-        """
-        row = await self.get_by_session_id(session_id)
-        if row is None:
-            return None
-        row.st_facts = {**(row.st_facts or {}), key: value}
-        await self.session.flush()
-        return row
-
     async def mark_failed(
         self, session_id: str, reason: str
     ) -> StsSessionRow | None:
@@ -319,6 +296,42 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
     _ACKABLE = frozenset(
         {SessionStatus.FAILED.value, SessionStatus.INTERRUPTED.value}
     )
+
+    async def record_status(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        reason: str | None,
+        finished_at: float | None,
+        observed_generation: int | None,
+        worker_incarnation: int | None,
+        conditions: Mapping[str, str],
+        restart_count: int,
+    ) -> StsSessionRow | None:
+        """Write the Status columns. A missing row is left alone.
+
+        The API inserts the row. This method does not. ``finished_at`` of
+        ``0`` is a real timestamp. Live writes do not clear ``reason`` or
+        ``finished_at``: a session that is still running has not ended,
+        and a later terminal write is what sets them.
+        """
+        row = await self.get_by_session_id(session_id)
+        if row is None:
+            return None
+        row.status = status
+        row.observed_generation = observed_generation
+        row.worker_incarnation = worker_incarnation
+        row.conditions = dict(conditions)
+        row.restart_count = restart_count
+        if status in (SessionStatus.DONE.value, SessionStatus.FAILED.value):
+            row.reason = reason[:256] if reason else None
+            if finished_at is None:
+                row.finished_at = datetime.now(UTC)
+            else:
+                row.finished_at = datetime.fromtimestamp(finished_at, UTC)
+        await self.session.flush()
+        return row
 
     async def mark_ack(self, session_id: str) -> StsSessionRow | None:
         """Operator acknowledgement of a failed or interrupted session.
@@ -362,71 +375,15 @@ class StsSessionRepository(_SessionListMixin[StsSessionRow]):
 
 
 class TdSessionRepository(_SessionListMixin[TdSessionRow]):
+    """Reads of ``td_sessions``.
+
+    B10-01 stopped writing this table (F38). The rows are history from
+    before intents. ``list_sessions``, ``count``, ``count_by_instance``
+    and ``count_live_for_api`` stay; nothing here inserts or updates.
+    """
+
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, TdSessionRow)
-
-    async def get_live(
-        self, *, session_id: str, api_id: int
-    ) -> TdSessionRow | None:
-        result = await self.session.execute(
-            select(TdSessionRow).where(
-                TdSessionRow.session_id == session_id,
-                TdSessionRow.api_id == api_id,
-                TdSessionRow.status == SessionStatus.LIVE.value,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def create_live(
-        self,
-        *,
-        session_id: str,
-        created_by: int,
-        api_id: int,
-    ) -> TdSessionRow:
-        row = TdSessionRow(
-            session_id=session_id,
-            created_by=created_by,
-            api_id=api_id,
-            status=SessionStatus.LIVE.value,
-        )
-        return await self.add(row)
-
-    async def attach_live(
-        self, *, session_id: str, created_by: int, api_id: int
-    ) -> TdSessionRow:
-        """Record this attach as live, reusing the row if the pair had one.
-
-        ``(session_id, api_id)`` is unique and detaching only marks the row
-        done, so a pair that attaches, detaches and attaches again cannot
-        insert a second row. That sequence never came up while every deploy
-        minted a fresh session id; rebuilding one reuses it, and the insert
-        fails on the unique constraint.
-        """
-        result = await self.session.execute(
-            select(TdSessionRow).where(
-                TdSessionRow.session_id == session_id,
-                TdSessionRow.api_id == api_id,
-            )
-        )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return await self.create_live(
-                session_id=session_id, created_by=created_by, api_id=api_id
-            )
-        row.status = SessionStatus.LIVE.value
-        row.finished_at = None
-        await self.session.flush()
-        return row
-
-    async def mark_done(self, *, session_id: str, api_id: int) -> TdSessionRow | None:
-        row = await self.get_live(session_id=session_id, api_id=api_id)
-        if row is None:
-            return None
-        row.status = SessionStatus.DONE.value
-        row.finished_at = datetime.now(UTC)
-        await self.session.flush()
-        return row
 
     async def count_live_for_api(self, api_id: int) -> int:
         result = await self.session.execute(
@@ -457,6 +414,13 @@ class TdSessionRepository(_SessionListMixin[TdSessionRow]):
 
 
 class MdSessionRepository(_SessionListMixin[MdSessionRow]):
+    """Reads of ``md_sessions``.
+
+    B10-01 stopped writing this table (F38), same as
+    :class:`TdSessionRepository`. ``list_sessions``, ``count`` and
+    ``count_by_instance`` stay.
+    """
+
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, MdSessionRow)
 
@@ -467,105 +431,3 @@ class MdSessionRepository(_SessionListMixin[MdSessionRow]):
         ).group_by(MdSessionRow.instance, MdSessionRow.status)
         result = await self.session.execute(stmt)
         return _fold_instance_counts(result.all())
-
-    async def get_live(
-        self, *, instance: str, venue: str, session_id: str
-    ) -> MdSessionRow | None:
-        result = await self.session.execute(
-            select(MdSessionRow).where(
-                MdSessionRow.instance == instance,
-                MdSessionRow.venue == venue,
-                MdSessionRow.session_id == session_id,
-                MdSessionRow.status == SessionStatus.LIVE.value,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def create_live(
-        self,
-        *,
-        instance: str,
-        venue: str,
-        session_id: str,
-        created_by: int,
-    ) -> MdSessionRow:
-        row = MdSessionRow(
-            instance=instance,
-            venue=venue,
-            session_id=session_id,
-            created_by=created_by,
-            status=SessionStatus.LIVE.value,
-        )
-        return await self.add(row)
-
-    async def attach_live(
-        self, *, instance: str, venue: str, session_id: str, created_by: int
-    ) -> MdSessionRow:
-        """Record this attach as live, reusing the row if the triple had one.
-
-        Same reason as :meth:`TdSessionRepository.attach_live` — the triple is
-        unique and a detach only marks the row done.
-
-        ``instance`` leads the key because a session's feeds may be split
-        across MDs, and two of them holding one venue for one session is the
-        arrangement this exists to allow rather than a collision to fold.
-        """
-        result = await self.session.execute(
-            select(MdSessionRow).where(
-                MdSessionRow.instance == instance,
-                MdSessionRow.venue == venue,
-                MdSessionRow.session_id == session_id,
-            )
-        )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return await self.create_live(
-                instance=instance,
-                venue=venue,
-                session_id=session_id,
-                created_by=created_by,
-            )
-        row.status = SessionStatus.LIVE.value
-        row.finished_at = None
-        await self.session.flush()
-        return row
-
-    async def mark_done(
-        self, *, instance: str, venue: str, session_id: str
-    ) -> MdSessionRow | None:
-        row = await self.get_live(
-            instance=instance, venue=venue, session_id=session_id
-        )
-        if row is None:
-            return None
-        row.status = SessionStatus.DONE.value
-        row.finished_at = datetime.now(UTC)
-        await self.session.flush()
-        return row
-
-    async def mark_done_session(
-        self, session_id: str, *, instance: str
-    ) -> list[MdSessionRow]:
-        """Close this instance's live rows for ``session_id``.
-
-        ``instance`` is not optional and the predicate is not a convenience.
-        Without it one MD detaching closes every row the session has, including
-        the ones a peer wrote for feeds it is still pumping — the row goes
-        ``done`` while the feed runs, and the next reap scan finds nothing to
-        correct because the row no longer says it is live.
-        """
-        result = await self.session.execute(
-            select(MdSessionRow).where(
-                MdSessionRow.instance == instance,
-                MdSessionRow.session_id == session_id,
-                MdSessionRow.status == SessionStatus.LIVE.value,
-            )
-        )
-        rows = list(result.scalars().all())
-        now = datetime.now(UTC)
-        for row in rows:
-            row.status = SessionStatus.DONE.value
-            row.finished_at = now
-        if rows:
-            await self.session.flush()
-        return rows

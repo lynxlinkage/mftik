@@ -15,7 +15,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 
 import pytest
-from broker_harness import a_broker, inject_raw_request
+from broker_harness import inject_raw_request, session_loop
 from mftik.broker import Broker, BrokerConfig
 from mftik.broker.errors import NoRespondersError, RequestTimeoutError
 from mftik.broker.transport.nats import (
@@ -26,13 +26,11 @@ from mftik.broker.transport.nats import (
 )
 from mftik.protocol import Envelope, Topics
 
+# §9.1 component (shared NATS client). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 SUBJECT = "demo"
-
-
-@pytest.fixture
-async def broker() -> Broker:
-    async with a_broker("test-nats") as client:
-        yield client
 
 
 def _envelope(n: int = 1) -> Envelope[dict]:
@@ -45,7 +43,10 @@ def _transport(broker: Broker) -> NatsTransport:
     return transport
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+@session_loop
 async def test_a_request_is_answered_by_its_handler(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -68,7 +69,10 @@ async def test_a_request_is_answered_by_its_handler(broker: Broker) -> None:
     assert reply.payload == {"pong": 7}
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
+@session_loop
 async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
     """Which is how ``probe`` leaves nothing behind, and it must stay true."""
     subject = Topics.health("md", "md-jp-1")
@@ -78,7 +82,12 @@ async def test_a_live_request_is_not_stored_anywhere(broker: Broker) -> None:
         await broker.request(subject, _envelope(), timeout=0.2)
 
 
-@pytest.mark.asyncio
+# over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
+@session_loop
 async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     broker: Broker,
 ) -> None:
@@ -91,7 +100,10 @@ async def test_a_request_to_nobody_fails_at_once_rather_than_waiting(
     assert "timed out after" not in str(caught.value)
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+@session_loop
 async def test_a_subscriber_that_does_not_answer_is_a_full_timeout(
     broker: Broker,
 ) -> None:
@@ -114,7 +126,10 @@ async def test_a_subscriber_that_does_not_answer_is_a_full_timeout(
         await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
+@session_loop
 async def test_a_probe_does_not_wait_for_a_plane_to_turn_up(broker: Broker) -> None:
     started = asyncio.get_running_loop().time()
     with pytest.raises(RequestTimeoutError):
@@ -123,7 +138,12 @@ async def test_a_probe_does_not_wait_for_a_plane_to_turn_up(broker: Broker) -> N
     assert spent < _NO_RESPONDERS_CEILING_S
 
 
-@pytest.mark.asyncio
+# over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
+@session_loop
 async def test_a_request_waits_out_an_owner_that_is_still_arriving(
     broker: Broker,
 ) -> None:
@@ -150,7 +170,7 @@ def test_a_topic_that_would_not_survive_being_a_subject_is_refused() -> None:
     assert _check_subject("md.s-1") == "md.s-1"
 
 
-@pytest.mark.asyncio
+@session_loop
 async def test_every_subscriber_has_its_own_interest(broker: Broker) -> None:
     stop = asyncio.Event()
     topic = Topics.md_session("s-1")
@@ -182,7 +202,10 @@ async def test_every_subscriber_has_its_own_interest(broker: Broker) -> None:
     assert second == [1, 2]
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+@session_loop
 async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> None:
     stop = asyncio.Event()
     topic = Topics.md_session("s-2")
@@ -205,38 +228,50 @@ async def test_a_subscriber_does_not_receive_what_it_missed(broker: Broker) -> N
     assert seen == [2]
 
 
-@pytest.mark.asyncio
-async def test_a_cross_connection_subscribe_is_visible_before_publish() -> None:
-    async with a_broker("xconn") as publisher:
-        other = Broker(
-            BrokerConfig(
-                nats_url=publisher.config.nats_url,
-                key_prefix=publisher.config.key_prefix,
-            )
+# B2-05: broker semantics (a subscription on one socket is visible to
+# another). Component forbids a private socket (§9.1), so this case is
+# integration. It is not rewritten into a handler call.
+@pytest.mark.integration
+@session_loop
+async def test_a_cross_connection_subscribe_is_visible_before_publish(
+    broker: Broker,
+) -> None:
+    """A subscription flushed on one connection is visible to another.
+
+    ``broker`` is the shared connection. ``other`` opens a second socket on
+    purpose: this is the case where interest has to reach the server before
+    a publish from somewhere else. ``other`` is closed before the test
+    returns, so the worker is back to its one shared connection.
+    """
+    other = Broker(
+        BrokerConfig(
+            nats_url=broker.config.nats_url,
+            key_prefix=broker.config.key_prefix,
         )
-        await other.connect()
-        stop = asyncio.Event()
-        ready = asyncio.Event()
-        topic = Topics.md_session("s-xconn")
-        seen: list[int] = []
+    )
+    await other.connect()
+    stop = asyncio.Event()
+    ready = asyncio.Event()
+    topic = Topics.md_session("s-xconn")
+    seen: list[int] = []
 
-        async def reader() -> None:
-            async for envelope in other.subscribe(topic, stop=stop, ready=ready):
-                seen.append(envelope.payload["n"])
-                return
+    async def reader() -> None:
+        async for envelope in other.subscribe(topic, stop=stop, ready=ready):
+            seen.append(envelope.payload["n"])
+            return
 
-        task = asyncio.create_task(reader())
-        try:
-            await asyncio.wait_for(ready.wait(), timeout=5)
-            await publisher.publish(topic, _envelope(7))
-            await asyncio.wait_for(task, timeout=5)
-        finally:
-            stop.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            await other.close()
+    task = asyncio.create_task(reader())
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=5)
+        await broker.publish(topic, _envelope(7))
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await other.close()
 
-        assert seen == [7]
+    assert seen == [7]
 
 
 @pytest.mark.asyncio
@@ -331,7 +366,7 @@ async def test_a_cancelled_read_does_not_swallow_the_message_it_had_won() -> Non
 
 
 @pytest.mark.parametrize("loop_name", ["subscribe", "serve"])
-@pytest.mark.asyncio
+@session_loop
 async def test_a_cancelled_plane_loop_leaves_nothing_pending(
     broker: Broker, loop_name: str
 ) -> None:
@@ -364,23 +399,25 @@ async def test_a_cancelled_plane_loop_leaves_nothing_pending(
     assert _leftovers(before) == frozenset()
 
 
-@pytest.mark.asyncio
-async def test_connect_does_not_need_jetstream() -> None:
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+@session_loop
+async def test_connect_does_not_need_jetstream(broker: Broker) -> None:
     """A NATS without ``-js`` is the production shape."""
-    async with a_broker("no-js") as broker:
-        stop = asyncio.Event()
+    stop = asyncio.Event()
 
-        async def serve() -> None:
-            async for req in broker.serve("ping", stop=stop):
-                await req.reply(_envelope(1))
-                return
+    async def serve() -> None:
+        async for req in broker.serve("ping", stop=stop):
+            await req.reply(_envelope(1))
+            return
 
-        task = asyncio.create_task(serve())
-        await asyncio.sleep(0.1)
-        try:
-            reply = await broker.request("ping", _envelope(), timeout=2)
-        finally:
-            stop.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        assert reply.payload == {"n": 1}
+    task = asyncio.create_task(serve())
+    await asyncio.sleep(0.1)
+    try:
+        reply = await broker.request("ping", _envelope(), timeout=2)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert reply.payload == {"n": 1}

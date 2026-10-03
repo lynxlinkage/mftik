@@ -13,6 +13,10 @@ from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import PAPER_ORDER_BOOK, Topics, UntypedEnvelope
 
+# B2-05: borrows NATS to test paper public reads. Product topics become
+# atoms in B7-02g (#234). Not a plane handler call.
+pytestmark = pytest.mark.integration
+
 
 def PAPER(symbol: str) -> UniversalTicker:
     """``BTCUSDT`` → ``Paper_Spot_BTCUSDT``; public reads are keyed by ticker."""
@@ -25,6 +29,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_remote_public_fetch_and_stream(broker: Broker) -> None:
     from mftik_paper.rpc import dispatch

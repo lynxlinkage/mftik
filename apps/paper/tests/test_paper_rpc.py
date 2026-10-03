@@ -12,6 +12,11 @@ from mftik.exchange.paper.remote import PaperRemotePrivateClient
 from mftik_paper.app import BrokerEventBridge
 from mftik_paper.rpc import dispatch
 
+# B2-05: borrows NATS to test the paper engine's order RPC. The engine is
+# outside the plane rewrite (§5–§7); no ticket turns this into a plane
+# handler call. B4-05 (#205) builds the paper resident layer on this engine.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:
@@ -19,6 +24,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_remote_private_place_cancel(broker: Broker) -> None:
     bridge = BrokerEventBridge(broker)
@@ -100,6 +108,9 @@ async def _serve(
         await dispatch(req, exchange=exchange)
 
 
+@pytest.mark.real_sleep(
+    reason="the paper engine ticks with asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_malformed_order_is_a_venue_rejection_not_an_internal_error(
     broker: Broker,

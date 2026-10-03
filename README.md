@@ -1,214 +1,86 @@
 # MFTIK
 
-A self-hosted **trading desk** you keep running. Not a backtester that prints a chart, and not a library that leaves you to invent the night shift.
+MFTIK 是一個自架的交易節點：策略用 Python 寫，節點負責把各平面的進程撐住、記下發生過的事，並提供操作介面。
 
-You host a node. You write strategies in Python against the live book, the tape, and the accounts you attach. The node keeps the processes up, records what happened, and gives an operator a place to live with the runs — deploy, watch, stop, ack a failure, pull the log.
+這份 README 是這個 repo 的開發指引。使用者面的說明（SDK 怎麼用、`mftik` CLI、`mftik node-init` 起一個節點）在發佈到 PyPI 的 [`packages/common/README.md`](packages/common/README.md)。目前正在進行平面進程化重構，目標架構以 [`docs/ARCHITECTURE_CHANGE_PLAN.md`](docs/ARCHITECTURE_CHANGE_PLAN.md) 為準。
 
-```
-pip install mftik
-mftik node-init ./mynode
-```
+## 目錄導覽
 
-## Who it is for
-
-Traders who invent the signal, not only those who wait for a candle to close.
-
-Most platforms start at `on_kline` and stay there. MFTIK treats klines as one feed among several. A strategy can sit on the touch, read every print, warm up on tape that was recorded before it started, watch liquidations on a perp, or query a book once because that is all the question needed.
-
-The bundled examples are that kind of work: a chase that reclines a post-only order into the spread, a cross-venue quote-and-hedge, MACD on **dollar bars** built from the tape, an OCO that asks for one quote and then waits. If your edge is "when the 1h closes above the MA", you can still write that. The point is you are not required to.
-
-It is also for the person who has to keep that work alive. A desk is sessions, credentials, peers, and a trail of who did what. Those are first-class here, not an exercise left to the reader.
-
-## Control
-
-The operator lives in the browser: sessions on the Board, deploys from Strategy. This is the desk, not a chart from a backtest.
-
-![Board — running sessions](docs/readme/board.png)
-
-![Strategy — deploy a session](docs/readme/strategy.png)
-
-## What a node is
-
-One machine (or one compose project) that owns:
-
-| Plane | Job |
+| 路徑 | 內容 |
 |---|---|
-| **STS** | Runs your strategy. One instance per session. Hooks, timers, OMS, ledger, tape. |
-| **TD** | Talks to venues. Places and cancels. Owns the book of orders and the balances. Fences an attach with a lease — only the session that holds it may trade. |
-| **MD** | Talks to public feeds. Fans them out to sessions. Records the tape so a later strategy can warm up on prints it was not running for. |
-| **SYM** | The symbol plane. Tick, step, min notional — independent of any session, so you can round an order before anything is live. |
-| **Paper** | A simulated venue in the same stack. Same ticker shape, same OMS path, no real money. |
-| **API + UI** | The control plane. Browser for the operator, `mftik` CLI for the laptop that writes code. |
+| `apps/api` | 控制平面。FastAPI，進程名 `mftik-api`；`routes/` 下的 REST 加 `/ws/*` 的 WebSocket |
+| `apps/sts` | 策略平面，進程名 `sts`。session、hook 派送、OMS、event log |
+| `apps/td` | 交易平面，進程名 `td`。下單、撤單、ledger |
+| `apps/md` | 市場資料平面，進程名 `md`。公開 feed 扇出，tape 寫進同區的 Redis（`tape_store.py`） |
+| `apps/sym` | symbol 平面，進程名 `sym`。tick、step、min notional |
+| `apps/paper` | 同一個 stack 裡的模擬交易所，進程名 `paper` |
+| `packages/common` | `import mftik`。protocol、broker、exchange adapter、strategy SDK、`mftik` CLI；也是 PyPI 上的 `mftik` 套件 |
+| `packages/db` | `import mftik_db`。schema 與 Alembic migration |
+| `contracts/openapi.json` | Python 與前端之間的 OpenAPI 契約，由 `just openapi` 產生 |
+| `frontend/` | SvelteKit UI。不在 uv workspace 裡，用 npm |
+| `deployment/` | 生產環境的宣告：Strategon 的 `sets/*.json`、`redis/redis.conf`、API 層的 `docker-compose.yml` |
+| `scripts/` | 維運與量測腳本，多數有對應的 `just` recipe；`git-hooks/` 是 `install-hooks` 指過去的目錄 |
+| `docs/` | 見下面的文件索引 |
+| `Dockerfile` | 所有 Python 服務共用的單一 image，彼此只差 compose 裡的 `command` |
+| `docker-compose.yml` | 本機開發 stack：postgres、redis、nats、六個平面、frontend |
+| `docker-compose.peer.yml` | 疊在上面那份之上，在同一台機器起第二個節點（獨立 project name 與 host port），用來測節點之間的流程 |
+| `conftest.py` | 整個 workspace 的 pytest 設定：event loop、sqlite/Postgres 參數化、啟動前先確認 broker 在 |
 
-Domains do not import each other. They talk through one broker over NATS — see [docs/Broker.md](docs/Broker.md) for what a plane may say today, and [docs/JetStreamRemoval.md](docs/JetStreamRemoval.md) for the store map that removes JetStream. A market-data restart is not supposed to take order entry with it; a strategy crash is not supposed to drop the venue connection. That split is the product, not an implementation detail.
-
-The node is **single-tenant**. One Owner. That person may prove who they are with a password, Discord, or Google, and mint machine keys for scripts and for other nodes. Nobody else gets a user row.
-
-## A strategy is not a candle loop
-
-Subclass `Strategy`, override the hooks you care about, trade through the accessors the base class binds.
-
-```python
-from mftik.strategy import Strategy
-
-
-class MyStrategy(Strategy):
-    name = "my_strategy"
-
-    async def on_best_quote(self, quote) -> None:
-        await self.log(f"{quote.universal_ticker} {quote.bid}/{quote.ask}")
-        # self.oms places and cancels
-        # self.ledger reads balances (and leverage on perps)
-        # self.tape warms up on prints from before this session
-        # self.mds queries history the feeds do not carry
-        # self.symbols gives tick / step / min notional
-        # self.timer schedules work
-```
-
-**Live feeds** — you subscribe in the deploy document (`md:`), one topic per instrument:
-
-| Hook | Topic | What it is |
-|---|---|---|
-| `on_best_quote` | `bestquote` | Touch with sizes, at book speed |
-| `on_order_book` | `orderbook` | Full snapshot each time (no depth-diff sequencing) |
-| `on_trade` | `trade` | One match, taker side |
-| `on_agg_trade` | `aggtrade` | Same flow, venue-aggregated — cheaper, and `match_count` is in the print |
-| `on_kline` | `kline_{interval}` | In-progress candle re-pushed; only `closed` is final |
-| `on_ticker` | `ticker` | 24h stats + top of book |
-| `on_liquidation` | `liquidation` | Other accounts being closed out — not your fill |
-
-A subscribe the venue does not serve is **refused at attach**, not silently empty. Gate has no aggregated tape; paper has no candles; Bybit liquidations are a perp feed. See the [matrix](#exchange-integration) below.
-
-**Queries** are the other half. `self.mds.fetch_klines` / `fetch_order_book` / `fetch_best_quote` ask once and answer once. Needing the book at one moment is a query. Living on every change is a subscription. An OCO in this tree does the first; a chase does the second.
-
-**The tape.** MD records `trade` / `aggtrade` while somebody holds the feed. `self.tape.read(...)` returns those prints as the same `Trade` / `AggTrade` the live hooks get, on `records`, plus coverage — count, span, `continuous_since_ms`, measured gaps, whether recording is still on. Pass `on_print` and each print is handed to the callback instead, and `records` is left empty so the series is not held twice; `len` is still the count. A count of prints is not a length of history. `TapeKeeper` is a bundled strategy that subscribes and does nothing else, so the tape exists before the strategy that will need it is deployed.
-
-**Hooks share the loop with the heartbeat.** A hook that does not await keeps the task watching MD's acknowledgements from running, and a session that has not seen one for about three seconds fails itself with `md feed from {instance} stopped: session can no longer run` — `{instance}` being the MD's name, `md` by default. The window is measured from the last acknowledgement, not from where you stopped awaiting, so stay well under it. Two hundred thousand prints is easily past it, and `breathe` and `slice_deadline` — from `mftik.strategy`, same as `Strategy` — pace a loop over them: `deadline = await breathe(deadline)` per record, which reads a clock and only yields once the slice is spent.
-
-**Private events** arrive from the account, not from a candle: order updates, fills, rejects, balances, positions (contracts only). `td.{api_id}.global` is account-wide — filter with `self.owns(cid)` before you treat a fill as yours. `owns` decodes the six-hex session id packed into the cid.
-
-Instruments are **universal tickers**: `Venue_Category_SYMBOL`. `Gate_Spot_BTCUSDT`, `BinanceUM_Perp_BTCUSDT`, `Bybit_Spot_ETHUSDT`. The middle part is the book, not a nickname.
-
-## Exchange integration
-
-A venue here is **one connection with one credential**. Binance spot and Binance USD-M are two venues — different hosts, different wallets. Binance issues one key for all three planes, so the same key string may be stored once per venue. Bybit's unified account is one venue with two categories behind the same key.
-
-| Venue | Markets | Credential | Trade | ticker | trade | book | quote | kline | aggtrade | liq |
-|---|---|---|---|---|---|---|---|---|---|---|
-| **Paper** | Spot (sim) | any | yes | yes | yes | yes | — | — | — | — |
-| **Gate** | Spot | HMAC | yes | yes | yes | yes | yes | yes | — | — |
-| **GateFutures** | USD-M perp | HMAC | yes | yes | yes | yes | yes | yes | — | yes |
-| **Binance** | Spot | Ed25519 | yes | yes | yes | yes | yes | yes | yes | — |
-| **BinanceUM** | USD-M perp | Ed25519 | yes | yes | yes | yes | yes | yes | yes | yes |
-| **Bybit** | Spot + perp | HMAC | yes | yes | yes | yes | yes | yes | — | perp |
-| **Bitget** | Spot + perp | HMAC (+ passphrase) | yes | yes | yes | yes | yes | yes | — | perp |
-| **Deribit** | Spot + linear/inverse perp + dated | HMAC | yes | yes | yes | yes | yes | yes | — | — |
-
-`yes` means the adapter serves it. `—` means a subscribe (or a query of that kind) is refused, not faked.
-
-History reads — `fetch_klines`, `fetch_order_book`, `fetch_best_quote` — are on both Gate planes, both Binance planes, and Bybit. They do not require a live feed. Paper answers ticker and book only. Bitget also serves those reads, plus funding and open-interest snapshots on perp (ticker fields on the live feed). Deribit serves the same reads; funding rides the linear and inverse perp tickers, and open interest rides those plus dated futures (no dedicated liquidation or aggtrade feed).
-
-Binance's WebSocket API accepts **Ed25519** keys for `session.logon`. An HMAC key can still hit Binance REST; this adapter does not use REST for trading, so an HMAC credential is refused when you store it rather than failing the first order.
-
-A missing feed is a property of the venue, not a bug in the strategy. `aggtrade` on Gate and `liquidation` on spot are the two people usually meet first.
+Apps 之間不互相 import。共用代碼只有 `packages/common` 和 `packages/db`。
 
 ## Quick start
 
-You need Docker, and Python 3.12+ on the machine you write strategies on.
-
-### 1. Host a node
-
-```bash
-pip install mftik
-mftik node-init ./mynode
-cd mynode
-docker compose pull
-docker compose up -d
-```
-
-`node-init` writes compose, a Caddyfile, and a `.env` (mode `0600`, with a generated database password). Postgres, NATS, and the edge are part of the stack — you do not have to bring them. The images come from GHCR. Pin `MFTIK_VERSION` to a git tag (`vX.Y.Z`) once the node matters — the same release as `pip install mftik==X.Y.Z`. `:latest` moves under you.
-
-`up` waits for `migrate` (`alembic upgrade head`, idempotent) and `seed` (Owner row + two paper accounts, also idempotent) before the planes start. A later `pull` + `up` applies new revisions the same way.
-
-Open the URL Caddy is bound to (default `http://localhost:8080`). First visit claims the instance — that is the Owner, and it is not undoable from this side.
-
-### 2. Point this machine at it
-
-```bash
-mftik connect http://localhost:8080 --setup
-mftik whoami
-```
-
-`connect` signs in, mints an API key, stores the key, and drops the session. The password is never written down. Profiles live in `~/.config/mftik/config.toml` at `0600`. For CI, pass an existing key with `--token`.
-
-### 3. Write something and run it
-
-```bash
-mftik init ./hello          # fills account + feed from the node you just claimed
-mftik check ./hello         # import gate + on_initialized, offline
-mftik run ./hello           # push, deploy, tail the session log
-```
-
-`init` asks the node which accounts and instruments it has, and writes a strategy that reads the book and exits after a few snapshots. `run` copies the tree into the node's **private** registry, deploys it, and tails. Ctrl-C drops the tail and does **not** stop the session — `mftik stop <session>` does, or the STS page.
-
-```bash
-mftik ps
-mftik logs -f <session>
-mftik stop <session>
-```
-
-A strategy may import the standard library, `mftik`, files in its own tree, and third-party names it **declares** and the node has applied (`mftik env add numpy`, then `requires = ["numpy"]` on the class). `mftik check` tells you before you push. A name you did not declare is refused even if it is already on the node's `sys.path`.
-
-### This repository (development)
-
-The layout-and-commands README that used to live here is at [`docs/archive/README.md`](docs/archive/README.md). From a checkout:
+需要 Docker、Python 3.12+、[`uv`](https://docs.astral.sh/uv/)、[`just`](https://just.systems/)，以及 Node（前端用 npm 裝）。
 
 ```bash
 cp .env.example .env
-just sync            # uv workspace + frontend npm install
-just install-hooks   # pre-commit: fail early on a stale OpenAPI contract
-just up              # build the shared image once, then compose up
+just sync            # uv sync --all-packages + frontend npm install
+just install-hooks   # pre-commit：OpenAPI 契約過期就擋在 commit
+just up              # 先 build 共用 image，再 docker compose up
 ```
 
-- API: http://localhost:8000/health
-- UI: http://localhost:5173
+- API：<http://localhost:8000/health>
+- UI：<http://localhost:5173>
 
-Use `just up` rather than `docker compose up --build`. Every Python service shares one image tag; building them all at once races.
+用 `just up`，不要用 `docker compose up --build`。每個 Python 服務共用同一個 image tag，一次 build 全部會有好幾個 build 搶著寫同一個 tag。
+
+測試需要 broker，而且沒有 fake 可以退回去——沒有 NATS，`conftest.py` 的 `pytest_sessionstart` 會直接讓整個 run 失敗：
 
 ```bash
-just test              # pytest (sqlite)
-just lint              # ruff
-just migrate           # alembic upgrade head
-just seed              # Owner row + two paper APIs
-just openapi           # regenerate contracts/openapi.json
-just check-contracts
-just frontend-check
+just up -d nats      # 或者整個 stack 都起來
+just test            # pytest，sqlite
+just lint            # ruff
 ```
 
-Apps do not import each other. Shared code is `packages/common` (`import mftik`) and `packages/db` (`import mftik_db`).
+`just test` 只跑 sqlite。CI 另外在 Postgres 上跑一次（本機是 `just test-pg`，需要 `just up -d postgres`），因為 sqlite 忽略 VARCHAR 長度、也沒有 decimal 型別，欄位開太小在 sqlite 上看不出來。
 
-## The desk, 24/7
+其餘 recipe 用 `just --list` 看。常用的是 `just migrate`、`just seed`、`just openapi`、`just check-contracts`、`just frontend-check`、`just frontend-e2e`。
 
-A framework gives you `on_bar` and a backtest report. A desk has to answer what happens at 3 a.m. when a process dies, a deploy restarts MD, or a CI key ships a tree that cannot import.
+## 文件索引
 
-**Planes stay up independently.** STS, TD, MD, SYM, and paper are separate processes on one broker. The UI is a status board across them, not a script you re-run.
+重構期間以這三份為準：
 
-**Sessions are the unit of work.** Deploy from the STS page or `mftik run`. Live / Attention / History — the rows you must stop or ack are not buried under last month's `done`. A failed session keeps its reason until an operator acks it.
+| 文件 | 內容 |
+|---|---|
+| [`docs/ARCHITECTURE_CHANGE_PLAN.md`](docs/ARCHITECTURE_CHANGE_PLAN.md) | 平面進程化重構的計畫與決策（F1–F38）。基準是 `main` @ `a0cbfb2` |
+| [`docs/REFACTOR_TICKETS.md`](docs/REFACTOR_TICKETS.md) | 上面那份計畫拆出來的工作票，每張對應一個 issue |
+| [`docs/Deployment.md`](docs/Deployment.md) | 部署：Strategon plane sets、site 與 NATS gateway、secret、上線與回滾。B1-02（#161）會依現況重寫 |
 
-**Leases fence the dangerous verbs.** Only the process that holds the attach may place an order. Heartbeats expire; a ghost session does not keep trading. The long-term fence is the heartbeat and its acks (three missed intervals both ways, then stop), not a JetStream key — see [docs/JetStreamRemoval.md](docs/JetStreamRemoval.md). One instance name is one process; a second process with that name is refused at boot if the subject already has a responder.
+重構的盤點結果在 `docs/baseline/`：[`closed-branches.md`](docs/baseline/closed-branches.md) 記下重構開始前被刪掉的分支的 head，[`protocol.md`](docs/baseline/protocol.md) 是現行協定的盤點（B0-03，#156），[`state-authority.md`](docs/baseline/state-authority.md) 是現況的狀態權威表（B0-04，#157）。
 
-**The tape survives a restart.** Today that store is the broker's JetStream. The destination is a Redis next to the MD that recorded the feed, one node per region, AOF plus a volume, not copied across TW/JP. A recorder that shut down cleanly leaves a *measured* hole; a reader is told about it instead of treating two hours of intact prints as gone. STS asks that MD for the tape; it does not open Redis. Closing a seconds-wide deploy gap is a same-region handover, not an emergency.
+下面是舊模型的設計紀錄，都是英文寫的。B1-01（#160）會把它們整批移到 `docs/archive/`，並加一份 `INDEX.md` 記錄封存日期和取代它的文件；在那之前它們還在 `docs/` 根目錄。**內容描述的是重構前的架構，和計畫衝突時以計畫為準。**
 
-**Rebuild on boot.** `STS_REBUILD_ON_BOOT` brings interrupted sessions back after the stack returns. Facts the strategy `remember`ed come back through `on_rebuild` before `on_start`; resting orders come from recon, not from anything stored. A strategy that leaves orders at the venue must know it was away (`rebuildable`); the process default is off because a restored instance that treats recon as a clean account will place alongside what it left.
+| 分類 | 文件 |
+|---|---|
+| broker 與傳輸 | [`Broker.md`](docs/archive/Broker.md)、[`BrokerPatterns.md`](docs/archive/BrokerPatterns.md)、[`BrokerProvisioning.md`](docs/archive/BrokerProvisioning.md)、[`JetStreamRemoval.md`](docs/archive/JetStreamRemoval.md)、[`RedisRemoval.md`](docs/archive/RedisRemoval.md)、[`EventLoop.md`](docs/archive/EventLoop.md) |
+| 平面與 instance | [`Instances.md`](docs/archive/Instances.md)、[`StsPause.md`](docs/archive/StsPause.md)、[`StsSessionList.md`](docs/archive/StsSessionList.md)、[`MdHandover.md`](docs/archive/MdHandover.md)、[`MdExpiry.md`](docs/archive/MdExpiry.md)、[`MdVenueSubscriptions.md`](docs/archive/MdVenueSubscriptions.md)、[`MdOpenInterest.md`](docs/archive/MdOpenInterest.md) |
+| 功能設計 | [`Auth.md`](docs/archive/Auth.md)、[`AuditIdentity.md`](docs/archive/AuditIdentity.md)、[`Alert.md`](docs/archive/Alert.md)、[`Artifact.md`](docs/archive/Artifact.md)、[`StrategyEnvironment.md`](docs/archive/StrategyEnvironment.md)、[`CLI.md`](docs/archive/CLI.md) |
+| venue 實測 | [`Deribit.md`](docs/archive/Deribit.md)、[`BitgetUta.md`](docs/archive/BitgetUta.md) |
 
-**An event log per session.** Every hook the strategy was offered, and every order, cancel, and query it sent — written whether or not the strategy handled the event. Separate from `self.log`, which is what you meant and what the UI tails.
+已經封存的：[`docs/archive/README.md`](docs/archive/README.md) 是公開改寫前的 repo README，留著是為了舊的路徑與 recipe 對照表不要失傳。`docs/readme/` 是截圖，留給 B10 的 README 定稿用。
 
-**Paper is in the same desk.** Seed creates paper accounts. The ticker is `Paper_Spot_…`. The path from a laptop to a fill is the same path a Gate order will take.
-
-**A registry, not a shared disk.** Push your own trees. Publish what another node may pull. A peer connects with a **registry** key, which can only read the peer-facing routes — it cannot mint keys or deploy. Connecting compares the extras each node has applied; a missing `numpy` is a refused connect, not a surprise `ImportError` after the copy.
-
-**Audit is the proof, not the user id.** One Owner. The interesting column is whether it was the password, Discord, Google, or which API key. A CI deploy and a click in the UI must not look the same.
+還沒有的：`docs/ARCHITECTURE.md`（B1-04，#163）寫定案後的目標架構，`docs/TESTING.md`（B2）寫測試標準。
 
 ## License
 
-MIT. The published `mftik` package and this repository share that license.
+MIT。PyPI 上的 `mftik` 套件和這個 repo 同一個授權。

@@ -1,64 +1,70 @@
-"""Dispatch API→TD control-plane requests by Envelope.type."""
+"""Dispatch API→TD control-plane requests by Envelope.type.
+
+A handler's whole input is the decoded envelope and its whole output is
+the reply (H1). :func:`mftik.broker.handler.serve` is the loop. The
+order path is not on this subject: ``td.order.{api_id}`` is the account
+worker's (§7.1).
+"""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
 
-from mftik.broker import IncomingRequest
+from mftik.broker import Broker
+from mftik.broker.handler import Reply
 from mftik.protocol import (
+    TD_ACCOUNT_DRAIN,
     TD_ERROR,
     TD_HEALTH,
-    TD_SESSION_ATTACH,
-    TD_SESSION_DETACH,
     RpcError,
     RpcErrorEnvelope,
+    UntypedEnvelope,
 )
 
+from mftik_td.controller import INTENT_TYPES, intent_book, intent_handler
 from mftik_td.rpc.health import handle_health
-from mftik_td.rpc.sessions import (
-    handle_session_attach,
-    handle_session_detach,
-)
-
-if TYPE_CHECKING:
-    from mftik_td.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[..., Awaitable[None]]
-
-_HANDLERS: dict[str, Handler] = {
-    TD_HEALTH: handle_health,
-    TD_SESSION_ATTACH: handle_session_attach,
-    TD_SESSION_DETACH: handle_session_detach,
-}
-
 
 async def dispatch(
-    req: IncomingRequest,
+    message: UntypedEnvelope,
     *,
-    sessions: SessionManager | None = None,
-) -> None:
-    """Route a request to its handler, or reply with ``td.error``."""
-    handler = _HANDLERS.get(req.envelope.type)
-    if handler is None:
-        logger.warning(
-            "unknown td rpc type=%s id=%s",
-            req.envelope.type,
-            req.envelope.id,
-        )
-        await req.reply(
-            RpcErrorEnvelope.wrap(
+    broker: Broker | None = None,
+    instance: str | None = None,
+    drain: Callable[[UntypedEnvelope], Awaitable[Reply | None]] | None = None,
+) -> Reply | None:
+    """Route one control-plane message, or answer ``td.error``.
+
+    ``broker`` and ``instance`` are how a delete that drops the last
+    intent asks for a detach backfill. Callers that only want the book
+    updated leave them out. ``drain`` runs one account drain-replace.
+    Without it the type is refused, so a process that has not wired the
+    callback does not hang the caller.
+    """
+    if message.type == TD_ACCOUNT_DRAIN:
+        if drain is None:
+            return RpcErrorEnvelope.wrap(
                 RpcError(
-                    code="unknown_type",
-                    message=f"unknown type: {req.envelope.type}",
+                    code="not_implemented",
+                    message="td.account.drain is not wired",
                 ),
                 type=TD_ERROR,
                 source="td",
-                session_id=req.envelope.session_id,
+                session_id=message.session_id,
             )
-        )
-        return
-    await handler(req, sessions=sessions)
+        return await drain(message)
+    if message.type in INTENT_TYPES:
+        return await intent_handler(
+            intent_book(), broker=broker, instance=instance
+        )(message)
+    if message.type == TD_HEALTH:
+        return await handle_health(message)
+    logger.warning("unknown td rpc type=%s id=%s", message.type, message.id)
+    return RpcErrorEnvelope.wrap(
+        RpcError(code="unknown_type", message=f"unknown type: {message.type}"),
+        type=TD_ERROR,
+        source="td",
+        session_id=message.session_id,
+    )

@@ -1,9 +1,8 @@
 """The boot-time read that refuses a schema older than the build.
 
-A process pointed at a database that has not run
-``0034_strategy_type_key`` does not fail on connect. It fails on the sessions
-it silently cannot name, which is why this is a question asked once at boot
-rather than left to the first query that needs the answer.
+A process pointed at a database below ``MIN_STS_REVISION`` does not fail on
+connect. It fails on the first row that needs a column the migration has
+not added yet, which is why this is a question asked once at boot.
 """
 
 from __future__ import annotations
@@ -28,11 +27,20 @@ _BEFORE = _AFTER | {"strategy"}
 
 
 def test_the_dropped_column_is_what_says_the_migration_ran() -> None:
-    assert describe_too_old(SchemaState("0034_strategy_type_key", _AFTER)) is None
+    assert describe_too_old(SchemaState(MIN_STS_REVISION, _AFTER)) is None
     too_old = describe_too_old(SchemaState("0033_option_strike", _BEFORE))
     assert too_old is not None
     assert "0033_option_strike" in too_old
+    assert "0034_strategy_type_key" in too_old
     assert MIN_STS_REVISION in too_old
+
+
+def test_0034_dropped_strategy_and_is_still_behind_spec_status() -> None:
+    """0034 is no longer enough: this build selects the pins from 0036."""
+    behind = describe_too_old(SchemaState("0034_strategy_type_key", _AFTER))
+    assert behind is not None
+    assert "below" in behind
+    assert MIN_STS_REVISION in behind
 
 
 def test_a_schema_built_from_the_models_serves() -> None:
@@ -47,6 +55,16 @@ def test_a_revision_behind_the_floor_is_refused_on_its_number() -> None:
 
 def test_a_later_revision_serves() -> None:
     assert describe_too_old(SchemaState("0041_something", _AFTER)) is None
+
+
+def test_0036_and_0037_both_serve() -> None:
+    """0037 drops columns this ORM no longer selects, so the floor stays 0036."""
+    assert (
+        describe_too_old(SchemaState("0036_session_code_identity", _AFTER)) is None
+    )
+    assert (
+        describe_too_old(SchemaState("0037_drop_rebuild_facts", _AFTER)) is None
+    )
 
 
 def test_a_database_with_no_sts_sessions_table_is_not_servable() -> None:
@@ -79,6 +97,8 @@ async def _engine(tmp_path: Path, columns: str, revision: str | None) -> AsyncEn
     return engine
 
 
+# sqlite schema read; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_a_pre_0034_database_refuses_to_serve_sts(tmp_path: Path) -> None:
     engine = await _engine(
         tmp_path,
@@ -96,6 +116,8 @@ async def test_a_pre_0034_database_refuses_to_serve_sts(tmp_path: Path) -> None:
         await engine.dispose()
 
 
+# sqlite schema read; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_a_migrated_database_serves(tmp_path: Path) -> None:
     engine = await _engine(
         tmp_path,

@@ -1,0 +1,2155 @@
+# ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
+
+> **狀態：v0.38（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F47）；工作票見 `docs/REFACTOR_TICKETS.md`。
+>
+> **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.38（#343）：** F37 補上交易層關閉時的行為：送 `timeout=0` 解除倒數，死人開關只在交易層啟用時保護（§7.1，B6-07）。
+>
+> **v0.37（後續 issue 盤點）：** 29 張「後續」issue（#302 到 #362）逐項分類，三項需要決定的定為 F45（帳號綁定不可改）、F46（stop 改非同步）、F47（CI 上單一測試的時間上限只警告）。§7.1、§8.1、§9.1 隨之更新；其餘收尾項目搬進既有的票，另開 B3-10（#368）、B4-11（#369）、B5-12（#370）、B5-13（#371）、B6-10（#372）、B6-11（#373）。
+>
+> **v0.36（#299，MD controller 與 selector 的行為細節）：** 新增 F44：placement 只用 `max_atoms`，速率改成實測的滿載訊號；報告中斷不清 absence streak；`controller_epoch` 存在 `md_controller` 表；`Center.at` 是明確欄位；selector 的平手、新 expiry、量距離的 strike 序列、空 listing、非週五到期五條規則。§6.2、§6.4、§8.2 隨之更新；實作分到 B8-01、B8-02、B8-06、B9-01、B9-02、B9-03。
+>
+> **v0.35（#297、#296）：** F37 的 Gate 定為現貨（`Gate`）與合約（`GateFutures`）兩個都用，倒數取帳號層級（§7.1，B6-07）。#296 追認 B5-01 的做法（must-deliver 共用一條 FIFO、`bind_delivery` 綁 `seq` / `age`、ingress 從已解析的 dict 讀 `bar_open`）；worker 收到的 spec 由 B5-10 補上 `(strategy_digest, env_generation)`；must-deliver 的佇列長度和行情分開（B3-09）。
+>
+> **v0.34（#279，offload 子進程的額度）：** 新增 F43：`limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設改為 0；`offload_pool` 建立時預留額度，`isolate=True` 拿剩下的，超額拋出 `OffloadQuotaExceeded`；准入在部署時為宣告的子進程預留記憶體。§4.7、§5.5 隨之更新；實作併入 B5-03（#212）。
+>
+> **v0.33（#286，MD / TD 的重啟與 readiness）：** 新增 F42：MD 連線、TD 帳號、MD fetch worker 不設 FATAL，改成有上限的 backoff 加 crash-loop 告警；ready 不包含交易所連線；TD 帳號與 MD 連線的 heartbeat timeout 改為 10 秒；其餘暫定數值以現值為預設，收進新的附錄 D。§4.3、§6.3 隨之更新；新票 B3-08（#365）、B3-09（#366）、B6-09（#367）。
+>
+> **v0.32（#288，per-atom `seq`）：** F25 的「重新起算」寫精確成以 (atom, 連線 epoch) 起算：重連、單一 atom 的 resync、換 incarnation 之後都從 1 開始；策略端只用 `seq != last + 1` 判斷不連續。`seq` 留在共用 envelope（optional），`owner` 不上線。§3.3、§5.3、§6.3 隨之更新；實作併入 B8-03（#240）。
+>
+> **v0.31（#282，`pv` 在哪一層擋）：** 新增 F41：`pv` 從 envelope 搬到 NATS header `Mftik-Pv`，由 transport 在解碼之前檢查，不符就丟棄並計數，不回錯誤；另在 deploy 時先比對 session 會用到的 controller 與 worker。§3.3、§3.4、§4.6、§8.3、§11 的 B4 列隨之更新；新票 B4-10（#363）。
+>
+> **v0.30（RM-10 留下的兩題）：** 新增 F39、F40 與 §5.7：「worker 跑哪一份代碼」分成平台 release、策略樹 digest、extras generation 三個軸，session 在 start 時釘住後兩者；STS controller 服務 operator 對主機磁碟的所有路徑（registry、extras、artifacts、event log），不 import 策略代碼。§3.3、§3.4、§4.3、§4.6、§5.1、§8.4 隨之更新；新票 IF-16（#275）、B5-10（#276）、B5-11（#277）。
+>
+> **v0.29（RM-10，#173）：** 附錄 C 加上 C.8，填入清場後在 GitHub Actions 上量到的實數（3,776 個測試、255.8 秒），C.5 的模組表加上「RM 之後」兩欄。附錄 A 加上一節，記錄 RM 落地時和清單不同的五處。新增 `docs/baseline/remaining.md`。
+>
+> **v0.28（B0-02，#155）：** 附錄 C 填入在 `ubuntu-latest` 上量到的結果。量測同時更正了兩件事，記在 C.6：F30 的 120 秒不能直接和基線的 428 秒相比，以及 §9.3 與 F16 對策略實作測試裡「真的 sleep」的描述不準（sleep 在 `chase.py` 而不是在測試裡）。兩者的結論都仍然成立。
+>
+> **v0.27（B0-05，#158）：** 附錄 A、B 定稿。附錄 A 從「依 import 整檔分類」改成逐案例，RM 的測試刪除量從 566 修正為 401；附錄 B 補上原本漏列的四個檔案與各票票號，並列出容易誤刪、實際上要保留的模組。每張 RM 票補上了 `檔案:函式` 的呼叫端清單與「B0-05 補正」。查核中確認 §5.4、§8.1、§8.2 和附錄 A、B 上的每一個符號都存在於 `a0cbfb2`。
+>
+> **v0.26 更正：** v0.25 以前的版本，誤用了 PR #153（`fix/sts-start-deadline` @ `8ddfc23`，未合併、已關閉）的代碼當作現況。PR #153 加入的 8 秒 / 300 秒啟動期限、`start_deadline` kill、abort 重試與 `abort_target` 欄位，都不在 main 上；相關敘述、刪除清單和 migration 已依 main 改正，行數和測試數也已重算。`deployment/nats/nats.conf` 被 `.gitignore` 排除，不在 repo 裡，§5.3 引用的是本機那份。B0-05 複查確認：`_abort_timed_out_create`、`resume_pending_aborts`、`abort_target`、`START_TIMEOUT_DEFAULT_S`、`create_rpc_timeout` 這五個 #153-only 的名字在 `a0cbfb2` 上 grep 不到，也沒有出現在任何 RM 票的範圍裡。
+
+### 已定案
+
+| # | 決策 | 影響 |
+|---|---|---|
+| F1 | 本版是**破壞性變更**，不做任何兼容層 | 協定、DB、SDK 一次切換。批次只需要在分支上保持測試全綠，不必各自可部署（§11） |
+| F2 | 切換到本版前，使用者必須先停掉所有運行中的策略，平面上不能有 running session | 不需要遷移 live session，也不需要舊 worker 和新 controller 互通。切換前有 preflight 檢查（B10） |
+| F3 | `on_start` 本來就允許長時間 warm-up | `on_start` 是獨佔階段，平台不在它執行期間要求任何準時的工作（§5.3） |
+| F4 | 所有資源投入本重構，不在現行版本做止血修正 | 現行版本的長 hook 問題要到 B10 上線才會消失 |
+| F5 | 不引入尚未成熟的技術 | 排除單一執行檔打包（PyApp、scie），也就是 §4.5 的選項 C |
+| F6 | 部署採用 §4.5 的選項 A：OCI 加 `oci_host_pid`，由 controller 直接 spawn shim | Strategon 的改動（S-1 到 S-3）追蹤於 [BullionBear/strategon#60](https://github.com/BullionBear/strategon/issues/60)。**本文其後的設計都假設 #60 已完成** |
+| F7 | 記憶體防護：mftik 端先做 `oom_score_adj` 分級、可選的 `RLIMIT_DATA`、准入控制（§4.7） | cgroup 上限由 [strategon#61](https://github.com/BullionBear/strategon/issues/61) 提供，**不是本重構的前提**；#61 上線後再重估每個平面的上限 |
+| F8 | STS session worker = ingress thread（main thread，接收連線）+ strategy thread（送出連線，直接 publish 送單）；回覆走 ingress 的 inbox；交付策略照 §5.3 的預設 | ingress 與 session 同生共死（§5.3 的 I1 到 I4） |
+| F9 | 刪除 `breathe` / `slice_deadline`；SDK 提供 `offload`，有 thread（預設）和 process 兩種模式 | §5.5 |
+| F10 | 刪除 `on_rebuild`、`remember()`、`rebuildable`、`st_facts`；策略不再碰 Postgres，session 狀態由 Supervisor 寫入；crash 後先保證 `on_stop`（做得到的話）並由平台清場，再依 deploy 設定 fail 或從 `on_start` 重新掛起，同時發 alert | §5.2 |
+| F11 | `restart` 預設 `never`；`on_failure` 只對 A 類 crash（策略例外、`on_stop` 有跑）生效；`max_restarts=5`、`restart_window_s=600` | §5.2 |
+| F12 | `on_ready` 等所有有宣告的就緒條件成立才呼叫（TD 是硬條件、MD 是軟條件）；`on_ready` 之前下單會拋出 `NotReady`；deploy 改成 202 加狀態進度；`start_timeout_s` 只算 `on_start`（預設 60、上限 3600 秒），另設 `ready_timeout_s`（預設 30 秒） | §5.2 |
+| F13 | 刪除 `send_recon`、`STS_RECON`、`on_recon_done`；需要等帳本收斂時改用 `self.oms.view(settled=True)`；新增 `on_resync(api_id, cause, view)`，只由平台在事件流可能有缺口時觸發；OMS / ledger 的權威維持在 TD 帳號 worker 的記憶體 | §5.2、§7.1 |
+| F14 | MD / TD 失聯只通知、不自動 fail；新增 `on_md_update`、`on_td_update`、`self.md.state()`、`self.td.state()`；帳號 `unavailable` 時下單在本地回傳 False（`td_unavailable`）；MD 連線 worker 和 TD 帳號 worker 單向廣播狀態，靜默 10 秒視為失聯 | §5.6 |
+| F15 | hook 時間預算：一般 hook 的阻塞時間超過 1 秒只發警告，超過 30 秒視為 B 類 crash；`on_start` 只受 `start_timeout_s` 約束；`on_ready`、`on_stop` 的牆鐘時間上限各 10 秒 | §5.3 |
+| F16 | 策略實作測試（224 個）RM 不刪，保留到 B5 再改寫到 `StrategyHarness` 上 | 這批測試不碰 NATS、幾乎沒有真的 sleep，不會吃掉 B2 的兩分鐘預算（§9.3） |
+| F17 | MD 連線 worker 一條 websocket 一個進程 | 接受「使用中的連線數 × 單一進程 RSS」的記憶體代價（§4.7、§6.3） |
+| F18 | reconciler 跑在連線 worker 裡；controller 只推完整的 desired 清單，帶 `generation = (controller_epoch, seq)`，worker 只接受更大的值 | §6.2、§6.3 |
+| F19 | mftik feed 對交易所 atom 是一對多。跨連線的組合由 MD 發佈原子事件、STS 端以平台通用的 join 組合，不設組合 worker；組成的 atom 任一 down，這個 feed 就是 down | §6.1、§5.6 |
+| F20 | 範圍 3.1 的「把每個行情作為原子行情寫下」指的是把行情定義成 atom，不是錄 tape。tape 改以 `atom_id` 為 key，錄 `trade`、`aggtrade`、`liquidation` | §6.3 |
+| F21 | MD 是行情的權威，地位對應 TD 之於 ledger：解碼、book 的 fold、late joiner 的快照都在 MD 連線 worker，`md.a.*` 上傳的是平台 model | STS 不接觸交易所原文，也不持有 fold 狀態（§6.1） |
+| F22 | MD 不做連線遷移：atom 放上某條連線後就留在那裡，直到沒有 demand。controller 滾動不影響連線 | 刪除 make-before-break、I-MD1、連線整併；每個 atom 任何時刻只有一個發佈者（§4.6、§6.2、§6.3） |
+| F23 | 不提供 `on_feed_gap`：漏收由策略自己記錄，平台不替策略記 | MD 斷線、連線 worker 重啟、STS ingress 重連一律只以 `on_md_update` 的 down → live 通知（§5.3、§5.6）；`all` 類 feed 佇列溢出時，策略以 `event.seq` 自己偵測（F25） |
+| F24 | 既有 MD 連線 worker 換版只靠人工逐條 `restart`；平台不自動重啟舊版連線，也不為了換版打斷運行中的策略 | 升版時才知道需不需要換，而且換版本身可能有相容問題（§4.6）。另提供列出「仍在跑舊版代碼的 worker」的指令 |
+| F25 | MD 事件帶 per-atom 的 `event.seq`，漏收由策略自己偵測 | `seq` 以 (atom, 連線 epoch) 起算：同一條連線上連續；重連、單一 atom 的 resync、換 incarnation 之後，該 atom 從 1 重新起算，對應 `on_md_update` 的 `live`。策略只用一條規則：`seq != last + 1` 就是不連續。`seq` 不是排序鍵也不是去重鍵，`(atom_id, seq)` 不保證唯一。`seq` 是共用 envelope 的 optional 欄位，`owner` 不上線（#288）。`all` 類跳號代表漏收，`latest` 類跳號是設計上的覆蓋（§5.3） |
+| F26 | 跨版本只靠版號：每則 NATS 訊息帶 `pv`，格式一改就升版，不同 `pv` 一律拒絕；不做版內相容，也不做 schema 比對 | 停止不依賴協定（SIGTERM），任何版本組合都停得掉。升版順序見 §4.6；在哪一層擋、怎麼擋見 F41 |
+| F27 | TD 帳號 worker 換版後由人工逐帳號觸發 drain-replace，平台不自動換版 | 理由同 F24（§4.6） |
+| F28 | `docs/Deployment.md` 不封存，依現況重寫；venue 實測表（`Deribit`、`BitgetUta`）封存到 `docs/archive/` | B1 依現況重寫 Deployment，B10 依新架構更新（§10） |
+| F29 | shim 用 Python | 只用標準庫，不 import pydantic、nats 等第三方套件，以壓低每個 shim 的 RSS（實測見 §4.7），這部分算進 §4.7 的預算 |
+| F30 | 兩分鐘預算以 GitHub Actions 的 `ubuntu-latest` 為準 | 只算 `just test`（unit + component）那一步；integration 另開 job（§9.1） |
+| F31 | 測試照樣用 NATS，不引入 broker fake；連線和收到之後的行為分開測，每個 xdist worker 共用一條 NATS 連線 | handler 和傳輸分開寫，行為測試直接呼叫 handler（§9.2） |
+| F32 | 刪除 §8.2 的規則 4：STS controller 的報告整個停止時不回收任何東西，不從訊號缺席推論主機失聯 | 機器永久消失時由人工 `mftik intents gc --instance`（暫定）。P7 只剩 F14 的失聯通知這個只通知、不回收的例外 |
+| F33 | selector：`md:` 新增 `select:`（`option_chain`、`rolling_future`），由 MD orchestrator 以純函數推導；策略只用 `on_universe_change`；暫不做 pin；不加 `required` | §6.4 |
+| F34 | TD 帳號 worker 以帳號（`api_id`）為單位，一個進程持有該帳號所有私有連線 | §7.1 |
+| F35 | 帳號 worker 對每個啟用帳號常駐，維持溫熱的 HTTP 連線池；refcount（intent）只開關交易層（私有 websocket、OMS、recon），不 linger；backfill 是帳號 worker 用連線池處理的一次性 request，不另開 job worker | §7.1、§7.2 |
+| F36 | 帳號的 at-most-one 不用 DB lease：同 instance 由 Supervisor 以 PID 確認，跨 instance 靠 `api_id` → instance 的靜態綁定；`st_facts` 在 B10 drop | §7.1、§8.4 |
+| F37 | cancel-on-disconnect 預設關閉、逐帳號開啟；只用倒數計時型機制，當作 TD worker 的死人開關，只在交易層啟用時保護：交易層關閉時送 `timeout=0` 解除倒數（#343）；不用 Deribit COD 和 Bybit DCP | §7.1 |
+| F38 | intent 兼任歷史：session 結束時 intent 列不刪、改記 `released_at`；`md_sessions` / `td_sessions` 從 B10 起停寫、保留唯讀；前端 MD/TD 頁改成顯示 worker 與 intent | §8.4；前端資料來自 procman 回報和 worker 狀態廣播 |
+| F39 | 「worker 跑哪一份代碼」分成三個軸：平台 release（`code_ref`）、策略樹 `strategy_digest`、extras `env_generation`。策略樹與 extras 的目錄權威維持在 API；session 在 start 時釘住 `(strategy_digest, env_generation)`，重新掛起沿用；Supervisor 記錄 worker 實際跑的版本；STS 磁碟副本改以 digest 定址，被釘住的版本不被覆蓋或回收；STS controller 不 import 策略代碼 | §3.3、§5.7；IF-16（#275）、B5-10（#276） |
+| F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact，而且可以寫任何 key（全域寫入，刻意保留） | §5.7；B5-11（#277） |
+| F41 | `pv` 在兩個地方擋。**deploy 時：** API 把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent；`WorkerSpec` 記下 worker 的 `pv`，經 `procman.report` 帶出；某個 `(venue, endpoint)` 上還有 `pv` 不同的 MD 連線 worker 時，MD controller 對落在那裡的 `md.intent.put` 以 `protocol_mismatch` 拒絕，不另開新 worker 承接。**執行中：** `pv` 改放 NATS header `Mftik-Pv`，由 transport 蓋上、在任何解碼之前檢查；header 缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數，不回錯誤。request 收到不符的 reply 時，transport 對呼叫端拋出本地錯誤。envelope 的 `pv` 欄位刪除 | body 裡的 `pv` 有預設值，解碼之後就分不出「缺少」和「相符」，所以檢查只能在解碼之前，而所有訊息都會經過、又還沒解碼的地方只有 transport。丟棄而不回錯誤，`mftik.broker.handler` 的 H5、H6 不變，fan-out 也一併涵蓋。代價是送錯版本的 request 會 timeout、廣播只被計數，所以要靠 deploy 時的比對先擋（§4.6）。新 controller 推不到舊 `pv` 連線 worker 的 desired、也收不到它的狀態廣播，不知道它持有哪些 atom；另開新 worker 承接會讓同一個 atom 有兩個發佈者和兩個 tape writer（違反 F22、§6.3），所以整個 `(venue, endpoint)` 擋到人工 `restart`（F24）為止；B4-10（#363）、B8-02（#239） |
+| F42 | MD 連線、TD 帳號、MD fetch worker 不設 FATAL：crash 後第 n 次重啟前等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘 n 才歸零；n 到 5 發 crash-loop 告警，歸零時解除。ready 只代表本地初始化完成（設定與憑證載入、NATS subject 答得到），不包含交易所連線：連不上由 F14 的狀態廣播回報，在進程內依同一條曲線重試（連線維持 60 秒後歸零）；FAILED 只留給設定錯誤；API key 被拒時照樣 ready，報 `unavailable(auth_rejected)`，不再重試認證。TD 帳號與 MD 連線的 heartbeat timeout 為 10 秒。STS 維持 F11。其餘暫定數值以現值為預設，列在附錄 D | 它們是共用基礎設施：FATAL 會讓所有依賴的 session 停到有人處理，TD 還會留下策略撤不掉的掛單（F37 預設關閉）；crash 重啟用的是當下 controller 的 release，修正版上線後會自己恢復。jitter 避免相關的 crash（同一個壞 frame 打在多條連線、同一個 bug 影響多個帳號）同步重連，撞上 per-IP 的連線速率限制。ready 若包含交易所連線，spawn 時遇到維護或網路抖動就會 FAILED 且永不重啟。10 秒和 F14 收件端的靜默判定一致，procman 不會比收件端先下手（§4.3）；B3-08（#365）、B3-09（#366）、B6-09（#367）、B8-02（#239）、B8-03（#240） |
+| F43 | `limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設 0（用 process 模式要宣告）。`offload_pool(workers=N)` 建立時預留 N 個；`isolate=True` 背後的 pool 在第一次使用時建立，拿剩下的額度，至少 1 個。額度不夠就在呼叫處拋出 `OffloadQuotaExceeded`，不默默縮小。准入在部署時預留 session 估計值加上 P × 子進程估計值（P 為 `offload_processes`；子進程估計值有設 `offload_memory_mb` 就用它，否則用實測的 spawn 子進程基準 Pss）；子進程不算進 `max_workers`。`offload_threads` 預設維持 2 | 一個寫在 strategy.yml 的數字界定整棵子進程樹，准入和 operator 在代碼跑起來之前就看得到上限；若 pool 不受 `limits` 管，子進程數由執行期代碼決定，准入無從得知。默默縮小會讓策略以為有 N 個 worker，延遲莫名變差。預設 1 會讓每個 session 多預留一個大多用不到的子進程（約 60 MiB，等於估計值翻倍）。`StrategyHarness` 套用同樣的限制，測試時就會撞到（§4.7、§5.5）；B5-03（#212） |
+| F44 | MD controller 與 selector 的九條細節（#299）：(1) placement 只用 `max_atoms`；連線 worker 在 `md.w.*` 回報實測 msg/s，超過 `max_messages_per_second` 的 80% 就不再放新 atom，已在上面的不搬。(2) 報告中斷不清 absence streak。(3) `controller_epoch` 存在 `md_controller(instance PK, controller_epoch)`，啟動時以一句 UPSERT 遞增。(4) `Center.at` 是 selection 狀態裡的明確欄位，只在重新置中時改寫，不以 `updated_at` 代用。(5) 參考價落在兩檔正中間時取靠近目前中心的一檔，沒有中心時取較低的一檔。(6) debounce 期間新出現的 expiry 跟著存下的中心點，取它自己序列上離中心價最近的一檔。(7) 距離一律量在這一輪套用 `min_tte` 之後的最近 expiry 的 strike 序列上。(8) listing 回來 0 個 instrument 一律當讀取失敗，`Hold(listing_empty)`。(9) tenor 分類交給 venue 的 atom adapter（`tenor_of`），週五日曆是只套用在宣告適用的 venue（目前是 Deribit）的預設實作；沒有分類能力的 venue 部署 `rolling_future` 在 deploy 時失敗 | (1) 每個 atom 的推送量差好幾個數量級，給不出靜態成本。(2) 換 publisher 時 B3-04 已重置；同一 publisher 中斷前後的兩份報告都是權威的缺席觀測，terminal 的 session 不會回到報告上。(4) 期權到期輪替時 selection 會變，中心點和時間戳要保留（S5）。(6) 狀態只有一個中心點，`evaluate` 是純函數，結果必須能從 `(listing, prev)` 重算。(8) 把讀取失敗當成空盤面會退訂整條鏈；真的空了，舊合約到期時照 C7 移除。(9) venue 詞彙歸 MD 的 atom 層（§6.1），SYM 不改（§6.2、§6.4、§8.2）；B8-01、B8-02、B8-06、B9-01、B9-02、B9-03 |
+| F45 | 帳號的 TD instance 綁定（`apis.instance_id`）不可經 API 修改：`PATCH /apis` 只改名，欄位 NOT NULL、沒有未綁定的狀態。要搬帳號，就刪除後在新 instance 重建（新的 `api_id`）。之後若要加改綁的 route，帳號還有未釋放的 intent、或舊 instance 的報告還列著它的 worker 時一律拒絕，主機永久消失時才允許 `--force` | F36 的 at-most-one 靠的就是靜態綁定，所以要擋的是改綁這個動作本身。等舊 worker 從報告消失再 spawn 的做法依賴報告缺席，和 F32 衝突：舊主機永久消失時新 instance 永遠不會 spawn（§7.1，#329）；runbook 見 B10-04（#252） |
+| F46 | stop 改成非同步：STS controller 接受 `sts.session.end` 就回覆，API 回 202，CLI 輪詢 status 直到 terminal。session 進入 terminal（不論是 stop、`exit` 還是 `fail`）時，由 STS controller 寫該 session 的 intent `released_at`，再盡力送 `md.intent.delete` / `td.intent.delete`；MD / TD 的報告回收是兜底 | `on_stop` 10 秒加上 grace、再加上清場最多 45 秒，同步等待一定超過 API 和 CLI 的逾時，stop 常回 503，但 session 其實已停。和 deploy 的 202（F12）對稱。session 自行結束時本來就沒有人寫 `released_at`，這一步本來就要做。代價是 intent 晚幾秒釋放（§8.1，#331、#345、#314）；B4-11（#369）、B5-12（#370） |
+| F47 | CI 上 unit 50 ms、component 500 ms 的單一測試上限只輸出 warning，不判定失敗；本機仍判定失敗。`just test` 那一步 120 秒的 wall time 在 CI 上仍是硬性閘門，integration 10 秒上限在 CI 上也仍判定失敗 | `ubuntu-latest` runner 的計時抖動：每次失敗的都是不同的測試，而且都在上限附近，同一批 unit 測試本機最慢約 25 ms（§9.1，#303）；B2-01（#174） |
+
+## 0. 摘要
+
+這次重構把 STS/MD/TD 的執行單位，從「平面進程裡的 coroutine，或綁在平面進程上的子進程」改成「由 procman 持有、與平面 controller 生命週期解耦的 worker 進程」。
+
+- **平面 controller 只負責控制面**：把宣告收斂成實際狀態。它可以隨每個 tag 滾動，不會中斷任何 worker。滾動時先 detach，新版啟動後再 reattach。
+- **資料面只在 worker 和 NATS 之間流動**：行情、下單、回報都不經過 controller。
+- **MD 的管理單位改成交易所的原子訂閱**。平台 topic（`bestquote.X`）變成原子訂閱的投影。
+- **STS 取消 rebuild**。進程不會因為部署而停止，所以不需要重建。
+- **API 只負責開始與結束**。中間發生的一切由各平面的 orchestrator 自行收斂。
+- **測試先清掉、再依新標準重寫**。預設測試集要在兩分鐘內跑完。
+
+整體上，這是把 K8s 的 controller、kubelet、shim 那套模型搬到進程層級，再依 STS/MD/TD 各自的語意特化。
+
+| 本次範圍 | 章節 | 批次 |
+|---|---|---|
+| 1. 封存 `docs/`，只保留架構設計 | §10 | B1 |
+| 2. STS/MD/TD 進程化；進程管理層、shim、各平面 orchestrator、API 只管開始與結束 | §3、§4、§5、§7、§8 | B3、B4、B5、B6 |
+| 3. MD 拆成 orchestrator 與 reconciler；原子行情；從宣告式推導訂閱 | §6 | B7、B8、B9 |
+| 4. STS 不再 rebuild；重新設計續約與 `breathe` | §5.3、§5.4、§5.5、§8.2 | B4、B5 |
+| 5. TD 每個進程一個私有 websocket，以 ledger 為主 | §7 | B6 |
+| 6. 單元測試兩分鐘內跑完；先移除、再立標準 | §9 | B0、B2 |
+
+---
+
+## 1. 現況（以代碼為準）
+
+### 1.1 各平面的執行單位
+
+| 平面 | 執行單位 | 生命週期綁在 | 證據 |
+|---|---|---|---|
+| STS | **已經是一個 session 一個 OS 進程**（`SubprocessSpawner`） | STS 父進程。三重綁定：lifeline pipe EOF、`PR_SET_PDEATHSIG(SIGTERM)`、`getppid()` 比對 | `apps/sts/src/mftik_sts/spawn.py`、`worker.py`（`arm_parent_death`、`_watch_lifeline`） |
+| STS | 父進程一停，所有 worker 跟著退出，再靠 rebuild 補回 | `STS_REBUILD_ON_BOOT`、重建時間窗 1800s、最多 3 次、`Strategy.rebuildable`、`on_rebuild`、`st_facts`、`rebuild_count`、`restart` | `session/manager.py`（`rebuild_interrupted`、`_spawn_rebuild`、`adopt_interrupted`） |
+| MD | 單一進程。每個 venue 一個 `VenueSession` / connector，**一條公用 socket 承載所有 session 的所有 feed** | MD 進程 | `mftik_md/session/venue.py`、`manager.py`（1,533 行） |
+| MD | 管理單位是 product key `(topic, UniversalTicker)`。`Dispatcher` 對每個 session 發 `md.{session_id}`，fan-out 成本 = session 數 × feed 數 | — | `session/dispatcher.py` |
+| MD | wire ledger 藏在各 adapter 的 socket 內，MD 刻意不碰 venue 詞彙（MdVenueSubscriptions I6） | — | `exchange/wire.py` |
+| MD | 到期處理是每個 ticker 一個 sleep task。訂閱只在 attach 時推導一次 | — | `_expiry_tasks`、`_subscribe_feed` |
+| TD | 單一進程。每個 `api_id` 一個 `Session`（OMS 和 ledger 都在記憶體），由 STS link 做 refcount | TD 進程。TD 滾動會 reap 該 instance 名下所有 session | `mftik_td/session/manager.py`（1,711 行） |
+| API | `deploy_strategy` 依序執行：STS create（`on_start`、`on_ready` 在這一步就跑完）→ MD attach → TD attach，失敗就以 `_detach_md`、`_fail_sts` 回滾。create 的 RPC timeout 寫死 10 秒 | — | `mftik_api/orchestrate.py`（538 行） |
+
+### 1.2 長時間 hook（Deribit、ML）出問題的結構性原因
+
+以下是我從代碼讀出的根因，請對照你的分析修正。
+
+1. **活性和進度共用同一個訊號。** STS session 的 `_lease_heartbeat_loop` 和策略 hook 跑在同一個 event loop 上。ack 連續 1s × 3 次沒看到（`LEASE_HEARTBEAT_INTERVAL_S=1.0`、`LEASE_MISS_LIMIT=3`），session 就會自我 fail。MD 和 TD 那端的 lease 也用同一個時間窗。CPU-bound 的 hook（模型載入、推論、期權鏈全量重算）只要佔住 loop 約 3 秒，session 就會被判死。`breathe` / `slice_deadline` 是為了不讓策略餓死 heartbeat 而存在的補丁，問題本身並沒有解決。
+2. **啟動沒有上限，但 API 只等 10 秒。** STS 的 create 要等 `on_start`、`on_ready` 跑完才回覆，STS 端沒有任何 deadline；API 的 create RPC 寫死 10 秒（`orchestrate.py`），CLI 的 `deploy_http_timeout` 也以 10 秒（`_STS_CREATE_S`）估算。`on_start` 超過 10 秒時 deploy 回 504，但 session 照樣起來（#132）。長 `on_start` 在每次 rebuild 時都要重新付一次這個成本。
+3. **生命週期綁在平面進程上。** 任何一次部署都等於所有 session 中斷再 rebuild。rebuild 還要求策略自己支援 `rebuildable`。
+4. **MD 單一 socket 承載所有訂閱。** 期權鏈的量級是一條鏈幾十到幾百個 channel。這個量級下，解碼的 CPU 負擔和重連風暴（V15）都集中在同一個 loop 上。
+
+### 1.3 測試現況
+
+- 共 3,377 個測試函數（靜態計數，參數化展開前）：`packages/common` 1,642、`apps/sts` 557、`apps/api` 438、`apps/td` 302、`apps/md` 211、`packages/db` 137、`apps/sym` 84、`apps/paper` 6。
+- 依 import 分類、檔案裡有東西碰到 session 機制（三個平面的 `SessionManager`，以及 `orchestrate`）的 566 個；逐案例查核後真正依賴它的是 401 個（附錄 A）。策略實作測試（chase、oco、macd_dollar、cross_arb、twap、noop、tape_keeper）224 個，帶有 rebuild 語意。
+- `pytest_sessionstart` 強制要求真的 NATS server（「the broker has no fake」）。DB 測試以 sqlite 參數化，CI 再加跑 Postgres。
+- 測試裡有 424 處 `asyncio.sleep(>0)`、329 處 ≥1s 的 `timeout=`，`test_session_processes.py` 會 spawn 真的子進程。
+- **各測試模組的實際耗時還沒量過**，這是 B0 的工作。
+
+---
+
+## 2. 目標、非目標、原則
+
+### 2.1 目標
+
+- **G1** 平面 controller 重啟或更新時，不中斷任何 worker：先 detach，新版再 reattach。
+- **G2** worker 的生命週期不依賴 controller 是否存活，而且永遠不會變成 orphan：一定有 shim 持有它。
+- **G3** 長 hook 不影響活性判定，也不影響平台在同一個 worker 裡的其他工作（收訊息、RPC timeout、控制）。進度慢是一個可觀測的狀態，除非策略自己宣告上限，否則不是 kill 的理由。
+- **G4** MD 的管理單位是交易所的原子訂閱，平台 topic 是它的投影。宣告式設定可以推導出動態集合，例如 ATM 期權鏈和轉倉。
+- **G5** API 只管開始與結束，中間的變化由平面內部的 orchestrator 收斂。
+- **G6** `just test`（預設 tier）在本機兩分鐘內跑完。
+
+### 2.2 非目標
+
+- 多主機排程。placement 只在單一 instance 內進行。
+- SYM 和 Paper 平面的結構調整。它們只配合新協定。
+- venue adapter 的 wire 程式碼。可以重用，只在 B7 抽出 atom 相關的介面。
+- Rust 化。Supervisor 和 shim 之間是語言無關的 NDJSON 協定，之後換語言不影響其他元件；本次 shim 用 Python（F29）。
+
+### 2.3 原則
+
+- **P1 控制面與資料面分離。** 資料不經過 controller。controller 掛掉代表暫時無法**改變**狀態，不代表系統無法**運作**。
+- **P2 Spec / Status，level-triggered。** 宣告寫在 Spec，系統只寫 Status。用 `generation` / `observedGeneration` 判斷收斂到哪一版。所有動作都必須冪等。
+- **P3 活性不等於進度。** 活性由 shim 證明：進程存在、能回應。進度（hook 延遲、feed 是否過期）是 Status 上的 condition。
+- **P4 At-most-one。** 同一個 session、account 或原子訂閱的發佈者，任何時刻只能有一個 incarnation 產生副作用。fencing token 是 `(id, incarnation)`。STS 和 TD 的替換順序是 delete-before-create；MD 不做連線遷移（F22），連線 worker 原地重啟時同樣是 delete-before-create。
+- **P5 Fail-static。** controller 消失時，worker 維持最後一份 desired，不在資訊不足時做破壞性動作。
+- **P6 平面特化。** procman 只認識「進程」。STS/MD/TD 的語意全部留在各自的 orchestrator 裡。
+- **P7 不以「訊號消失」推論狀態。** 能由權威來源直接觀測的（worker 是否存在、feed 最後一筆的時間），就不用週期訊號的缺席去推斷。唯一例外是 MD/TD 廣播靜默時發給策略的失聯通知（§5.6）：它只通知，不回收任何資源。資源回收一律依權威觀測（§8.2、F32）。
+
+---
+
+## 3. 分層與元件
+
+```
+                 ┌──────────────── API（只管 start / end）────────────────┐
+                 │ 驗證 spec → 寫 SessionSpec → TD/MD intent → STS start  │
+                 └──────┬──────────────────┬──────────────────┬───────────┘
+                        │ 控制 subject（NATS request-reply）  │
+               ┌────────▼───────┐ ┌────────▼───────┐ ┌────────▼───────┐
+ plane         │ STS controller │ │ MD controller  │ │ TD controller  │  ← Strategon OCI assignment（oci_host_pid）
+ controller    │ orchestrator + │ │ orchestrator + │ │ orchestrator + │    每個 tag 滾動
+               │ Supervisor     │ │ Supervisor     │ │ Supervisor     │    開機時 reattach
+               └────────┬───────┘ └────────┬───────┘ └────────┬───────┘
+                        │ shim socket（NDJSON，${WORK_DIR}/run/*.sock）
+ 由 host init 收養 ─┬─ shim ─ worker  sts/session/a1b2c3
+                    ├─ shim ─ worker  md/conn/Deribit/public/0
+                    └─ shim ─ worker  td/account/42
+ 資料面：worker ⇄ NATS ⇄ worker（永不經過 controller）
+```
+
+### 3.1 Worker 種類
+
+| 平面 | kind | 身分 | 擁有 | 直接服務／發佈的 subject |
+|---|---|---|---|---|
+| STS | `session` | `session_id` | 策略實例、event log、timer、artifacts handle。ingress thread 持有接收連線，strategy thread 持有送出連線（§5.3） | 服務 `sts.ctl.{session_id}`（stop、fail、status）；訂閱 `md.a.*` 和 `td.*` |
+| MD | `conn` | `(venue, endpoint, n)` | **一條**公用 websocket、該連線的 reconciler、decoder、tape append | 發佈 `md.a.{venue}.{atom}` |
+| MD | `fetch` | instance | REST readers | 服務 `md.fetch` |
+| TD | `account` | `api_id` | 常駐：HTTP 連線池、backfill。有 intent 時加上交易層：私有 websocket、OMS、ledger、recon、槓桿快取（F35） | 服務 `td.order.{api_id}`、`td.oms.*`、`td.ledger.*`；發佈 `td.{api_id}.global` |
+
+### 3.2 和 K8s 的對照
+
+| K8s | 這裡 |
+|---|---|
+| etcd + API server | Postgres 上的 Spec/Status 表，加上各平面 controller 的控制 subject |
+| controller-manager | 各平面的 orchestrator |
+| kubelet | Supervisor（嵌在 controller 裡） |
+| containerd-shim | mftik-shim |
+| Pod | worker |
+| ownerReferences GC | intent 的 `owner=session_id`，owner 進入 terminal 時由 MD/TD 回收 |
+| readiness probe | session conditions（`MdReady`、`TdReady`） |
+| Deployment rolling update | TD 帳號 drain-replace；MD 連線不遷移（F22），換代碼見 §4.6 |
+| StatefulSet at-most-one | STS/TD 的 incarnation fencing |
+
+### 3.3 狀態的權威
+
+每一種狀態只有一個權威：只有它能寫，其他人一律向它讀或聽它廣播。重啟或失聯後，也只由它收斂。B0 會另外整理一份現況版（as-is），標出和這張表不一樣的地方。
+
+**控制面（宣告）**
+
+| 狀態 | 權威（唯一寫入者） | 存放 | 讀取者 | 重啟或失聯後怎麼收斂 |
+|---|---|---|---|---|
+| session spec：策略、參數、`restart`、timeout | API | Postgres `sts_sessions`（Spec 欄位） | STS controller | DB 本身就是權威 |
+| session status：phase、conditions、incarnation、`restart_count`、失敗原因 | STS controller 的 Supervisor | Postgres `sts_sessions`（Status 欄位）；即時版發佈在 `sts.status.{session_id}` | API、UI、CLI | controller 重啟後由 reattach 對帳重算（§4.4） |
+| MD intent：session 要哪些 feed 和 selector | API（start）、STS controller（自癒時重新 put）、session worker（執行期間的 subscribe，經 `md.intent.patch`） | Postgres `md_intents` | MD controller | level-triggered；owner 依 §8.2 規則 3 回收 |
+| TD intent：session 用哪些帳號 | API、STS controller | Postgres `td_intents` | TD controller | 同上 |
+| 常駐訂閱 | 設定檔 | Postgres `md_standing_subscriptions` | MD controller | — |
+| `api_id` → instance 綁定、帳號設定（例如 cancel-on-disconnect） | 使用者經 API | Postgres `apis` | TD controller | — |
+| listing：合約、到期、strike | SYM | Postgres `symbol_*` | MD controller（selector、到期）、TD | 每小時刷新 |
+| 策略樹目錄：有哪些 name、各自目前的 digest | API（push、delete、pull） | API 主機的 `MFTIK_DATA/registry` | STS controller（同步副本）、API 的 deploy 驗證 | — |
+| extras 目錄：目前的 generation 與 pins | API（env apply） | API 主機的 `MFTIK_DATA/env/applied.json` | STS controller（同步副本） | — |
+| session 釘住的代碼身分 `(strategy_digest, env_generation)` | API（start 時從上面兩列解析） | Postgres `sts_sessions`（Spec 欄位） | STS controller | session 生命週期內不變；重新掛起沿用（F39） |
+
+**進程層**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| worker 是否存在、exit code、signal | shim（親眼看到） | `${WORK_DIR}/run/<id>.sock`、`<id>.exit.json` | Supervisor | controller 重啟時 reattach 讀回 |
+| 每個 instance 存活中的 worker 集合 | Supervisor | `procman.report.{plane}.{instance}`（不落地） | MD/TD orchestrator（intent 回收） | 報告停止時不回收任何東西（F32） |
+| worker 實際跑的代碼：`code_ref`、`strategy_digest`、`env_generation` | Supervisor（spawn 時記下；後兩者在 `WorkerSpec.labels`） | `supervisor.json`、`procman.report` | CLI（`mftik workers --stale`） | — |
+
+**MD**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 每條連線的 desired atom 與 generation | MD controller | 記憶體，可由 intent、常駐訂閱和 selector 狀態重算 | 連線 worker | controller 重啟後重算；新 generation 推出前，worker 維持舊的（P5） |
+| selector 的 universe、epoch、置中狀態 | MD controller | Postgres（selector 狀態表） | MD controller；session 經 `md.universe.{session_id}` | 從 DB 接續，不重新置中 |
+| 連線上實際訂閱成功的 atom（observed） | 連線 worker 的 reconciler，以交易所 ack 為準 | 記憶體 | 連線 worker、狀態廣播 | 重連後歸零，下一輪 diff 補齊 |
+| 行情內容，包括 fold 後的 book（F21） | 連線 worker | 記憶體 → `md.a.*` | STS session | 重連後由交易所的 snapshot 重建 |
+| feed 狀態 live / down | 連線 worker | `md.w.*` 廣播 | session ingress | 廣播靜默 10 秒視為 down，只通知（§5.6） |
+| per-atom `seq` | 連線 worker | envelope（optional 欄位） | 策略自行偵測不連續（F25） | 以 (atom, 連線 epoch) 起算：重連、單一 atom 的 resync、換 incarnation 之後從 1 重新起算 |
+| tape 與 coverage | 持有該 atom 的連線 worker | Redis（每個 region 一台） | MD 的讀取 RPC → 策略 | 空洞記在 coverage |
+
+**TD**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 交易所上的掛單、部位、餘額（最終真相） | 交易所 | — | TD 的 recon | — |
+| OMS、ledger（預扣、available） | TD 帳號 worker 的交易層（F13） | 記憶體 | session（`oms.view`、帳號事件） | 重啟後以 `reconcile()` 從交易所重建，發出 `td.account.reset` → 策略收到 `on_resync` |
+| 交易層開或關 | desired：TD controller（依 intent）；observed：帳號 worker | 記憶體 | — | controller 不在時，worker 維持最後一份（P5） |
+| 帳號狀態 ready / degraded / unavailable | TD 帳號 worker | `td.account.state.{api_id}` 廣播 | session ingress | 靜默 10 秒視為 unavailable，只通知 |
+| 訂單歷史、成交、資金流水 | TD 帳號 worker（live 寫入加 backfill） | Postgres `orders`、`fills`、`cash_flows`、`backfill_cursors` | API、UI | backfill 依交易所補正 |
+
+**STS session**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 策略內部狀態 | session worker | 記憶體，不落地（F10） | 策略 | 重新掛起時從 `on_start` 全新開始 |
+| `client_order_id` 序號 | session worker | 記憶體（`session24 \| ts_sec28 \| seq8`） | TD | R2 保證不撞號 |
+| event log | session worker 的 ingress | 檔案（`STS_EVENTLOG_DIR`） | 事後分析；API 經 STS controller 讀（F40） | — |
+| hook 進度、offload 進度、交付的丟棄計數 | session worker 的 ingress | status progress（`sts.status.{session_id}`） | UI | — |
+
+**STS 主機磁碟（F39、F40）**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 策略樹與 extras 的副本 | STS controller（只依 API 的 fan-out 與開機 catch-up 寫入） | STS volume 的 `registry/trees/<digest>/`、`env/gen-{N}` | session worker（載入）、controller（可部署檢查） | 開機向 API 補差額；被非 terminal session 釘住的版本不回收 |
+| artifacts | 主機上的 artifact volume。寫入路徑兩條，共用同一套 `ArtifactStore`（part 檔加 rename）：operator 經 STS controller，策略在自己的 worker 裡直接寫 | 檔案（`STS_ARTIFACT_DIR`） | 策略（本地磁碟）、API（經 STS controller） | 檔案留在 volume 上；未 commit 的上傳由 controller 清理 |
+
+**版本**
+
+| 狀態 | 權威 | 存放 | 讀取者 | 收斂 |
+|---|---|---|---|---|
+| 協定版本 `pv` | 代碼常數 | NATS header `Mftik-Pv`；worker 的 `pv` 記在 `WorkerSpec`，經 `procman.report` 帶出 | 每個進程的 transport；API（deploy 時） | deploy 時比對，不符以 `protocol_mismatch` 拒絕；執行中收到不符的 frame 由 transport 丟棄並計數（F26、F41） |
+
+### 3.4 新增的抽象層
+
+模組路徑暫定，IF 批次（§11）會先把每一層的介面定下來，實作留給後面的批次。
+
+| 層 | 模組（暫定） | 內容 | 取代 |
+|---|---|---|---|
+| 時間 | `mftik.clock` | `Clock`（`now`、`monotonic`、`sleep`）、`FakeClock` | 散落的 `time.time()`、`asyncio.sleep` |
+| 進程管理 | `mftik.procman` | `WorkerSpec`、`Supervisor`、shim 與它的 NDJSON 協定、`procman.report` | `spawn.py` 與 `worker.py` 的 lifeline、各平面的 reaper |
+| 訊息處理 | `mftik.broker.handler` | `Handler`：收到解碼後的訊息 → 回覆與副作用；`serve(broker, subject, handler)` | rpc 模組裡傳輸和邏輯混寫的做法（F31） |
+| 協定 v2 | `mftik.protocol` | `Mftik-Pv` header（transport 蓋上與檢查，F41）、intent、`md.a.*`、`md.w.*`、`md.universe.*`、`td.account.state.*`、`td.account.reset`、`td.order.cancel_session`、`procman.report.*` | lease、attach、per-session fan-out |
+| STS controller | `mftik_sts.controller` | `StsOrchestrator`：SessionSpec 與 worker status 的 reconcile；crash 分類與重啟策略 | `session/manager.py` |
+| STS session worker | `mftik_sts.session_worker` | `Ingress`、`StrategyRunner`、交付策略、event log、offload pool | `session/session.py`、`worker.py` |
+| SDK | `mftik.strategy` | 新 hook（`on_ready(ready)`、`on_md_update`、`on_td_update`、`on_resync`、`on_universe_change`）、`offload`、`offload_pool`、`oms.view(settled)`、`md.state / universe / current / subscribe`、`td.state`、`StrategyHarness` | rebuild、recon、`breathe` 相關 API |
+| MD adapter | `mftik.exchange.<venue>.atoms` | `Atom`、`AtomPlan`、`atoms_for`、`decode`、`capacity`、`join_policy`；`TickerStats` | `VenueSession._open` 解析成 `stream_*` 的做法 |
+| MD controller | `mftik_md.controller` | `MdOrchestrator`、placement、selector 的 `evaluate`、到期 | `session/manager.py`、`dispatcher.py`、`_expiry_tasks` |
+| MD 連線 worker | `mftik_md.conn` | `ConnWorker`、`Reconciler`（`reconcile(desired, observed) -> actions`）、tape append、狀態廣播 | `session/venue.py`，以及 adapter 內的 `WireLedger` 用法 |
+| MD fetch worker | `mftik_md.fetch` | 既有的 readers 搬進獨立 worker | MD 進程內的 fetch |
+| TD 帳號 worker | `mftik_td.account` | 常駐層（HTTP 連線池、backfill）、交易層（私有連線、OMS、ledger、recon）、`cancel_session`、死人開關 | `session/manager.py` 的 lease 與 refcount、`session/session.py` 的生命週期部分 |
+| TD controller | `mftik_td.controller` | `desired_accounts`、intent → 交易層開關、drain-replace | `session/manager.py` |
+| API | `mftik_api.orchestrate` | `start` / `end`、intent repository | `deploy_strategy` 與補償邏輯 |
+| STS 主機磁碟 | `mftik_sts.hostdisk` | 以 digest 定址的策略樹副本與索引、版本釘住與 GC、可部署檢查、import 探測子進程；controller 上 registry、env、artifact、event log 的 handler（§5.7） | `RegistryStore` 在 STS 端的原地替換、`runtime_env.py` 與 `load_local_registry` 在平面進程內的 import 與 reload |
+| DB | `mftik_db` | SessionSpec / Status 欄位（含 F39 的 `strategy_digest`、`env_generation`）、`md_intents`、`td_intents`、`md_standing_subscriptions`、selector 狀態 | `st_facts`；`md_sessions` / `td_sessions` 的寫入 |
+
+---
+
+## 4. procman（進程管理層）
+
+### 4.1 元件
+
+這一層沿用你 prototype（Async Supervisor + Shim）的分工，再依 STS/MD/TD 各自特化：
+
+- **Supervisor**（`mftik.procman`，Python 函式庫）：嵌在每個平面的 controller 裡，負責所有決策：要不要啟動、何時重啟、如何判定失敗、reattach。三個平面共用同一套函式庫，差別只在 WorkerSpec 和重啟策略（§4.3）。
+- **`mftik-shim`**：每個 worker 一個常駐的小進程，是 worker 真正的父進程。
+  - Supervisor 先用 `subprocess.Popen` 啟動一個只活一瞬間的中間進程，由它 fork 出 shim 並 `setsid`。所以 shim 從一開始就不是 controller 的子進程。
+  - 不能用 `asyncio.create_subprocess_exec` 啟動 shim：它的 transport 在 close 或被 GC 時會殺掉 child（prototype §7.1）。
+- **runner**：worker 的入口，`python -m mftik_<plane>.worker`。
+
+v0.1 規劃的常駐 daemon（procd）取消。前提是 Strategon 的 OCI driver 支援 `oci_host_pid`（F6，strategon#60）。
+
+### 4.2 shim 的不變式
+
+- **S1** shim 是 worker 唯一的父進程。Linux 上以 `PR_SET_CHILD_SUBREAPER` 讓 worker 的子孫也由 shim 收屍。shim 自己被 host init 收養、回收。
+- **S2** shim 消失時，worker 自行 graceful stop。觸發條件是 status pipe 寫入得到 EPIPE，或 `PDEATHSIG=SIGTERM`（指向 shim），哪個先到都算。
+  - graceful 讓 `on_stop` 有機會撤單，比 SIGKILL 好。prototype 實測約 0.85 秒內停止。
+  - 現行綁在 controller 上的 lifeline pipe 和 `MFTIK_STS_PARENT_PID` 移除。
+- **S3** shim reap worker 之後寫 `<id>.exit.json`（tmp 檔再 rename），要等 Supervisor 送出 `release` 才退出。controller 不在線時，exit code 和 signal 也不會遺失。
+- **S4** shim 持有 worker 的 stdio 和 status pipe，寫成 log 並輪替。Supervisor 不在時，worker 不會因為 SIGPIPE 或 buffer 寫滿而卡住。
+- **S5** shim 開一個 unix socket，協定是 NDJSON：`status`、`signal`（對 worker 的 process group `killpg`）、`watch`、`release`。
+  - socket 放在 `${WORK_DIR}/run/<worker_id>.sock`。
+  - Supervisor 靠 socket 路徑找回 worker，不記 pid，所以也不用擔心 pid 被重用。
+- **S6** status pipe 的單筆訊息不超過 `PIPE_BUF`（4096 bytes），保證寫入是原子的；pipe 滿了就丟掉這一筆，下一次 heartbeat 會帶完整狀態補上。
+  - STS worker 的 heartbeat 由 ingress thread 寫入（§5.3），不經過策略的 loop。
+  - MD/TD worker 不跑使用者代碼，heartbeat 就跟主 loop 綁在一起：loop 卡住就代表 worker 壞了。
+- **S7** shim 收到 SIGTERM 時轉送給 worker，自己不先退出。shim 不認識 STS/MD/TD，也不做重啟決策。
+
+### 4.3 Spec、狀態機、重啟策略
+
+```python
+@dataclass(frozen=True)
+class WorkerSpec:
+    id: str                 # "sts/session/a1b2c3"、"md/conn/Deribit/public/0"、"td/account/42"
+    plane: Literal["sts", "md", "td"]
+    kind: str
+    incarnation: int        # 由 controller 分配
+    argv: list[str]
+    env: dict[str, str]
+    code_ref: str           # worker 所屬的 release 版本，等於 spawn 它的 controller 版本（§4.5）
+    restart: Literal["never", "on_failure"]
+    start_timeout_s: float
+    hb_timeout_s: float | None   # None：不以 heartbeat 判死
+    oom_score_adj: int           # 依 kind 分級（§4.7）
+    rlimit_data_bytes: int | None  # 可選，由 shim 在 exec 前套用（§4.7）
+    stop_grace_s: float
+    labels: dict[str, str]       # STS session 帶 strategy_digest、env_generation（F39）；procman 不解讀
+```
+
+狀態機沿用 prototype：
+
+```
+STOPPED ─▶ STARTING ─ready─▶ RUNNING ─SIGTERM─▶ STOPPING ─▶ STOPPED
+              │ 死亡／逾時        │ 死亡／heartbeat 逾時
+              ▼                  ▼
+            FAILED            CRASHED ─▶ BACKOFF ─▶ STARTING
+                                 └─（window 內重啟超標）─▶ FATAL
+存活中 ─shim 消失─▶ LOST
+```
+
+| kind | restart | heartbeat 判死 | 說明 |
+|---|---|---|---|
+| STS `session` | 依 deploy 的 `restart`：`never` → failed；`on_failure` → 平台清場後從 `on_start` 重新掛起（§5.2，F10） | 只看 ingress thread 的 beat（`hb_timeout_s` 只用來抓整個進程卡死）；hook 時間預算依 F15；ingress 與 session 同生共死（§5.3 I1 到 I4） | 不 rebuild：重新掛起不帶任何舊狀態（範圍 4、F3、F10） |
+| MD `conn` | `on_failure`，不設 FATAL（F42）：第 n 次等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘後 n 歸零；n 到 5 發 crash-loop 告警 | loop heartbeat 逾時（10 秒）→ kill → 重啟 | 重啟後由 reconciler 自動補回訂閱 |
+| TD `account` | `on_failure`：同上 | 同上 | Supervisor 確認舊 PID 消失後才啟動新 incarnation（§7.1，F36） |
+
+MD/TD 用 readiness 區分初始化失敗和運行中崩潰（prototype §4）：ready 之前死掉記為 FAILED，不重啟；ready 之後死掉記為 CRASHED，依策略重啟。ready 只代表本地初始化完成：argv 與設定解析完、憑證載入、NATS subject 答得到（F42）。交易所連線不算在 ready 裡，所以 FAILED 只會是設定錯誤（例如 `apis` 列不存在、venue 不認得）。交易所連不上（維護、網路抖動）或 API key 被拒都不是 FAILED：worker 照樣 ready，經 F14 的狀態廣播報 `down` / `unavailable`，在進程內重試；key 被拒時報 `unavailable(auth_rejected)`，不再重試認證，避免帳號被鎖，等人工換 key 後 restart。
+
+MD fetch worker 也套用 F42。STS session 維持 F11（5 次／600 秒，最短 1 秒），因為 session 的 crash 多半是策略自己的 bug，放棄重啟正好把它隔離。
+
+### 4.4 Detach / Reattach 協定
+
+**controller 停止**（Strategon 送 SIGTERM）時呼叫 `Supervisor.close("detach")`：
+
+1. 停止接受新的控制 RPC。
+2. **不對任何 worker 送信號。**
+3. flush 尚未寫出的 Status，以 exit 0 結束。
+
+**controller 啟動**時呼叫 `Supervisor.start()`：
+
+1. 先同步載入本機狀態（`${WORK_DIR}/run/supervisor.json`），再逐一做 async reattach（prototype §7.4）。
+2. 對 `run/` 下每個 socket 呼叫 `status`，比對 `id` 和 `incarnation`。
+3. 和 DB 裡的 desired 對帳：
+
+| desired | worker | 動作 |
+|---|---|---|
+| 有 | running | adopt |
+| 有 | 不在、已 exited 或 LOST | STS：以 exit 資訊標成 failed，不重建。MD/TD：依 restart 策略處理 |
+| 沒有，或已 terminal | running | stop，接著 release |
+
+4. 對帳完成才開始服務控制 subject。整個過程中 worker 照常運作（P1）。
+
+只有明確呼叫 `close("stop")`（整台主機下線）才會停掉 worker。
+
+### 4.5 部署拓撲：Strategon 實際上怎麼跑進程（F6）
+
+以下依 `BullionBear/strategon` @ `8d18d95` 的代碼。
+
+| 事實 | 證據 |
+|---|---|
+| strategy 啟動時會 `setsid`；agent 重啟後以 `(pid, starttime)` adopt 回來 | `internal/agent/driver/driver.go`、`exec_linux.go` |
+| OCI driver 不是 runc 或 containerd。agent 把自己 re-exec 成 `--oci-init`，以 `CLONE_NEWUSER\|CLONE_NEWNS\|CLONE_NEWPID\|CLONE_NEWUTS` 加 `setsid` 起進程，`pivot_root` 進 rootfs，使用 host network。監督走 host PID 和 pidfd | `userns_linux.go`、`oci_linux.go`、`oci_init_linux.go` |
+| `captureStdio: true`（mftik 的 plane sets 全都開著）時，Strategon 的 tee 是新 PID namespace 的 PID 1，payload 是它的 child | `stdio_tee_linux.go`（`waitPayloadAndReap(pid1)`）、`docs/ARCHITECTURE.md`「OCI runtime」 |
+| 部署時先進入 DRAINING：對 tee 的 process group 送 SIGTERM → 等 `stopGraceSeconds` → SIGKILL，再 SWITCHING 到新的 rootfs | `reconciler/deploy.go`（`gracefulStop`）、`supervisor/stop.go` |
+| release GC 只保留新版、前一版和 current（`--release-retention` 預設 3） | `deploy.go`、`cmd/agent/main.go` |
+| 同一個 volume 同時只能被一個 running assignment 掛載 | `reconciler/volumes.go`（`volumeWriterConflictErr`） |
+| Strategon 停止時只對 process group 送信號，不用 `cgroup.kill` | `exec_linux.go`、`supervisor/stop.go` |
+| agent 的 systemd unit 沒有設 `KillMode`（預設 `control-group`），也沒有傳 `--cgroup-root`。所以 strategy 都在 agent 的 unit cgroup 裡，而 `install-agent.sh` 升級時會執行 `systemctl restart` | `deploy/install-agent.sh` |
+| 沒有 `--cgroup-root` 時，`setupCgroup` 直接回傳 -1。plane sets 裡的 `limits.memoryBytes`（768 MiB）**目前沒有生效**。就算設了 `--cgroup-root`，因為沒有啟用 `subtree_control`，上限很可能仍然寫不進去；`max_open_files` 也從未套用（追蹤於 strategon#61） | `exec_linux.go`、`deployment/sets/planes.json` |
+
+**推論：**
+
+- **OCI driver 底下由平面 spawn 出來的 shim / worker，在平面滾動時一定會被殺掉。** `setsid` 只能逃出 process group，逃不出 PID namespace。controller 退出後 tee 跟著退出，tee 是這個 namespace 的 init，它一死，kernel 就會 SIGKILL namespace 裡所有進程。v0.1 寫的「容器被換掉」不精確，真正的機制是 PID namespace。
+- **agent 升級本身就會殺掉所有 strategy。** 這和本重構無關，現在就存在：依 `install-agent.sh` 安裝的主機上，agent 用 `systemctl restart` 升級，而 `KillMode=control-group` 會殺掉 unit cgroup 裡的所有進程，包括 mftik 各平面、NATS、Redis。代碼註解說 strategy 能撐過 agent 的 self-update，但部署方式讓這個保證不成立。請在主機上用 `systemctl show strategon-agent -p KillMode` 和 `cat /proc/<plane pid>/cgroup` 確認。
+- **就算拿掉 PID namespace，OCI 還有第二個問題。** worker 會留在舊版的 mount namespace 裡，而舊 rootfs 在兩次滾動後就被 GC 刪掉。worker 之後才需要的檔案（lazy import、`/etc/ssl/certs`、glibc 延遲 dlopen 的 `libgcc_s`）會失敗。這是潛伏錯誤，不會在部署當下出現。
+- **v0.1 建議的「runtime 和 controller 兩個 assignment 共用一個 volume」會被單一 writer 規則拒絕。**
+
+**選項：**
+
+| | 做法 | Strategon 改動 | worker 代碼版本 | 主要代價 |
+|---|---|---|---|---|
+| **(A)** | **OCI 新增 `oci_host_pid` 選項，controller 直接 spawn shim** | 小，三項，見下方 S-1 到 S-3 | 等於 spawn 它的 controller 版本：新 session 用新版，舊 session 繼續用舊版 | 失去 PID namespace 隔離 |
+| (B) | runtime 和 controller 拆成兩個 assignment，彼此以 NATS 溝通。**worker 不是 Strategon assignment**：Strategon 只看得到 runtime 那一個進程，worker 經由 shim 掛在 runtime 底下 | 只需要 S-3 | 等於 runtime image 的版本。**任何 worker 代碼變更都要滾動 runtime，所有 worker 跟著停止** | G1 縮水成「只改 orchestration 時不中斷」；runtime 必須是永不退出的極簡程式 |
+| (C) | 平面改用 EXEC driver，mftik 打包成單一執行檔 | 無 | 每個版本各自解壓的目錄 | **依 F5 排除**：單一執行檔打包不夠成熟 |
+| (D) | 每個 worker 都是一個 Strategon assignment | 大，見下方 | — | 粒度不合 |
+
+**(D) 為什麼不適合：** Strategon 的 assignment 是「某個版本在某台機器上的長期部署」，worker 則是短命、帶 session 參數的執行。
+
+- **每個 assignment 各自解壓一份 image** 到 `<base>/<strategy>/releases/<v>/rootfs`（`artifact.go`）。開一個 session 就要解壓一次，耗時又佔磁碟。
+- **assignment 只要還是 desired，退出就一定會被重啟**：crash 走 backoff，正常退出也直接重啟（`reconciler.go` 的 `handleExit`）。沒有 `never` 這種策略。STS session 是一次性的，controller 得在它退出時搶在重啟之前刪掉 assignment。
+- **volume 單一 writer。** 每個 STS session 都需要 `mftik-data`（registry、artifacts、event log），但同一時間只能有一個 session 掛載它。
+- **啟動路徑經過中央 control plane。** 流程是 cp（JP，4 GB）→ agent stream → DOWNLOADING → VERIFYING → STARTING → HEALTH_CHECKING，延遲以秒計，而且 cp 成為開 session 的單點依賴。
+
+要讓 (D) 成立，Strategon 需要一種新的 workload：共用 rootfs、可設定不重啟、允許多個 writer 共用 volume、由 agent 本地 API 建立。這等於把 procman 做進 Strategon，可以當作長期方向，但不在本次範圍。
+
+**採用 (A)（F6）。** 理由：
+
+- 只用成熟的 Linux 機制，Strategon 的改動小，而且 repo 在你手上。
+- 語意和你的 prototype、和 K8s 都一致：管理器更新時，舊 worker 跑舊代碼，新 worker 跑新代碼，不需要任何額外的打包。
+- STS session 與 MD 連線沿用舊版代碼跑到結束、TD 帳號的 drain-replace（§4.6），都靠「新舊版本的 worker 可以並存」，只有 (A) 給得出來。
+
+**(A) 需要的 Strategon 改動：**
+
+以下三項都追蹤於 [strategon#60](https://github.com/BullionBear/strategon/issues/60)：
+
+- **S-1 `oci_host_pid` 選項。**
+  - 新增 per-assignment 的 `oci_host_pid`，作法比照 `capture_stdio`，以 `agent_version >= 6` 為門檻。
+  - OCI 的 cloneflags 去掉 `CLONE_NEWPID`。
+  - oci-init 的 `/proc` 改成 recursive bind host 的 `/proc`。unprivileged user namespace 不能替 host 的 PID namespace 掛新的 procfs。
+  - probe 一併更新。
+  - 需要在 cp 和 yite 的 kernel 上驗證。
+- **S-2 release GC 不刪仍在使用中的 rootfs。** GC 之前掃一次 `/proc/*/root`，以 `(dev, inode)` 比對各 release 的 rootfs 目錄，仍被任何進程當成 root 的 release 就保留。這解決上面「舊 rootfs 被刪」的潛伏錯誤。agent 能不能讀其他 user namespace 裡進程的 `/proc/<pid>/root`，需要驗證。讀不到的話改用 pin 檔：payload 在 work 目錄寫下仍需要的版本，GC 會尊重它；agent 另外以 `STRATEGON_RELEASE_VERSION` 告訴 payload 自己是哪一版。mftik 這端兩種情況都要能配合。
+- **S-3 agent 的 unit 加 `KillMode=process`。** 另一種做法是啟用 `--cgroup-root`，並把 strategy 的 cgroup 放在 unit 之外。不論選 A 還是 B 都需要這一項。
+
+**(A) 的 mftik 端：**
+
+- controller 直接 spawn shim，和 prototype 一樣。shim 和 worker 留在 spawn 它們的那一版 controller 的 mount namespace 裡，所以 `WorkerSpec.code_ref` 就是該 release 的版本號。
+- shim 由 host init（或最近的 subreaper）收養。Strategon 的 SIGTERM 和 SIGKILL 只送到 controller 的 process group，碰不到 shim。
+- **記憶體：** 只要 `--cgroup-root` 沒開，就沒有任何記憶體上限；開了之後，worker 和 controller 共用該 assignment 的 `memory.max`。在 strategon#61 讓上限真正生效之前，由 §4.7 的機制防護（F7）。
+- **本機開發：** compose 的容器同樣有 PID namespace，重建容器一樣會殺掉 worker。所以開發和 integration 測試用純進程跑平面（`just planes`）。compose 只用在不需要驗證 reattach 的場景。
+
+**變體 (A')：** 如果要保留 PID 隔離，可以讓每個 slot 有一個常駐的 pause 進程持有 PID namespace，新版本以 `setns` 加入，也就是 K8s pod sandbox 的做法。代價是 Strategon 的改動明顯變大。
+
+### 4.6 各平面的升級語意
+
+下表是**切換到本版之後**的日常升級語意。切換本身依 F2 處理：先停掉所有策略，平面清空後再整批換版。
+
+| 平面 | controller 滾動 | worker 代碼升級 |
+|---|---|---|
+| STS | 不影響（reattach） | 已在跑的 session 繼續用舊版，直到它結束；新 session 用新版。策略樹與 extras 也一樣：session 一直用 start 時釘住的 digest 與 generation，包括重新掛起（F39） |
+| MD | 不影響 | 已在跑的連線繼續用舊版，不遷移（F22）；新開的連線用新版。既有連線要換上新版時（例如 decode 的 bug fix），由人工對單一連線下 `restart`（F24），平台不會自動重啟舊版連線：斷線數秒，策略收到 `on_md_update` 的 down → live，tape 記錄空洞。**這取代了 `MdHandover.md` 的設計** |
+| TD | 不影響 | 換版後由人工逐帳號觸發 drain-replace（F27），平台不自動換版：新單一律以可重試的 `td_draining` 拒絕，等 in-flight ack 收齊後停止，以新 incarnation 啟動並 recon，再恢復收單。期間 session 的 `TdReady` 會短暫變成 false |
+
+**版本收斂（F24）：** 只要還有某個 release 的 worker 在跑，S-2 就會保留該 release 的 rootfs。CLI 提供一個指令（暫定 `mftik workers --stale`）列出跑在非最新 release 上的 worker，由人決定何時重啟，或等它自然結束。
+
+**跨版本（F26）：** 切換之後新舊版本的 worker 會並存，但不做版內相容，規則只有三條：
+
+1. NATS 上的每則訊息都在 header `Mftik-Pv` 帶 `pv`（協定版號，整數），由 transport 蓋上；envelope 本身不帶。線上格式一有變動就升版。
+2. 版本不符在兩個地方擋（F41）：
+   - **deploy 時：** API 在 start 時把自己的 `pv` 和 session 會用到的 STS controller、MD / TD controller、TD 帳號 worker 比對，不符就以 `protocol_mismatch` 拒絕，不 spawn worker、不寫 intent。worker 的 `pv` 是 spawn 它的 controller 的常數，記在 `WorkerSpec`（reattach 之後仍然知道），經 `procman.report` 帶出。controller 自己的報告若因 `pv` 不符被丟棄，transport 留下的紀錄同樣讓 start 回 `protocol_mismatch`，而不是 `unavailable`。MD 連線 worker 由 MD controller 擋：某個 `(venue, endpoint)` 上還有 `pv` 不同的連線 worker 時，落在那裡的 `md.intent.put` 以 `protocol_mismatch` 拒絕，訊息列出要 `restart` 的 worker（F24），start 依 §8.1 回滾。新 controller 推不到舊 worker 的 desired、也收不到它的狀態廣播，不知道它持有哪些 atom；若另開新 worker 承接，同一個 atom 會有兩個發佈者和兩個 tape writer（違反 F22、§6.3），所以不這樣做。
+   - **執行中：** transport 在任何解碼之前檢查 header；缺少或不符的 frame 直接丟棄，記 log（依 subject 與 `pv` 限流）並計數。不回錯誤，所以 `mftik.broker.handler` 的 H5、H6 不變，`md.a.*`、`md.w.*` 這類不經過 `serve` 的 fan-out 也一併涵蓋。送錯版本的 request 會在呼叫端 timeout；request 收到 `pv` 不符的 reply 時，transport 直接對呼叫端拋出本地錯誤，不等 timeout。
+3. 停止不依賴協定：Supervisor 以 SIGTERM 停 worker，走 shim 或直接對 host PID 送訊號（`oci_host_pid`），任何版本組合都停得掉。
+
+升 `pv` 的順序：先停掉舊 `pv` 的 STS session，讓 `on_stop` 的撤單還送得到同版的 TD；再人工重啟 TD 帳號（F27）和 MD 連線（F24）；最後才開新 session。`on_stop` 沒撤乾淨的單，由 controller 發出的 `cancel_session`（F10）補上。這個順序走完之前，用到舊 `pv` worker 的 start 會在 deploy 時被擋下（F41），不會等 session 跑起來才發現收不到行情或回報。
+
+### 4.7 記憶體防護（F7）
+
+在 Strategon 的 cgroup 上限（strategon#61）可用之前，mftik 先用三個不需要特權的機制防護。#61 上線後這三項仍然保留：cgroup 是整個平面的總量，這三項負責平面內部誰先犧牲、誰不准進來。
+
+**1. `oom_score_adj` 分級**
+
+shim fork 出 worker 之後、`exec` 之前，由子進程寫自己的 `/proc/self/oom_score_adj`。往上調不需要特權。不論是整台主機的 global OOM，還是之後 cgroup 內的 OOM，kernel 都依 RSS 加上這個值挑人，所以先被殺的會是策略，而不是行情或下單。
+
+| 進程 | 初始值 | 理由 |
+|---|---|---|
+| STS `offload` 子進程（§5.5） | +900 | 比 session 本身先被犧牲；session 只會收到 `OffloadWorkerLost`，不會跟著死 |
+| STS `session` | +800 | ML 和使用者代碼最可能失控，也最該先被犧牲 |
+| MD `conn`、`fetch` | +300 | 重啟後 reconciler 會補回訂閱 |
+| TD `account` | +100 | 持有 ledger 和在途的單，最不該被殺 |
+| controller、shim | 0（不調） | 被殺會失去管理能力；而且調低需要 `CAP_SYS_RESOURCE` |
+
+B4-09 實測之後，這張分數表沒有改。犧牲順序仍是 session、然後 MD、然後 TD。
+
+實測的是 worker 行程樹的 Pss，也就是 `procman.report` 的 `rss_bytes`：不含 shim，也不是 `/proc/<pid>/status` 的 `VmRSS`。機器是 Linux 6.12.94+，Python 3.12.3（GCC 13.3.0），Intel Xeon 4 核、2400 MHz、BogoMIPS 4800，uvloop 0.22.1，nats-py 2.15.0，nats-server v2.11.17。各取三次樣本的中位數，session 取 idle 與已載入策略的較高者，account 取交易層關與開的較高者，再向上取整成 MiB，寫進 `KIND_RSS_ESTIMATE_MIB`（provisional，#286）。
+
+| kind | 狀態 | Pss（MiB） | worker `VmRSS`（KiB） | shim `VmRSS`（KiB） | 估計（MiB） |
+|---|---|---|---|---|---|
+| STS `session` | idle，策略已 `on_ready`、沒有 td／md | 68.61 | 89720 | 14596 | 69 |
+| STS `session` | 策略已載入，td 帳號已接上 | 68.62 | 89752 | 14600 | 69 |
+| MD `conn` | paper orderbook | 60.81 | 75920 | 14592 | 61 |
+| MD `fetch` | 生產入口，broker 已連上 | 59.89 | 74892 | 14596 | 60 |
+| TD `account` | paper，交易層關 | 78.40 | 98944 | 14588 | 79 |
+| TD `account` | paper，交易層開 | 78.49 | 99076 | 14588 | 79 |
+
+大小順序是 account、session、MD，和上面的犧牲順序不同。`oom_score_adj` 的差距仍大於這幾 MiB，所以 kernel 還是會先挑 session。若把分數改成跟著 RSS 走，先被殺的會變成持有 ledger 的 account worker，和這一節的理由相反，所以分數維持 800／300／100。
+
+同一輪 shim 的 `VmRSS` 是 14564–14600 kB（worker 為 `time.sleep` 時是 14564 kB）。B3-01 的 14576 kB 仍在這個範圍裡，`SHIM_VMRSS_BYTES` 不改。准入把這個常數加在每個被計入的 worker 上，不放進上表。
+
+MD 連線 worker 是一條 websocket 一個進程（F17），worker 數等於使用中的連線數。上表的 paper conn 是 60.81 MiB Pss，落在原本 60–90 MB 的估計裡。10 條連線就是 0.6–0.9 GB，已經超過現行整個 MD 平面的 768 MB，MD 的 `memory_budget_mb` 要依此設定。
+
+每個 worker 另外有一個 Python shim（F29），也要算進各平面的預算。B3-01 實測（Python 3.12.3，worker 執行 `time.sleep`、shim 阻塞在 `poll`，讀 `/proc/<pid>/status` 的 `VmRSS`）：shim 自己是 14576 kB（約 14.2 MiB）。Prototype 的約 10–15 MB 由這個實測取代。
+
+TD 帳號 worker 對每個啟用帳號常駐（F35），所以 TD 平面固定佔用「啟用帳號數 ×（worker 加 shim）」，和有沒有 session 無關。
+
+**2. 可選的 `RLIMIT_DATA`**
+
+`WorkerSpec.rlimit_data_bytes` 有設定時，由 shim 在 `exec` 之前套用。超過上限時 Python 拋出 `MemoryError`，不是被 SIGKILL，策略還有機會留下 log 再 fail，session 的 reason 也能寫清楚。
+
+- STS 的值來自 strategy.yml 的 `limits.memory_mb`。預設不設。
+- 不用 `RLIMIT_AS`：numpy、torch 會預留大量虛擬位址，容易誤判。
+
+**3. 准入控制**
+
+每個平面的 orchestrator 持有一份預算：`max_workers`，以及依 kind 估算的 `memory_budget_mb`，以 instance 的環境變數設定。
+
+- 預估值來自 Supervisor 回報的實際 RSS：開了 `oci_host_pid` 之後，controller 可以直接讀 worker 的 `/proc/<pid>/status`。
+- STS session 的部署估計另外加上 offload 子進程的預留：P × 子進程估計值，P 是 strategy.yml 的 `limits.offload_processes`，子進程估計值有設 `offload_memory_mb` 就用它（那是子進程的 `RLIMIT_DATA`，是真正的上界），否則用 B5-03 實測的 spawn 子進程基準 Pss。這份預留由 `WorkerSpec` 帶給准入，不改 kind 的估計表；子進程不算進 `max_workers`（F43）。
+- 超過預算時，start 直接以 `capacity_exceeded` 拒絕，不會先把 worker 開起來、再讓 OOM 收拾。
+- B4-09 起，三個平面在建立 Supervisor 時讀 `PROCMAN_MAX_WORKERS` 和 `PROCMAN_MEMORY_BUDGET_MB`。兩個都沒設、或是空白，就是沒有預算，行為和今天一樣。有設記憶體上限時，kind 的估計用上面那張表，shim 另加 B3-01 的常數。
+
+**觀測：** `procman.report.*` 帶上每個 worker 的 RSS。#61 上線後，Strategon 另外回報每個 slot 的 `memory.current` 和 `oom_kill`。shim 看到 worker 被 SIGKILL 時，Supervisor 會比對這個計數，判斷是不是 OOM。
+
+**#61 上線之後：**
+
+- 每個平面的 `memoryBytes` 重新估算為 controller 加上 worker 預算總和，再加一段餘量。
+- MD/TD 不設 `cpuMillicores`，因為 CFS throttling 會在整個 period 內卡住整個 slot。
+
+---
+
+## 5. STS
+
+### 5.1 Controller：session manager 加 orchestrator
+
+- desired 來源是 `SessionSpec`（DB 列）。placement 很單純，就是本 instance。
+- 每個 session 有一個 reconcile：比較 desired phase 和 worker status，決定 create、stop、標記 terminal。
+- 服務 `sts.{instance}`：start、end、list，以及 operator 對主機磁碟的所有路徑：registry、env、artifacts、event log 讀取（§5.7，F40）。controller 不 import 策略代碼（F39）。session 層級的控制（stop、fail、status）由 worker 自己在 `sts.ctl.{session_id}` 服務，現在的 `Topics.sts_control` 已經是這個方向。
+- 執行期間的訂閱變更（策略呼叫 `self.md.subscribe`，以及 B9 的 selector 事件），由 worker 直接找 MD orchestrator，不經過 API。
+
+### 5.2 Session 生命週期
+
+`pending → starting → running → stopping → done | failed`，另外有 `restarting`（F10）
+
+- 刪除 `interrupted`（等待 rebuild 的狀態）。策略不再碰 Postgres，session 的狀態一律由 controller 的 Supervisor 寫入，依據是 worker 回報的狀態和 shim 的 exit 紀錄（F10）。
+- **`on_start` 與 `on_ready`（F12）：**
+
+  | 階段 | 平台 | 策略 |
+  |---|---|---|
+  | `on_start` | MD 的 feed 已經訂閱，ingress 在收資料但不交付；TD 還沒訂閱 | 載入模型、讀 artifacts、`tape.read`。可以很長，也可以同步。**不能下單**，SDK 會拋出 `NotReady` |
+  | 等待就緒 | `on_start` 結束後才訂閱 TD 並送出 recon；接著等就緒條件成立 | — |
+  | `on_ready(ready)` | 只呼叫一次。之後才開始交付事件：`latest` 類只給最新一筆，`all` 類依序交付 | `self.oms`、`self.ledger` 已經是 recon 之後的狀態，可以直接開始下單 |
+
+  - **帳本同步（F13）：**
+    - OMS / ledger 的權威是 TD 帳號 worker 的記憶體。策略隨時可以用 `await self.oms.view()` / `self.ledger.view()` 取得最新狀態；需要等狀態為 UNKNOWN 的單收斂時，改用 `view(settled=True)`。
+    - 策略不再主動 recon：`send_recon`、`STS_RECON`、`on_recon_done` 全部刪除。
+    - 平台內部的 recon 只用在兩個地方：就緒條件（TdReady），以及下面的 `on_resync`。
+  - **`on_resync(api_id, cause, view)`（F13）：**
+    - 只在事件流可能有缺口時由平台觸發，而且只會發生在 `on_ready` 之後。
+    - 觸發點只有兩個：
+      - `cause="reconnect"`：ingress 的 NATS 斷線後重連，斷線期間的 fill 或 order update 可能遺失。
+      - `cause="account_reset"`：TD 帳號 worker 換了 incarnation（§7.1），帳本是從交易所重建的。
+    - `view` 是收斂後的帳本，策略應該拿它校正自己由事件累積出來的狀態。例如 chase 必須確認自己追的那張單是否還掛著，否則漏收一筆 fill 就可能重複下單。
+    - TD 自己因交易所重連而跑的 `reconcile()` 不觸發 `on_resync`，因為它的變化已經透過 order update 和 OMS view 推送給策略。
+  - 內建策略在 `on_start` 裡自行等 recon 的 timer、以及只在 `on_recon_done` 才開始交易的寫法，B5 一律改成在 `on_ready` 開始交易。
+- **就緒條件只針對有宣告的部分。** strategy.yml 的 `md:`、`td:` 都是選填，沒宣告的那一項沒有東西要等，條件直接視為成立。
+
+  | strategy.yml 宣告 | 要等什麼 | `on_ready` 的時機 |
+  |---|---|---|
+  | 都沒有 | 不等 | `on_start` 結束後立刻觸發 |
+  | 只有 md（例如 tape_keeper） | 每個 feed 就緒 | 全部就緒，或 `ready_timeout_s` 到期（附缺少的 feed 清單） |
+  | 只有 td | 每個帳號 recon 完成 | 全部完成；逾時則 failed |
+  | 兩者都有 | 兩邊都等 | 帳號必須全部完成；feed 全部就緒或逾時都可以 |
+
+  - **TdReady 是硬條件：** `ready_timeout_s` 內有帳號沒完成 recon，session 就記為 failed。這是初始化失敗，依 F11 不重啟。帳號狀態不明時不能交易。
+  - **MdReady 是軟條件：** 逾時仍然呼叫 `on_ready`，在 `ready.missing_feeds` 列出缺少的 feed 並寫一條 warning，由策略決定是等、降級還是 `fail`。
+  - **MdReady 的判斷依 §6.1 的 `join_policy`：** 交易所在訂閱時會推 snapshot 的（quote、ticker、book、greeks 等），收到第一筆才算就緒；不推 snapshot 的（trade、aggtrade、liquidation），MD 確認訂閱成功就算就緒，不等第一筆成交。期權鏈等 selector 回報的是覆蓋率，不是單一布林值。
+  - **feed 訂閱不到不是就緒問題。** symbol 不存在、交易所不支援該 topic 等情況，在登記 MD intent 時就被拒絕，deploy 當下就失敗。
+  - **執行期間動態加入的 feed 不影響 `on_ready`**，個別 feed 的就緒狀態用事件通知。
+  - 不加逐 feed 的 `required` 標記（F33）。selector 在 `ready_timeout_s` 內推導不出結果，或成員一直沒資料，都列在 `ready.missing_feeds`，由策略在 `on_ready` 判斷。
+- **啟動改成非同步（F12）：**
+  - `POST /sts/deploy/{type}` 驗證、寫入 SessionSpec、登記 intent、啟動 worker 之後就**回 202**：`{session_id, status: "starting"}`。
+  - 啟動進度寫在 session row 的 status 和 conditions 上，同時發佈到 `sts.status.{session_id}`。UI 透過現有的 WS 和 board 顯示，例如「on_start 執行中 42 秒」、「MdReady 12/14」、「等待帳號 42 的 recon」。
+  - 啟動失敗時由 Supervisor 寫入原因：`on_start` 拋例外、`start_timeout_s` 逾時、TD 沒有就緒、worker 在啟動期間 crash。API 不做回滾，intent 依 §8.2 回收。
+  - CLI 的 `mftik run` 預設 `--wait`：追蹤 status 直到 `running` 或 `failed`，接著 tail log。`--no-wait` 只回傳 session_id。
+  - **兩個 timeout：**
+
+    | 設定 | 計算範圍 | 預設 / 上限 | 超過時 |
+    |---|---|---|---|
+    | `start_timeout_s` | 只算 `on_start` | 60 / 3600 秒 | kill，failed（初始化失敗，不重啟） |
+    | `ready_timeout_s` | 從 `on_start` 結束算起 | 30 秒 | TD 沒就緒 → failed；只有 MD 沒到齊 → 照樣呼叫 `on_ready`，附缺少的 feed 清單 |
+
+  - 刪除 API 寫死的 10 秒 create timeout（隨 `deploy_strategy` 一起刪除），以及 CLI 的 `deploy_http_timeout` 和它的預算常數（`_STS_CREATE_S` 等）。
+
+**crash 之後（F10）**
+
+先清場，再決定 fail 還是重新掛起。重新掛起時，從 `on_start` 全新開始，不帶任何舊狀態。
+
+| crash 類型 | `on_stop` | 平台清場 |
+|---|---|---|
+| A：策略代碼拋出例外，進程還活著 | **保證呼叫**：ingress 把 `on_stop` 排進策略 loop（受 `ON_STOP_TIMEOUT_S` 限制），之後進程以「crashed」結束 | 仍然執行，當作保險 |
+| B：一般 hook 阻塞策略 loop 超過 30 秒（F15），或 stop 時策略 loop 卡住超過 grace | **無法呼叫**：loop 卡住，跑不了任何策略代碼；shim kill | 執行 |
+| C：進程死亡（OOM、segfault、SIGKILL） | **無法呼叫**：進程已經不在 | 執行 |
+
+**平台清場：** Supervisor 呼叫 TD 的 `td.order.cancel_session(session_id)`（§7.1），撤掉所有 `client_order_id` 裡 session 欄位等於這個 session 的掛單，並等到全部確認。B 和 C 只能靠這一步代替 `on_stop`。部位無法用撤單處理，原樣保留。
+
+**接著依序：**
+
+1. Supervisor 把 `sts_sessions` 寫成 `restarting`，記下 reason、exit 資訊、重啟次數，並在 `log.sts.{session_id}` 發一條 `error` 等級的 log。既有的 Alert 管線（Discord）可以直接比對這條 log。
+2. 決定 fail 還是重新掛起（F11）：
+   - deploy 設定 `restart: never`（**預設**）→ `failed`。
+   - **只有 A 類 crash 有資格重新掛起。** B（loop 卡死）、C（進程死亡）在平台清場後一律 `failed` 並發 alert。這兩類的成因通常是同一份資料、同一段代碼，重啟很可能重演；而且策略自己的 `on_stop` 沒有跑到。
+   - crash 發生在 `on_ready` 之前，也就是初始化失敗 → `failed`，因為通常是設定錯，重啟沒有幫助。
+   - 在 `restart_window_s`（預設 600）內的重啟次數超過 `max_restarts`（預設 5）→ `failed` 並發 alert（沿用 prototype 的 FATAL）。
+   - 清場沒有全部確認 → `failed` 並發 alert，不能在狀態不明的掛單旁邊重新開始。
+   - 其他情況（`restart: on_failure` 的 A 類 crash）→ 重新掛起。
+3. 指數 backoff，**最短 1 秒**，然後以同一個 `session_id`、incarnation + 1 啟動新的 worker，從第 0 階段完整走一遍（§5.3）。
+
+**不變式：**
+
+- **R1** 舊 incarnation 確認死亡（有 shim 的 exit 紀錄）且清場完成之後，新 incarnation 才能啟動。兩者不會並存。
+- **R2** backoff 至少 1 秒。`client_order_id` 的組成是 `session(24) | ts_sec(28) | seq(8)`，seq 每個 incarnation 都從 0 開始；舊的最後一張單和新的第一張單一定落在不同秒，所以不會撞號。
+- **R3** 新 incarnation 的 recon 不會看到舊的掛單（已經清場），但會看到既有部位。策略的 `on_start` / `on_ready` 必須能接受「開始時已經有部位」，這是 `restart: on_failure` 的使用前提，要寫進 SDK 文件。
+- **R4** 重新掛起的期間，MD/TD 的 intent 不回收。Supervisor 的存活報告列的是「desired 為 running 的 session」，包含 `restarting`，而不只是當下活著的 worker（§8.2）。
+
+### 5.3 Hook 執行模型（G3，F8）
+
+**問題不只在續約。** 拿掉 per-session lease（§8.2）之後，策略 hook 佔住 event loop 仍然會造成三個平台層級的問題：
+
+1. **NATS socket 沒人讀。**
+   - core NATS 的 fire-and-forget 指的是投遞語意：不 ack、不重送、publisher 不等 subscriber。server 仍然得把每則訊息寫進每個 subscriber 的 TCP 連線。
+   - loop 被佔住時沒人讀 socket，以期權鏈的流量，雙方的 kernel buffer 幾秒內就滿。
+   - NATS 2.11 對每條連線設了上限：寫入阻塞超過 `write_deadline`（預設 10 秒），或積壓超過 `max_pending`（預設 64 MB），server 就以 slow consumer 為由**切斷整條連線**。本機的 `deployment/nats/nats.conf` 沒有覆寫這兩個值（這個檔案被 `.gitignore` 排除，不在 repo 裡）。
+   - 斷線期間發佈的訊息不會重送，成交回報也會一起遺失。
+2. **假 timeout。** uvloop 每一輪先跑到期的 timer，才 poll I/O。所以等 ack 的 timer 會比已經到達 socket 的回覆先觸發。
+3. **恢復後交付的是過期資料。**
+
+**定案：STS session worker 由兩條 thread 組成（F8）。** MD/TD worker 不跑使用者代碼，維持一個 loop 即可；STS controller 也不需要。
+
+| | ingress thread | strategy thread |
+|---|---|---|
+| 位置 | main thread，自己的 uvloop | 第二條 thread，策略的 uvloop |
+| 連線 | 接收連線：MD atom、TD 帳號事件、`sts.ctl.{session_id}`、回覆 inbox | 送出連線：下單、撤單、`td.account`、`md.fetch`、log |
+| 負責 | 持續讀 socket；event log（收到就記）；依交付策略排隊或 conflate；RPC timeout 以真實時間計算；控制訊號；對 shim 的 heartbeat 和 progress | 策略 hook、timer；從 ingress 取事件並在這裡解碼；**直接 publish 送單** |
+| 不做 | 不解碼行情、不跑使用者代碼、不做阻塞 I/O | 不讀接收連線 |
+
+**下單路徑（無跨 thread）：**
+
+1. 策略 thread 在自己的送出連線上直接 publish，`reply` 指向 ingress 的 inbox。
+2. publish 後**強制 flush**（`_flush_pending(force_flush=True)`）。nats-py 的 `publish` 只是寫進 buffer，不 flush 的話，送完單接著做長計算，單會一直躺在 buffer 裡。
+3. TD 不需要修改：它照常回覆到 `msg.reply`。
+4. ack 由 ingress 收下，記進 event log，timeout 以真實時間判斷，再以 `call_soon_threadsafe` 交回策略的 future。跨 thread 只發生在回程。
+5. 送單之前，必須先在共用的 pending 表登記 future，避免回覆比登記先到。
+6. **no-responders 留在送出連線上（B4-04 實測）。** nats-server 2.11.17（compose 與 CI 的 `nats:2.11-alpine`，`-m 8222`、沒有 config；nats-py 2.15.0）把 503 寫進送出連線自己的訂閱，不把 503 路由到 `reply`。送出連線訂了 inbox wildcard、而且 CONNECT 同時帶 `headers` 與 `no_responders` 時，收到的是 headers-only 的 `NATS/1.0 503`（body 空，同連線約 0.01 秒）。另一條連線即使也訂了同一個 wildcard，讀到的是空的。送出連線有 `headers` 但 `no_responders` 為 false 時，server 不寫 503。`no_responders` 沒有 `headers` 時連線被拒（no responders requires headers support）。看的是送出連線的旗標。server INFO 的 `headers: true` 讓 nats-py 2.15 在 `NatsTransport.connect`（沒有另傳 no_responders）上兩邊都廣告這兩個旗標；策略的送出連線沒有訂閱 ingress inbox，所以 server 不寫 503。`publish_with_reply` 走 `publish`，不會因此升起 `NoRespondersError`。對一個沒有 TD worker 的 api 跑真實 `amain` 的 `submit_order`：`accepted` 為 false、耗時 2.005 秒（`ORDER_ACK_TIMEOUT_S`）、`RejectCode.TD_NO_ACK`（108）、reason 為 `no ack from TD`、沒有例外、進程 exit 0。503 沒有進 ingress。
+
+   ack 回程的 hop 是 ingress `iter_core` yield（呼叫 `pending.complete` 之前）到策略 future 的 done callback，也就是 `call_soon_threadsafe` 那一跳。idle 與 MD 各 3000 筆，CPU hook 400 筆，warmup 30 筆不計，線性排名。機器：Intel Xeon，family 6 model 207，4 cores，2400 MHz；Python 3.12.3；uvloop 0.22.1。重現：`uv run --all-packages python scripts/b4_04_measure.py --gil-s 30 --hops 3000`。
+
+   | 條件 | hop p50 | hop p99 | hop max | 同時看到的 |
+   |---|---|---|---|---|
+   | idle | 0.013 ms | 0.021 ms | 0.41 ms | lag p50 0.074 ms；wall p50 0.18 ms；timeout 0 |
+   | ingress 同時消化 MD，4953 筆/秒（目標 8000；送出 4459、讀到 4405） | 0.014 ms | 0.14 ms | 0.29 ms | lag p50 0.092 ms、p99 0.29 ms；wall p50 0.22 ms；timeout 0 |
+   | 策略 loop 純 Python hook 100 ms | 62 ms | 89 ms | 94 ms | ingress 在 hook 開始後 p50 38 ms（p99 63 ms）讀到回覆；callback 在 hook 結束後 p99 0.042 ms 才跑；timeout 0 |
+
+   hook 佔住策略 loop 時，future 要等 hook 回到 loop 才完成，所以 hop 約是 hook 剩下的時間。timeout 在 ingress 讀到 bytes 時用 ingress 的時鐘判斷；這 100 ms 的 hook 裡讀得到，2 秒的 ack timeout 還有餘裕。paper 帳號 worker 上 `submit_order` 的牆鐘（n=100，含 TD 與 paper engine，第一筆 warmup 不計；B6-02 之後先把 `td.account.trading` 設成 active，否則同一筆單立刻以 107 拒絕、牆鐘約 0.4 ms，不是成交）：min 203.2 ms、p50 204.5 ms、p99 206.0 ms、max 206.2 ms，沒有拒絕。上面的 hop 是 0.01 ms 這個量級，這約 205 ms 是 paper 路徑的牆鐘。
+
+**ingress thread 的生命週期：與進程同生共死，也就是與 session 同生共死。**
+
+| 階段 | ingress thread | strategy thread |
+|---|---|---|
+| 0 啟動 | **最先啟動**：建立接收連線、訂閱 `sts.ctl.{session_id}`、開始對 shim 送 heartbeat | 尚未啟動 |
+| 1 載入 | 訂閱 MD feed 並開始消化 | 建立送出連線；import 策略、驗證參數 |
+| 2 `on_start` | 繼續收，但**不交付任何事件**；status 回報「`on_start` 已跑 N 秒」 | 跑 `on_start`，可以同步、可以很長（F3） |
+| 3 就緒 | `on_start` 結束後才訂閱 TD 帳號事件並觸發 recon；`MdReady`、`TdReady` 都成立後通知策略 | 收到 `on_ready` |
+| 4 running | 持續消化、記錄、交付 | hook；直接送單 |
+| 5 stopping | 收到 stop（控制訊號或 SIGTERM）後轉交策略；**繼續收 ack 和 fill，直到 `on_stop` 結束** | 跑 `on_stop`；撤單的回覆經 ingress 回來 |
+| 6 收尾 | 寫最後狀態、flush event log、NATS drain、關閉；進程退出 | 已結束 |
+
+TD 訂閱延後到 `on_start` 之後的原因：帳號事件是整個帳號的廣播，其他 session 的成交也會進來。如果在很長的 `on_start` 期間就開始累積，量可能很大，而 TD 事件又不能丟。延後訂閱再立刻 recon，就能直接拿到當下的快照。
+
+**異常時：**
+
+| 狀況 | 處理 |
+|---|---|
+| ingress 意外結束 | 整個進程 fail-fast，以非 0 結束；不在進程內重啟（不 rebuild） |
+| 策略 thread 拋出例外 | ingress 走收尾流程，status 記為 failed |
+| 策略卡住超過 stop grace | ingress 已回報卡在哪個 hook；由 shim / Supervisor 送 SIGKILL |
+| NATS 斷線重連 | thread 不變；斷線時每個 feed 收到 `on_md_update(feed, "down", "ingress_reconnect")`，重連後收到 `live`（F23）；對每個帳號做平台 recon，收斂後觸發 `on_resync(cause="reconnect")`（F13） |
+| shim 消失（EPIPE 或 PDEATHSIG 送來的 SIGTERM） | 當作 stop 處理 |
+
+**不變式：**
+
+- **I1** ingress 先於策略啟動、晚於策略結束。所以 `on_stop` 撤單時的回覆和成交一定收得到。
+- **I2** ingress 的生命週期等於進程，也等於 session。它不跨 session，也不在進程內重啟。
+- **I3** ingress 跑在 main thread，因為 Python 的 signal handler 只在 main thread 執行。SDK 禁止策略自己註冊 signal handler。
+- **I4** ingress 不跑使用者代碼，也不做阻塞 I/O。寫檔交給 event log 的 writer。
+
+**交付策略（F8，每個 feed 可以在 strategy.yml 覆寫）：**
+
+| 類型 | 預設 |
+|---|---|
+| ticker、bestquote、greeks、funding、OI、orderbook | `latest`：只留最新一筆，在解碼前就 conflate（orderbook 每次推送完整 snapshot） |
+| kline | 以 `(feed, bar 開盤時間)` 為 key 保留最新，不會丟掉任何一根收盤 bar |
+| trade、aggtrade、liquidation | `all`：有界佇列，溢出時丟最舊的，寫 warning log 並累加 status 上的丟棄計數；策略以 `event.seq` 自己偵測跳號（F25） |
+| TD 事件、`feed_end`、RPC 回覆 | `all`，不丟；溢出時視為異常並 fail session |
+
+每個事件帶 `recv_ts`，策略可以用 `event.age` 判斷資料延遲了多久。MD 的事件另外帶 `seq`（F25）：per-atom，以 (atom, 連線 epoch) 起算，在同一條連線上連續；重連、單一 atom 的 resync 或換 incarnation 之後，該 atom 從 1 重新起算。重新起算和 `on_md_update` 的 `live` 是同一件事，但 `seq` 走在資料流裡：`live` 經 `md.w.*` 送達，和 `md.a.*` 的資料在收件端沒有先後保證，`seq` 則不受影響。策略只需要一條規則：`seq != last + 1` 就是不連續。往前跳代表佇列溢出或 NATS 層的遺失，跳回起點代表上游中斷過。`seq` 不是排序鍵，也不能拿來去重，`(atom_id, seq)` 不保證唯一。`all` 類 feed 的不連續代表漏收，由策略自己記錄；`latest` 類的跳號是設計上的覆蓋，不代表漏收。
+
+**event log 併入 ingress：**
+
+- 入站事件在**收到時**就記錄，帶 seq 和 `recv_ts`，可以寫原始 bytes 加一個小 header。每筆事件之後的去向另外標記：`delivered`、`superseded`（被 `latest` 蓋掉）、`dropped`。
+- 出站紀錄由策略 thread 在送出的那一刻，以 thread-safe 的 `put_nowait` 交給 writer。
+- 寫檔維持在 writer thread。佇列滿了照現行規則：丟棄、計數、seq 留洞。
+- 沒設 `STS_EVENTLOG_DIR` 時，只關掉寫檔這一步，ingress 本身照常運作。
+
+**GIL：**
+
+- 純 Python 的 CPU-bound hook 每過 switch interval（預設 5 ms）會被迫釋放 GIL，ingress 仍然讀得到 socket。numpy、torch 本身就會釋放 GIL。
+- ingress 只搬 bytes、不解碼，把它需要的 GIL 時間壓到最低。
+- 長時間持有 GIL 的 C 擴充仍然會餓死 ingress，這類運算應該交給 `offload` 的 process 模式（§5.5）。
+- **switch interval 維持預設 5 ms（B4-04 實測；程式沒有改）。** 30 秒純 Python CPU hook，ingress 跑 `heartbeat_loop`（週期 1 秒）並每 50 ms 讀一筆 ping。回覆晚 0.3 秒送出，所以落在 hook 裡。三個 interval 的 ack 都在 hook 開始後約 0.30–0.32 秒被 ingress 讀到，策略端 `ack_ok`，沒有撞上 2 秒 ack timeout。heartbeat 樣本 30 筆。
+
+  | interval | heartbeat overrun p50 / p99 / max | inbox 延遲 p50 / p99 / max | hook 與 ingress 同時跑 | 單獨跑 |
+  |---|---|---|---|---|
+  | 5 ms（預設） | 5.3 / 34 / 38 ms | 22 / 50 / 54 ms | 2.73 萬次/秒 | 16.9 萬次/秒 |
+  | 1 ms | 1.3 / 3.6 / 3.9 ms | 4.6 / 7.4 / 9.2 ms | 2.76 萬次/秒 | 16.9 萬次/秒 |
+  | 0.5 ms | 0.60 / 1.3 / 1.4 ms | 2.6 / 3.8 / 4.7 ms | 2.76 萬次/秒 | 16.9 萬次/秒 |
+
+  5 ms 時 heartbeat 間隔最大 1.038 秒（週期 1 秒），離 shim 的 `SESSION_HB_TIMEOUT_S` 3 秒很遠；inbox 最大 54 ms，離 2 秒 ack timeout 很遠。調到 0.5 ms 可以把這兩個 jitter 再壓低，這台機器上的吞吐幾乎一樣。沒有觀測到需要改預設的風險，建議維持 5 ms。要不要改由 Yi Te 決定。同一條指令，機器同上。
+
+**其他：**
+
+- **hook 時間預算（F15）：** 一般 hook 量**阻塞時間**，也就是佔住策略 loop、沒有 `await` 讓出的連續時間。`await self.offload(...)` 期間 loop 是空的，不算阻塞，所以 hook 裡可以照常使用 `offload`。生命週期 hook 量**牆鐘時間**，因為生命週期本身就在等它們跑完。
+
+  | hook | 量什麼 | 上限 | 超過時 |
+  |---|---|---|---|
+  | 一般 hook（`on_ticker`、`on_order_update`、timer 回呼等） | 阻塞時間 | 1 秒 | warning log（Alert 抓得到）、`HookSlow` 計數加一，不 kill |
+  | 一般 hook | 阻塞時間 | 30 秒（硬上限） | 視為 B 類 crash：kill、平台清場、failed（§5.2） |
+  | `on_start` | 牆鐘時間 | `start_timeout_s`（預設 60、上限 3600 秒，F12） | 初始化失敗：failed，不重啟 |
+  | `on_ready` | 牆鐘時間 | 10 秒 | 初始化失敗：failed，不重啟 |
+  | `on_stop` | 牆鐘時間 | 10 秒（等於現在的 `ON_STOP_TIMEOUT_S`） | 不再等，直接走平台清場，然後 kill |
+
+  - 阻塞時間由策略 loop 自行量測，例如在每次 dispatch 前後記錄時間，或用一個固定間隔的 timer 測 loop lag。ingress 讀取這個數字，並在 status 的 progress 裡回報「卡在哪個 hook、多久了」。
+  - 1 秒只發警告，因為 ingress 接手 I/O 之後，hook 慢不會讓平台出錯，只會讓策略自己反應變慢。30 秒則必須強制結束：一個卡住 30 秒的 loop 連撤單都做不到，放著它比結束它更危險。
+  - 不提供 `limits.hook_timeout_s` 這類讓策略自訂上限的設定。
+- MD/TD 失聯不再直接 fail session，改成通知策略（F14，§5.6）。
+- `breathe` / `slice_deadline` 刪除，重計算改用 `offload`（F9，§5.5）。
+
+### 5.4 移除清單（範圍 4）
+
+| 類別 | 項目 |
+|---|---|
+| Rebuild | `rebuild_interrupted`、`rebuild_session`、`adopt_interrupted`、`_spawn_rebuild`、`_rebuild_after_exit`、`_settle_rebuild`、`rebuild_on_worker_exit`、`STS_REBUILD_ON_BOOT`、`STS_REBUILD_MAX_AGE_S`、worker 的 `rebuild` role |
+| Strategy API | `Strategy.rebuildable`、`on_rebuild`、`remember()`（F10）；`chase` 寫入和讀回 `started_ms`、滑價錨定價的兩段改為只存在記憶體 |
+| Worker 的 DB 存取 | `persist_live`、`mark_done`、`mark_live`、`remember_fact`、`bump_rebuild_count`、`reset_rebuild_count`、`load_session`、`list_db_sessions`、`td_instance`、`derive_sts` 等傳給 worker 端 `SessionManager` 的 DB 函式全部移除；session row 改由 Supervisor 寫（F10） |
+| strategy.yml | `restart` 的舊值 `always` / `never`（rebuild 語意）。改為 `never`（預設）/ `on_failure`，另加 `max_restarts`、`restart_window_s`（F11） |
+| DB | `st_facts` 刪除（F36）；`rebuild_count` 改名為 `restart_count`；`restart` 欄位保留，改存新語意（F11） |
+| 與父進程綁定 | `LIFELINE_FD_ENV`、`arm_parent_death`、`_watch_lifeline`、`MFTIK_STS_PARENT_PID`（pdeathsig 改指向 shim） |
+| Manager | `reap_orphans`（由 reattach 對帳取代）、雙模式 `SessionManager`（`_create_in_process`，worker 與 parent 共用同一個類別） |
+| Recon API（F13） | `Strategy.send_recon`、`on_recon_done`、`STS_RECON`、`StsSession._recon_sent` 與 `_on_lease_ack` 裡的自動 recon；TD 的 `_handle_recon` 改成平台內部 recon 和 `view(settled=True)` 共用 |
+| 續約 | `_lease_heartbeat_loop`、`_md_acks` / `_td_acks` 的 stale 判定、`_heartbeat_overslept`、`_shift_peer_acks`、`_fail_from_infrastructure("md feed …")`（§8.2） |
+| 讓出 loop（F9） | `breathe`、`slice_deadline`、`SLICE_S`、`tape.read(on_print=…)` 每筆讓出的邏輯；由 `offload` 取代（§5.5） |
+
+### 5.5 offload（F9）
+
+**目的：** ingress 保護的是平台這一側。策略自己的 loop 仍然是單 thread，如果某個 hook 同步算了 20 秒，這段期間策略自己的成交 hook、timer、`on_stop` 都要等。`offload` 把重的計算整段移出策略的 loop，讓策略在計算時還能反應。它取代 `breathe` / `slice_deadline`（§5.4）。
+
+**API：**
+
+```python
+# thread 模式（預設）：會釋放 GIL 的運算，可以直接用已載入的物件
+signal = await self.offload(self.model.predict, features)
+
+# process 模式：純 Python 的重計算、長時間持有 GIL 的 C 擴充、記憶體風險高的推論
+surface = await self.offload(fit_vol_surface, chain, isolate=True)
+
+# process 模式加常駐狀態：子進程啟動時執行一次 init（例如載入模型），之後每次呼叫重用
+self.ml = await self.offload_pool(init=load_model, init_args=(path,), workers=1)
+y = await self.ml.call(predict, x)      # 在子進程執行 predict(state, x)，state 是 init 的回傳值
+```
+
+**兩種模式：**
+
+| | thread（預設） | process（`isolate=True` / `offload_pool`） |
+|---|---|---|
+| 執行位置 | 每個 session 一個 thread pool | 每個 session 一個 process pool，用 `spawn` 啟動。worker 進程裡已經有多條 thread，`fork` 不安全 |
+| 傳遞資料 | 共用記憶體，不需要 pickle | 函式、參數、結果都必須可 pickle；函式必須是模組層級 |
+| 中斷 | 不能。stop 時取消的只是等待結果的 coroutine，thread 會繼續跑完 | 能。stop 時直接 terminate |
+| 對 ingress 的影響 | 純 Python 運算會和 ingress 搶 GIL，所以這類運算應該用 process 模式 | 完全不影響 |
+| 記憶體 | 和 session 共用 | 子進程 `oom_score_adj` 再往上調到 +900，比 session 本身先被犧牲；可以用 `limits.offload_memory_mb` 設 `RLIMIT_DATA` |
+| 子進程死掉時 | — | 呼叫端收到 `OffloadWorkerLost`（帶原因）；pool 在下次呼叫時重建，`offload_pool` 會重新執行 init |
+
+**規則：**
+
+- offload 出去的函式不能呼叫 SDK，例如 `submit_order`、`log`。SDK 會檢查呼叫者所在的 thread，不在策略 thread 上就拒絕。
+- 輸入要明確傳入、結果要明確回傳。thread 模式下不要在函式裡改策略物件的狀態，因為策略的 loop 同時還在跑。
+- 例外照常傳回給 `await` 的呼叫端。
+- 平行度由 strategy.yml 設定：`limits.offload_threads`（預設 2）、`limits.offload_processes`（預設 0，F43）。
+- `limits.offload_processes` 是這個 session 同時存在的 offload 子進程總上限（F43）。`offload_pool(workers=N)` 在建立時預留 N 個；`isolate=True` 背後的 pool 在第一次使用時建立，拿剩下的額度，至少 1 個。額度不夠就在呼叫處拋出 `OffloadQuotaExceeded`，訊息寫明要調高 `limits.offload_processes`；不會默默給比要求少的 worker。所以 pool 要在 `on_start` 裡、第一次用 `isolate=True` 之前建立；順序反了只會報錯，不會默默出錯。預設 0 表示沒有宣告就不能用 process 模式。
+
+**生命週期（對齊 §5.3 的階段）：**
+
+- pool 在第一次呼叫時才建立；`on_start` 裡也可以用，例如用 `offload_pool` 在子進程載入模型。
+- 第 5 階段（stopping）：`on_stop` 照常執行，還在進行中的 offload 不會自動取消。
+- 第 6 階段（收尾）：
+  - process 模式：`shutdown(cancel_futures=True)`，再 terminate 剩下的子進程。
+  - thread 模式：無法中斷，進程會等它跑完才退出。超過 stop grace 就由 shim 送 SIGKILL。
+- process pool 的子進程啟動時設 `PDEATHSIG`，並確認 parent pid 沒變。session worker 死掉，子進程跟著結束，不會留下孤兒。
+
+**可觀測性：**
+
+- ingress 的 progress 列出進行中的 offload：函式名稱、模式、已執行時間。例如「offload `predict`（process）已跑 41 秒」。
+- event log 記錄 `offload_start` / `offload_end`：函式名稱、模式、耗時、結果（ok / error / cancelled / lost）。參數只記大小，不記內容。
+- 准入控制（§4.7）計算 session 記憶體時，把 process 模式的子進程也算進去：部署時依 `limits.offload_processes` 預留，執行中以 Supervisor 讀到的整棵子進程樹 Pss 為準（F43）。
+
+**取代既有用法：**
+
+| 原本 | 改成 |
+|---|---|
+| `breathe` / `slice_deadline` 切片 | 整段計算交給 `offload` |
+| `tape.read(on_print=…)` 每筆讓出 | `await self.offload(fold, tape.records)` |
+
+
+### 5.6 MD / TD 失聯（F14）
+
+`on_ready` 之後，MD 或 TD 中途斷掉時策略會看到什麼。現在的做法是 `_lease_heartbeat_loop` 3 秒沒看到 ack 就 `_fail_from_infrastructure`，這套機制隨 lease 一起刪除（§8.2）。
+
+**原則：**
+
+1. **失聯只通知，不自動 fail。** 斷線可能只有幾秒，策略能不能撐過去由策略自己判斷：要等、要降級，還是呼叫 `self.fail()`。平台不提供「失聯多久就 fail」的設定。
+2. **訊號來自權威來源**（P7）。平台只轉發 MD / TD 自己知道的狀態變化。資料新不新鮮，由策略看 `event.age` 判斷；冷門合約很久沒有報價是正常的。
+3. **TD 不可用時，下單在本地直接拒絕，不送出。**
+
+**狀態廣播（取代 lease）：** MD 連線 worker 和 TD 帳號 worker 各自週期性**單向**廣播自己的狀態，STS 只負責聽，不回 ack，也沒有 per-session 的狀態。
+
+| 廣播者 | subject | 內容 | 頻率 |
+|---|---|---|---|
+| MD 連線 worker | `md.w.{instance}.{worker_id}`（暫定） | incarnation、連線狀態、狀態版本號；atom 的狀態變化另外以事件發出 | 狀態變化時立即發一次，平時每 2 秒一次 |
+| TD 帳號 worker | `td.account.state.{api_id}`（暫定） | incarnation、`ready` / `degraded` / `unavailable`、狀態版本號 | 同上 |
+
+- 廣播由 **worker 自己**發出，不是 controller。controller 滾動期間 worker 照常運作，廣播不會中斷（P1）。
+- ingress 依版本號判斷有沒有漏掉狀態事件；有漏的話，就向該 worker 查詢完整狀態。
+- 某個 worker 的廣播**靜默超過 10 秒**（漏了 5 次），就把它負責的 feed 標成 `down`、帳號標成 `unavailable`。這是 P7 唯一的例外，只用來處理整台主機失聯，因為那時沒有任何人能發出狀態。它只產生通知，不會回收任何資源，所以誤判的代價很低。
+
+**各種情況：**
+
+| 情況 | 策略收到 | 恢復後 |
+|---|---|---|
+| MD 連線 worker crash 或重連（含交易所斷線） | 受影響的每個 feed 收到 `on_md_update(feed, "down", reason)` | 重新訂閱成功後收到 `on_md_update(feed, "live", …)`。中間缺了什麼，由策略依這兩個通知自己記錄（F23） |
+| feed 永久結束（到期、下市） | `on_feed_end`（沿用現有） | 不會恢復 |
+| TD 帳號 worker 重啟或換版 | `on_td_update(api_id, "unavailable", reason)` | 先 `on_resync(api_id, "account_reset", view)`，再 `on_td_update(api_id, "ready", …)` |
+| TD 帳號的交易所私有連線斷線 | `on_td_update(api_id, "degraded", reason)`：可能還能下單，但成交回報會延遲 | `ready`；TD 自己的 reconcile 結果照常以 order update 送達 |
+| MD / TD controller 重啟 | 什麼都不會收到（P1） | — |
+| STS 自己的 ingress 斷線重連 | 所有 feed 收到 `on_md_update(feed, "down", "ingress_reconnect")` | 所有 feed 收到 `live`；每個帳號收到 `on_resync(cause="reconnect")` |
+| 整台主機失聯 | 廣播靜默 10 秒後，收到 `down` / `unavailable` | 廣播恢復後回到 `live` / `ready`；帳號另外收到 `on_resync` |
+
+**策略的介面：**
+
+```python
+async def on_md_update(self, feed: str, state: str, reason: str) -> None: ...    # "live" | "down"
+async def on_td_update(self, api_id: int, state: str, reason: str) -> None: ...  # "ready" | "degraded" | "unavailable"
+# 沿用：on_feed_end。F13 新增：on_resync
+# 沒有 on_feed_gap（F23）：漏收由策略依 on_md_update 自己記錄
+
+self.md.state(feed)       # 隨時可查目前狀態
+self.td.state(api_id)
+```
+
+- **組合型 feed（F19）：** 一個 feed 由多個 atom 組成時，任何一個 atom `down`，這個 feed 就是 `down`；全部回到 live 才是 `live`。
+- `on_md_update` / `on_td_update` 只處理**連線與可用性的狀態變化**，不是行情或訂單事件。行情走 `on_ticker` 等，訂單走 `on_order_update`。SDK 文件要寫清楚這個區別。
+- **下單：** 帳號 `unavailable` 時，`submit_order` / `cancel_order` 立刻回傳 False，reject 原因是 `td_unavailable`，不送出，和現有「False = 沒送到交易所」的語意一致。`degraded` 時照常送出。
+- **conditions：** `MdReady`、`TdReady` 在 `on_ready` 之後繼續反映即時狀態，UI 和 board 看得到。每次狀態轉換都寫一條 warning log，Alert 管線可以直接比對。
+
+
+### 5.7 代碼身分與主機磁碟（F39、F40）
+
+每台 STS 主機的 `mftik-data` volume 上有四樣東西：策略樹（registry 副本）、extras overlay、artifacts、event log。現況由平面進程讀寫；新架構的平面 controller 不再持有 session，這一節定下每一樣歸誰。
+
+**代碼身分（F39）**
+
+「這個 worker 跑哪一份代碼」是三個獨立的軸，各有自己的權威：
+
+| 軸 | 識別 | 目錄（有哪些版本）的權威 | 在主機上的位置 | 什麼時候會變 |
+|---|---|---|---|---|
+| 平台 release | `WorkerSpec.code_ref` | Strategon release（F6） | release 的 rootfs | controller 換版 |
+| 策略樹 | `strategy_digest`（`.py` 檔的 digest，`mftik.registry.digest`） | API 的 registry store | STS volume 的 registry 副本 | push、delete、pull |
+| extras | `env_generation` | API 的 `env/applied.json` | STS volume 的 `env/gen-{N}` | env apply |
+
+- 內建策略（`mftik_sts.impl`）沒有 digest，代碼就是 release。
+- 三個軸描述的是同一個 worker 的不同部分，不是兩個來源描述同一件事。procman 只認 `code_ref`（P6）；STS orchestrator 把 `strategy_digest`、`env_generation` 寫進 `WorkerSpec.labels`。
+- **desired：** API 在 start 時從自己的 registry 與 env 解析出 `(strategy_digest, env_generation)`，寫進 SessionSpec。這一組在 session 的整個生命週期內不變，F11 的重新掛起也沿用，不讀「磁碟上現在的版本」。
+  - 重新掛起時的平台 release 是當下 controller 的版本，所以 spawn 前先檢查策略樹宣告的 `requires_mftik`；不相容就 failed 並發 alert。
+- **observed：** Supervisor 在 spawn 時記下三個軸，經 `procman.report` 回報。`mftik workers --stale` 列出跑舊 release 的 worker，也列出跑的 digest 已經不是目前版本的 session。
+- **STS 磁碟副本改成以 digest 定址：**
+  - 樹放在 `registry/trees/<digest>/`，name → digest 的索引另存。push 新版本只改索引，不覆蓋正在被使用的樹。現在的 `<origin>/<name>/` 是原地替換。
+  - GC 只刪「沒有被本 instance 任何非 terminal SessionSpec 釘住、也不是索引裡目前版本」的 digest。
+  - extras 的 `_prune_generations` 改成同一條規則。現在只留 current 和 previous，跑在更舊 generation 上的 worker 遇到 lazy import 會失敗，和 §4.5 舊 rootfs 被刪是同一類潛伏錯誤。
+  - API 的 registry store 只保留每個 name 的目前版本。STS 磁碟遺失時，被釘住的舊 digest 無法從 API 補回，這時重新掛起以 `strategy_unavailable` failed。
+- **STS controller 不 import 策略代碼。** 使用者代碼只在 session worker 裡執行。
+  - worker 在第 1 階段（§5.3）以 `load_class(trees/<digest>, digest=…)` 載入；失敗是初始化失敗（F12）。
+  - deploy 時的可部署檢查只看 digest 和 generation 在不在這台磁碟上、`requires` 和 extras 是否相符，不 import。
+  - push 之後「這棵樹在 STS X 上能不能 import」的回報（現在 `sts.registry.sync` 回覆裡的 `loaded` / `skipped`）保留，改由 controller 起一個一次性的探測子進程 import 後回報。探測子進程不是受管 worker，跑完即結束。
+- registry 與 extras 的 RPC（`sts.registry.sync`、`sts.env.sync`、開機的 `api.registry.catchup`）由 STS controller 服務。它們只寫磁碟副本，不碰執行中的 worker。`sts.registry.reload` 從「重新 import」改成「重新掃描索引」。
+
+**主機磁碟上的 operator 路徑（F40）**
+
+- STS controller 服務 operator 對主機磁碟的所有路徑：上面的 registry 與 extras，加上 `sts.artifact.*`（list、read、begin / chunk / commit / abort、delete）、event log 讀取，以及清理沒有 commit 的上傳（現在的 `sweep_loop`）。
+- 理由：
+  - 這些都是 API 對「某一台主機磁碟」的控制面操作，現在就以 `sts.{instance}` 逐台定址（`sts_fanout`）。新架構裡每台主機上一直在線、又屬於這台主機的只有 controller。
+  - 不經過交易資料面。P1 管的是行情、下單和回報，operator 上傳模型或下載 event log 不在其中。
+  - 不另開 files worker：那會多一種 kind、一份 RSS、一個需要人工換版的進程（F24），換到的只是 controller 滾動時傳輸不中斷。controller 滾動是秒級，上傳本來就要能重試。
+  - handler 的檔案 I/O 已經都在 `asyncio.to_thread` 裡，不佔 controller 的 loop。
+- **要補的一件事：** 上傳 token 現在只存在記憶體（`ArtifactStore._uploads`），controller 一滾動，進行中的上傳在下一個 chunk 就會收到 `ArtifactUploadError`。改成由磁碟上的 `.{name}.{token}.part` 找回 token（`_token_of` 已經會解析），controller 重啟後可以接著傳。
+- **artifact 的權威是主機上的 artifact volume。** 兩條寫入路徑共用同一套 `ArtifactStore`（part 檔加 rename，原子替換）：operator 經 controller，策略在自己的 worker 裡直接寫（B5-07）。語意維持現況：operator 動不到 `sessions/`；策略可以寫任何 key，包括覆蓋 operator 上傳的 key。這是刻意的：策略保留全域寫入，不限制在 `sessions/{session_id}/`。
+- event log 的寫入者是 session worker 的 ingress（§5.3），controller 只讀。
+
+---
+
+## 6. MD
+
+### 6.1 原子訂閱（Atom）
+
+**定義：** `Atom = (venue, endpoint, channel)`，其中 channel **逐字等於交易所的 subscribe 參數**，不是平台宣告的寫法。
+
+| venue | 例子 |
+|---|---|
+| Deribit | `(Deribit, public, "ticker.BTC-27DEC26-100000-C.100ms")`、`(Deribit, public, "book.BTC-PERPETUAL.none.20.100ms")` |
+| BinanceUM | `(BinanceUM, market, "btcusdt@bookTicker")` |
+| OKX | `(OKX, public, "tickers:BTC-USDT-SWAP")`，由 `arg_key()` 正規化成字串 |
+| Gate | `(GateFutures, public, "futures.tickers:BTC_USDT")`，每個合約一個 atom。**MDS-4 的 identity 問題在這個定義下自然消失** |
+
+- `atom_id` 是正規化字串，subject 用它的穩定 hash：`md.a.{venue}.{hash}`，因為 channel 字串本身帶有 `.`。MD 維護 hash 和 atom 的對照表。
+- 每個 venue adapter 提供以下純函數，放在 `mftik.exchange.<venue>`：
+  - `atoms_for(topic, ticker, opts) -> AtomPlan`：平台 topic 對應到哪些 atom、用哪個 projector。取代現在 `_open` 解析成 `stream_*` 的做法。mftik feed 對 atom 本來就是一對多（F19），例如 Binance UM/CM 的 ticker 需要 `@ticker` 加 `@bookTicker`。反方向的多對一（Deribit 的 ticker、greeks、OI 共用 `ticker.*` channel）由 `decode` 從一個 frame 產出多個事件處理。
+  - `decode(atom, frame) -> list[Event]`：一個 frame 產出的正規化事件，使用平台既有的 model（`Ticker`、`Greeks`、`OpenInterest` 等）。
+  - `capacity(endpoint)`：每條連線的 atom 上限、訊息速率、subscribe 的批次大小和速率限制。
+  - `join_policy(atom)`：late joiner 的語意，沿用 MdVenueSubscriptions I5。
+- **STS 這端的宣告和 hook 都不變。** 仍然寫 `bestquote.Deribit_Option_...`。MD 在 intent 登記時解析出 atom，回傳 `{feed: [atom_id]}`。session 訂閱對應的 `md.a.*` subject，再依 envelope type 路由到 hook，只送出它宣告過的類型。
+- **跨連線組合（F19）：** 組成同一個 feed 的 atom 可能落在不同連線上，也就是不同進程（F17）。MD 只發佈原子事件，不在 MD 裡組合；組合在 STS 端以平台通用的純函數完成。
+  - 例子：Binance UM/CM 的 `ticker` = `join(BestQuote, TickerStats)`。`@bookTicker` 對應既有的 `BestQuote`，`@ticker` 對應新的 venue 中立模型 `TickerStats`（不含 bid/ask）。每次 stats 到達時帶上最新報價輸出 `Ticker`，報價還沒到就不輸出，沿用現行規則。
+  - join 不含 venue 代碼、運算量可以忽略，放在 ingress 上不違反 I4。
+  - 目前所有 venue 裡，跨連線組合只有這兩處（`_merge` 只出現在 Binance future 和 delivery）。
+  - 不另設組合 worker：多一跳 NATS、多一個進程與生命週期，而且它的輸出不是交易所的 subscription，會破壞 atom 的定義。
+- **MD 是行情的權威（F21）**，地位對應 TD 之於 ledger。解碼、book 的 fold（快照加增量）、late joiner 拿到的快照，都由連線 worker 負責；`md.a.*` 上傳的是平台 model（`OrderBook`、`Ticker`、`Trade` 等）。STS 不接觸交易所原文，也不持有 fold 狀態。這和現行分工相同：MD 現在發出的就是 `model_dump()` 之後的平台 model。
+- **這推翻了 MdVenueSubscriptions 的 I6（「MD stays out of venue vocabulary」）。** 從此 MD 在 atom 層講 venue 詞彙；STS 仍然只看得到不透明的 `atom_id`。
+
+### 6.2 MD orchestrator（controller）
+
+- **需求來源（demand）：**
+  1. session intent：某個 session 要哪些 feed。
+  2. 常駐訂閱：在設定檔中宣告、不屬於任何 session 的訂閱。專為錄 tape 而存在的 `tape_keeper` 策略因此可以退役。
+  3. selector：ATM 期權鏈、轉倉（§6.4，F33）。session intent 和常駐訂閱都可以帶 selector。
+- `desired_atoms = ⋃ demand`，每個 atom 記錄它的 owner 集合。owner 進入 terminal 時由 GC 移除。
+- **placement**：依 `(venue, endpoint)` 的 capacity 把 atom 分配到連線上。分配有黏性：新 atom 優先放進已有的連線，容量不夠時才開新的連線 worker。atom 放上去之後就不搬（F22）；連線上沒有任何 atom 時，該 worker 結束。不做整併，代價是連線可能碎片化，每條碎片多佔一個進程的 RSS（§4.7）。
+  - placement 只看 `max_atoms`（F44）。每個 atom 的推送量差好幾個數量級，給不出靜態的每 atom 成本，所以 `max_messages_per_second` 改成實測的滿載訊號：連線 worker 在 `md.w.*` 回報自己的 msg/s，超過上限的 80% 就不再放新 atom；已在上面的 atom 不搬。
+- 把每條連線的 desired set 連同 `generation` 推給對應的連線 worker（F18）：
+  - 每次都推完整清單，不推增量（level-triggered）。
+  - `generation = (controller_epoch, seq)`。`controller_epoch` 在 controller 每次啟動時於 DB 遞增；worker 只接受比手上更大的 generation，所以新舊 controller 短暫重疊時，舊的推送不會蓋掉新的。
+- **到期**：依 SYM listing 判斷某商品已到期時，從 desired 移除對應 atom，並對它的 owner 發出 `md.feed.end(expired)`。這取代 `_expiry_tasks`。
+- controller 重啟時，從 DB 裡的 intent 和常駐設定重算 desired。重算完成、推出新 generation 之前，worker 保持上一份 desired（P5）。
+- `controller_epoch` 存在 `md_controller(instance PK, controller_epoch bigint)`，以 instance 為單位；controller 啟動時以一句 `UPSERT … SET controller_epoch = controller_epoch + 1 RETURNING` 遞增（F44）。
+
+### 6.3 連線 worker 與 reconciler
+
+- 一個 worker 對應一條 websocket（F17）。reconciler 跑在 worker 裡面（F18），理由：
+  - observed 以交易所 ack 為準、以連線 epoch 為鍵，只有 worker 看得到。
+  - 重連後的補訂，以及 book 出現缺口時的 resync（先退訂再重訂），都是對單一 atom 的 reconciler 動作，可以在本地完成。現在 Deribit、Bybit、OKX、Bitget 的 adapter 也是在 socket 裡做。
+  - controller 重啟時訂閱不會抖動。
+- **重連節奏（F42）：** socket 斷線後在進程內重連，等待時間和 crash 重啟同一條曲線（1 秒起、×2、上限 60 秒、±20% jitter），連線維持 60 秒後歸零。交易所整體斷線時，同一台主機上的連線 worker 會同時重連，jitter 用來錯開它們。
+- **reconciler：** 比對 `desired(gen)` 和 `observed`。observed 以交易所 ack 為準，並以連線 epoch 為鍵，舊 epoch 晚到的 ack 一律丟棄。差異合併成批次，經 token bucket 限速後送出。重連後 observed 歸零，下一輪 diff 會自動補齊。每個 atom 回報 `pending`、`subscribed`、`first_msg_at`、`last_msg_at`、`error`。現行的 `WireLedger` 就是這個 observed set，可以搬過來繼續用。
+- **狀態廣播（F14）：** 連線 worker 單向廣播自己的狀態（incarnation、連線狀態、狀態版本號），狀態變化時立即發一次，平時每 2 秒一次；atom 的狀態變化另外以事件發出（§5.6）。
+- **解碼與發佈：** 每個 frame 只解碼一次，發佈到 atom subject，envelope 帶 per-atom 的 `seq`，以 (atom, 連線 epoch) 起算（F25）。`owner` 不上線：envelope 的 `source` 就是 worker_id，incarnation 在 `md.w.*` 的狀態廣播裡。需要錄的 atom（`trade`、`aggtrade`、`liquidation`，F20）append 到該區域的 Redis tape，key 改成 `atom_id`。
+- **不做連線遷移（F22）：** 每個 atom 任何時刻只在一條連線上，所以只有一個發佈者，訂閱端不需要去重。連線 worker 原地重啟時，Supervisor 確認舊進程結束後才啟動新的（delete-before-create）。診斷時從 `md.w.*` 的狀態廣播查 incarnation。
+- tape 只由持有該 atom 的連線 worker append。重連或原地重啟造成的空洞會被量測，記錄在 coverage。
+- **tape 的範圍（F20）：**
+  - 以 atom 為單位錄製，只錄歷史無法回補的 trade 類：`trade`、`aggtrade`、`liquidation`。book 和報價類不錄：單筆約 1500 bytes 對 200 bytes，而且下一則推送就是完整狀態。
+  - 有 demand 的 atom 才錄，demand 包含常駐訂閱。coverage 以 atom 為單位記錄。
+  - Binance UM 的 `trade` 和 `aggtrade` feed 都來自 `@aggTrade`，改成 atom 之後只錄一份。
+  - 讀取仍由 MD 服務，STS 不開 Redis。
+
+### 6.4 從宣告式推導的訂閱：selector（F33，B9）
+
+**宣告：** `md:` 除了靜態 feed，再加上 `select:` 項目。session 的 strategy.yml 和 MD 的常駐訂閱都可以用。
+
+```yaml
+md:
+  md-jp:
+    - ticker.Deribit_Perp_BTCUSD
+    - select: btc_chain
+      kind: option_chain
+      venue: Deribit
+      underlying: BTC
+      ref: ticker.Deribit_Perp_BTCUSD   # 參考價；由 selector 自己持有，策略不必另外宣告
+      expiries: {nearest: 2, min_tte: 2h}
+      strikes: {atm: 5}                 # 每個 expiry 取 ATM ± 5 檔，用該 expiry 實際掛牌的 strike
+      sides: [C, P]
+      topics: [ticker, greeks]
+      recenter: {strikes: 1, min_dwell: 60s}
+    - select: btc_q
+      kind: rolling_future
+      venue: Deribit
+      underlying: BTC
+      tenor: quarterly                  # weekly | monthly | quarterly
+      roll_before: 3d
+      topics: [ticker, trade]
+```
+
+**推導（MD orchestrator）：**
+
+- 每種 selector 是純函數 `evaluate(listing, ref, now, prev) -> Selection | Hold`。listing 來自 SYM，ref 是 MD 自己的行情。
+- `option_chain`：
+  - 依 `expiries` 選出 expiry；離到期不到 `min_tte` 的跳過，所以期權鏈在舊 expiry 結束前就會移到下一個。
+  - 每個 expiry 以 ref 找出最近的掛牌 strike 當中心，取上下 `atm` 檔，各 strike 的 C/P 依 `sides`。
+  - ref 剛好落在兩檔正中間時，取靠近目前中心的一檔；沒有中心（第一次選）時取較低的一檔（F44）。
+  - debounce 正在 hold 住中心時新出現的 expiry，跟著存下的中心點：取它自己的 strike 序列上離中心價最近的一檔。狀態只有一個中心點，`evaluate` 是純函數，成員必須能從 `(listing, prev)` 重算（F44）。
+  - 「離中心幾檔」一律量在這一輪套用 `min_tte` 之後的最近 expiry 的 strike 序列上；存下的中心點不在這個序列上時，先對到最近的一檔（F44）。
+  - **防抖動：** ref 離目前中心超過 `recenter.strikes` 檔才重新置中，兩次置中至少間隔 `min_dwell`。
+- `rolling_future`：
+  - 依到期日把合約分成 weekly、monthly、quarterly，取對應 tenor 最近的一張當 current。
+  - weekly / monthly / quarterly 的分類交給 venue 的 atom adapter（`tenor_of(instrument)`）。週五日曆是預設實作，只套用在 adapter 宣告適用的 venue（目前是 Deribit）；沒有分類能力的 venue 部署 `rolling_future` 時在 deploy 失敗，不默默套用錯的日曆（F44）。
+  - 到期前 `roll_before` 時 current 切到下一張。**舊合約保留到到期**才移除，轉倉期間兩邊行情都在。
+- **fail-static（P5）：** listing 過期、ref 斷線、MD controller 不在時，一律維持上一份結果。
+- **空 listing（F44）：** listing 回來 0 個 instrument，一律當成讀取失敗，回 `Hold(listing_empty)`、維持上一份。把讀取失敗當成空盤面會退訂整條期權鏈；真的空了，舊合約到期時照 C7 移除，不會卡住。這和「每個 expiry 都落在 `min_tte` 內」不同，後者照常讓 universe 變空。
+- **持久化：** `prev`（上一次的 Selection、epoch、置中狀態）存在 DB。controller 重啟後從這裡接著算，不會重新置中。
+  - 置中的時間 `Center.at` 是 selection 狀態裡的明確欄位，只在真的重新置中時改寫，不以列的 `updated_at` 代用：期權到期輪替時 selection 會變，但中心點和它的時間戳要保留（F44）。
+- **共用：** 規格相同（spec hash 相同）的 selector 只算一份，所有 owner 拿到同一個 universe 和 epoch。
+- **容量：** 部署時就能算出 atom 上限。例子裡的期權鏈是 2 × 11 × 2 = 44 個 atom：Deribit 的 ticker 和 greeks 共用 `ticker.*` channel，所以不會變成 88 個。這個上限用於 deploy 的容量檢查（§4.7 的准入控制）。
+
+**給策略：**
+
+```python
+async def on_universe_change(self, name: str, change) -> None: ...
+# change.added、change.removed、change.epoch；rolling_future 另有 change.current
+
+self.md.universe("btc_chain")   # 目前選中的合約集合
+self.md.current("btc_q")        # rolling_future 目前的 current
+```
+
+- 只有這一個 hook，轉倉也走它（`change.current`），不另設 `on_roll`。
+- **I-SEL1：** 某個合約出現在 `added` 之前，策略不會收到它的事件；出現在 `removed` 之後，也不會再收到。做法是 ingress 收到 `md.universe.{session_id}` 之後，先訂閱新合約的 atom subject、交付 hook，再退訂被移除的合約，並丟掉佇列裡屬於它們的事件。
+- 期權鏈的成員到期時，照常收到 `on_feed_end(expired)`，接著是 `removed` 含該合約的 `on_universe_change`。
+
+**不做的事：**
+
+- **pin：** 期貨的舊合約本來就保留到到期；期權目前 TD 不能下單，沒有東西需要 pin。所以 MD 不必向 TD 查部位。等 TD 支援期權下單時，再加由策略明確宣告的 pin。
+- **`required`：** 不加。selector 在 `ready_timeout_s` 內推導不出結果，或成員一直沒資料，都列在 `ready.missing_feeds`，由策略在 `on_ready` 自行判斷（F12）。
+
+### 6.5 被取代或移除的部分
+
+- `Dispatcher` 的 per-session fan-out（`md.{session_id}`）、`StsLink`、MD 端的 lease loop。
+- 每個 venue 一條 socket 的 `VenueSession` 模型、`_expiry_tasks`。
+- 各 adapter socket 類別裡的訂閱管理。adapter 只留下傳輸和 decode。
+- `docs/archive/MdHandover.md`（由 §4.6 取代）。
+- `docs/archive/MdVenueSubscriptions.md` 的 I6（由 §6.1 推翻）。
+
+---
+
+## 7. TD
+
+### 7.1 帳號 worker（範圍 5）
+
+- **綁定（F45）：** 帳號綁定的 TD instance（`apis.instance_id`）不可經 API 修改。要搬帳號，就刪除後在新 instance 重建。日後若要加改綁的 route，帳號還有未釋放的 intent、或舊 instance 的報告還列著它的 worker 時一律拒絕，主機永久消失時才允許 `--force`。
+- **單位（F34）：** 一個進程對應一個 `api_id`，持有該帳號所有私有連線。Bybit（`/v5/trade` 加 private stream）和 Binance UM/CM（WS API 加 user stream）一個帳號就有兩條 websocket；拆成兩個進程，OMS 和 ledger 就得跨進程同步。
+- **兩層生命週期（F35）：**
+  - **常駐層：** TD instance 名下每個啟用的帳號，都有一個常駐的帳號 worker，和有沒有 session 無關。它一啟動就對交易所建立 HTTP 連線並保持溫熱。現行的 httpx client 用預設設定，閒置 5 秒（`keepalive_expiry`）就會關掉連線，也沒有預熱；所以要把 keepalive 調長，並由 adapter 定義一個輕量請求（例如 server time）定期送出。recon、槓桿查詢、backfill 和走 HTTP 的下單都共用這個連線池。
+  - **交易層：** 有 TdIntent（refcount > 0）時才啟動：連私有 websocket、recon、OMS / ledger 上線、訂閱 `td.order.{api_id}`，之後 TdReady 才成立。最後一個 intent 消失就立刻關掉交易層，不 linger；常駐層不受影響。F11 的 `restarting` 期間 intent 不會被回收（R4），所以策略重啟不會讓交易層抖動。
+  - 下單依 venue 的設計走 HTTP 連線池或 websocket（例如 OKX 走 REST，Bybit 走 `/v5/trade`）。
+- **backfill（F35）：** 排程或 detach 觸發的一次性 backfill request，由帳號 worker 用常駐的連線池處理，不另開 job worker，帳號沒有 session 時也能做。同一個帳號同一時間最多一個 backfill，併發受限，不佔滿連線池。
+- **直接服務** `td.order.{api_id}`、`td.oms.*`、`td.ledger.*`，並發佈 `td.{api_id}.global`。下單路徑不經過 controller。
+- **`td.order.cancel_session(session_id)`**（F10）：撤掉 OMS 裡所有 `client_order_id` 的 session 欄位等於該 session 的掛單。還在 `PENDING_NEW` 或 `UNKNOWN` 的單，等 `chase_unknown` 收斂後一併處理。全部確認後才回覆成功，逾時則回覆未確認的清單。這是 STS crash 時的平台清場（§5.2），也可以當作人工的 kill switch。
+- **at-most-one（F36）：** 帳號 worker 會重啟，新舊 incarnation 不能同時收單。不用 DB lease：
+  - **同一個 instance 內：** Supervisor 確認舊 worker 的 PID 已經消失，才啟動新的 incarnation。開了 `oci_host_pid` 之後 controller 看得到 host 的 `/proc`（§4.5），這是直接觀測，不是猜測。reattach 時也先掃 `/proc`，確認沒有同 id 的 worker 才 spawn。
+  - **跨 instance：** `api_id` → instance 是 DB 裡的靜態綁定（`ApiRepository.instance_name`），TD controller 只啟動自己名下的帳號。同名 instance 重複啟動，由現有的 `refuse_if_serving` 拒絕。
+  - **不用 DB lease 的理由：** 兩個 site 共用同一個 `DATABASE_URL`。DB lease 會讓 TW 的交易依賴跨 site 的 DB 連線，DB 或 Tailscale 一斷就停止交易；現行代碼也刻意沒有這種依賴。
+  - STS session 不需要這個機制：`session_id` 終生只有一個 incarnation。
+- **crash 之後：** 新的 incarnation 用既有的 `reconcile()` 從 venue 重建 ledger 和 OMS，在途的單由 `chase_unknown` 收斂。接著發出 `td.account.reset(incarnation)`。各 session 的 ingress 收到後做平台 recon，收斂後觸發 `on_resync(cause="account_reset")`（F13）；這段期間 `TdReady` 會短暫變成 false。
+- **狀態廣播（F14）：** 帳號 worker 在 `td.account.state.{api_id}` 單向廣播 `ready` / `degraded` / `unavailable` 和 incarnation，狀態變化時立即發一次，平時每 2 秒一次（§5.6）。
+- **帳本查詢：** `td.account` 服務 `oms.view` / `ledger.view`，並支援 `settled=True`：有狀態 UNKNOWN 的單時，等它們收斂（或逾時）才回覆，沿用現在 `_handle_recon` 的等待邏輯。
+- **cancel-on-disconnect（F37）：**
+  - 預設關閉，逐帳號開啟。設定掛在帳號上，不放在 strategy.yml，因為帳號 worker 是多個 session 共用的。
+  - 語意是「TD worker 的死人開關」，不是「socket 斷線就撤」。只用倒數計時型機制（Binance UM/CM 以 symbol 為單位、Bitget UTA、OKX、Gate 現貨與合約）：交易層啟用且有掛單時，帳號 worker 定期刷新倒數；進程死掉或卡住、刷新停止，交易所才撤單。一般的重連不會觸發。
+  - 交易層關閉（deactivate）時，帳號 worker 送 `timeout=0` 解除倒數，不是單純停止刷新。關閉交易層不撤單；session 結束後故意留下的掛單不歸 MFTIK 管理，不該因為 worker 之後死掉而被交易所撤掉。死人開關只在交易層啟用時保護。交易層重新打開、有掛單時再設倒數。
+  - 不用 Deribit 的 COD（每次重連都會撤單），也不用 Bybit 的 DCP（只開放給機構客戶，需另外申請）。
+  - 計畫內的換版（F27）在 drain-replace 之前先延長倒數，新 incarnation 接手後再恢復。
+  - 被交易所撤掉的單，照常以 `on_order_update(cancelled)` 送給策略；帳號重啟時另外有 `on_resync`。不需要新的 hook。
+  - Gate 的現貨（`Gate`）和合約（`GateFutures`）在 registry 是兩個 venue，各有自己的 `api_id` 和帳號 worker，各自刷新：`POST /spot/countdown_cancel_all`、`POST /futures/usdt/countdown_cancel_all`，都不帶 `currency_pair` / `contract`，所以是整個市場的倒數，每次刷新一次呼叫。到期時，同一把 key 在那個市場上不是 MFTIK 下的單也會被撤；帳號綁給 MFTIK，這是預期的行為。Gate 的 `timeout` 至少 5 秒，0 代表取消倒數。
+  - 各家的倒數範圍和刷新間隔，在 B6 實測後寫進 adapter。
+
+### 7.2 TD orchestrator
+
+- `desired_accounts` = 本 instance 名下所有啟用的帳號（F35），不再由 intent 決定。
+- intent 只決定交易層：controller 以 level-triggered 的方式，把「這個帳號目前有沒有 intent」推給帳號 worker；controller 不在時，worker 維持最後一份（P5）。
+- crash 時以退避重啟。這和 STS 不同：TD 的帳號是基礎設施，不是一次性的執行。
+- 換版由人工逐帳號觸發 drain-replace（F27），見 §4.6。
+
+---
+
+## 8. API、協定、持久化
+
+### 8.1 Start / End（範圍 2.4）
+
+**Start**
+
+1. 驗證：解析 yml；把帳號名稱解析成 `api_id`；解析 MD instance；以 dry-run 把 feed 解析成 atom，並檢查容量上限。
+2. 寫入 `SessionSpec`，`status=pending`、`generation=1`。
+3. `td.intent.put(session_id, api_ids)`，冪等。
+4. `md.intent.put(session_id, feeds)`，冪等。
+5. `sts.session.start(session_id)`；API 回 202 `{session_id, status: "starting"}`，之後的進度看 status 和 conditions（§5.2、F12）。
+
+**End**
+
+1. `sts.session.end(session_id, reason)`：STS controller 接受就回覆，API 回 202，不等 `on_stop`（F46）。之後的進度看 status；`mftik stop` 輪詢到 terminal。
+2. worker 執行 `on_stop`、平台清場後退出，狀態進入 terminal。
+3. session 進入 terminal 時，由 STS controller 寫該 session 的 MD / TD intent `released_at`（F38），再盡力送 `md.intent.delete`、`td.intent.delete`，冪等。stop、`exit`、`fail` 都走這一步。
+4. 兜底：MD/TD orchestrator 會依 §8.2 的規則回收 intent。
+
+啟動失敗的回滾直接走 End。因此 `deploy_strategy` 的同步流程和它的回滾（`_detach_md`、`_fail_sts`）一起刪除，API 寫死的 10 秒 create timeout（#132 的成因）也隨之消失。驗證步驟（`_sts_target`、`_check_sts_instance`、`_check_md_instances`、`_td_instance`）留給新的 start 重用。
+
+### 8.2 續約（lease）的取捨
+
+**結論：刪除 per-session lease，不保留任何形式的 session 級續約。** 只保留一個由 STS controller 的 Supervisor 發布、以 instance 為單位的存活報告，作為 intent 回收的權威依據。不從報告的缺席推論主機失聯（F32）。TD 帳號 worker 也不用 lease：它的 at-most-one 由 Supervisor 以 PID 確認（§7.1，F36）。
+
+**現在的 lease 提供了什麼，新架構由誰接手：**
+
+| 現在由 lease 提供 | 證據 | 新架構的來源 | 為什麼更好 |
+|---|---|---|---|
+| STS 死掉時，MD/TD 回收資源 | `LeasedSessionLink`：三次 heartbeat 沒到就 `on_expired` → detach | Supervisor 的 worker 存活報告，加上 intent 的 owner GC | 權威、即時：shim 親眼看到 worker 退出，不必等 3 秒的缺席推論 |
+| STS 發現 MD/TD 死掉時自我 fail | `_stale_keys(self._md_acks, grace)` → `_fail_from_infrastructure` | per-feed 的 `last_msg_at` 與序號（資料是否新鮮）、`TdReady`、下單 RPC 的結果 | ack 只證明 MD 進程的 loop 還在轉，**不代表 venue 的資料在流**。socket 靜默斷流時 ack 照樣正常，所以它本來就是錯的代理指標 |
+| fencing | heartbeat 帶遞增的 `token`，MD/TD 在 ack 裡回傳 | 結構性保證：一個 `session_id` 終生只有一個 incarnation（不 rebuild）；帳號 worker 由 Supervisor 以 PID 確保唯一（§7.1，F36） | 現在的 token 實際上沒有 fence 任何東西：TD 只把它記在 `link.last_token`，下單路徑從來不檢查 |
+| attach 的交握 | MD/TD attach 會等第一個 heartbeat 才算成功 | `*.intent.put` 是同步 RPC，回覆即代表登記完成 | 少一個時間窗 |
+
+**lease 的代價：**
+
+- 把「活性」綁在策略 loop 的「進度」上，這正是 Deribit / ML 長 hook 出事的直接原因。
+- 每一跳都有一條 3 秒保險絲：STS→MD、STS→TD，以及兩者的 ack 回程。
+- 為了不讓它誤判而長出的補丁：`breathe`、`_heartbeat_overslept`、`_shift_peer_acks`、reaper 的 strike 計數，以及對應的 watchdog 測試。
+
+**取代後的回收規則（MD/TD orchestrator 共用）：**
+
+1. intent 一律帶 `owner = (sts_instance, session_id)`。
+2. 每個 STS controller 的 Supervisor 定期發布 `procman.report.sts.{instance}`，內容是目前存活的 worker id 集合加上 generation。controller 滾動的幾秒鐘內報告會暫停，這段期間什麼都不回收（P5）。
+3. 某個 owner 在**連續兩份報告**中都不存在 → 回收它的 intent。報告列的是 desired 為 running 的 session（包含 `restarting`，§5.2 R4），所以重新掛起的期間不會被回收。這是權威觀測，幾秒內完成。報告中斷（同一個 publisher 暫停，或網路分區）不清空已累積的缺席次數：中斷前後的兩份報告都是權威的缺席觀測，terminal 的 session 不會再回到報告上。換 publisher（generation 從頭算）時，B3-04 已經重新計數（F44）。
+4. **報告整個停止時不回收任何東西（F32）。** STS controller 沒有報告時，沒有人能權威地說 session 是否還活著；常見原因是 controller crash loop 或壞版本等待 Strategon 回滾，這時 session 還在跑，回收會切斷它們的行情。整台機器重開時，STS Supervisor 會權威地發現 session 已死並清場；機器永久消失時，由人工執行 `mftik intents gc --instance <name>`（暫定）。代價只是在人處理之前，訂閱和帳號 worker 多留一陣子。回收 intent 本來就不會撤單，交易所上的掛單要靠 D27。
+5. 回收錯了也能自癒：主機恢復後，STS controller 的 reconcile 會替每個 running session 重新 `intent.put`。這是 level-triggered 的狀態對帳，不是週期續約，controller 不在線時也不會造成任何東西過期。
+
+### 8.3 協定對照
+
+| 現在 | 之後 |
+|---|---|
+| `sts.session.create`（同步，等 `on_start` 跑完） | `sts.session.start`（非同步 accept）＋ `sts.session.status` 事件 |
+| `md.session.attach`，加上 `sts.md.{sid}` 上的 lease | `md.intent.put` / `md.intent.delete`，帶 owner |
+| `td.session.attach`，加上 `sts.td.{sid}` 上的 lease | `td.intent.put` / `td.intent.delete`，帶 owner |
+| `md.{session_id}`（per-session fan-out） | `md.a.{venue}.{atom_hash}`（per-atom） |
+| `md.subscribe` / `md.unsubscribe` | `md.intent.patch` |
+| `STS_LEASE_HEARTBEAT`、`MD_LEASE_ACK`、`TD_LEASE_ACK`、`LeasedSessionLink` | **刪除**。由 `procman.report.{plane}.{instance}` 和 intent owner GC 取代（§8.2） |
+| `md.feed.end` | 保留，以 owner 為對象。沒有 gap 相關的協定訊息，也沒有 `on_feed_gap`（F23） |
+| —（新增） | `md.universe.{session_id}`：selector 的變更事件，帶 name、added、removed、current、epoch（§6.4） |
+| `health.*`、instance subject | 保留 |
+
+依 F1，舊協定不保留相容層，切換時一次換掉。切換之後依 F26 與 F41：每則訊息在 header `Mftik-Pv` 帶 `pv`，格式一改就升版，不做版內相容；deploy 時比對，不符以 `protocol_mismatch` 拒絕；執行中收到不同 `pv` 的 frame 由 transport 丟棄並計數。
+
+### 8.4 持久化
+
+- **`sts_sessions` 改成 SessionSpec / Status：**
+  - 新增 `generation`、`observed_generation`、`worker_incarnation`、`conditions JSON`，以及 start 時釘住的 `strategy_digest`、`env_generation`（F39）。
+  - `rebuild_count` 改名為 `restart_count`，`restart` 保留並改存新語意（F11）；刪除 `st_facts`（F36）。
+- **新增表：**
+  - `md_intents(session_id, instance, feeds, atoms, generation, created_at, released_at)`
+  - `md_standing_subscriptions`
+  - `td_intents(session_id, api_id, created_at, released_at)`
+  - selector 狀態：`(spec_hash, universe, epoch, center, updated_at)`（§6.4）
+  - `apis` 加上帳號設定欄位，例如 cancel-on-disconnect（F37）
+- **intent 兼任歷史（F38）：** session 結束時 intent 列不刪，改記 `released_at`。`md_sessions` / `td_sessions` 從 B10 起停寫，保留唯讀，只用來查切換前的歷史。
+- Supervisor 的本機狀態（shim socket、exit 紀錄、`supervisor.json`）放在 `${WORK_DIR}/run/`，不放 DB。
+
+---
+
+## 9. 測試標準（範圍 6）
+
+### 9.1 Tier
+
+| tier | marker | 允許 | 禁止 | 單一測試上限 | 跑在 |
+|---|---|---|---|---|---|
+| unit | （預設） | 純函數、直接呼叫的 handler、in-memory fake（broker 除外）、`FakeClock` | 網路、子進程、真的 sleep、NATS、DB 檔案 | 50 ms | `just test` |
+| component | `component` | 共用連線的真 NATS（F31）、sqlite `:memory:`、`FakeClock`、in-proc 的 procman fake、loopback websocket 上的 venue stub | 每個測試自己連 NATS、子進程、Postgres、wall-clock sleep | 500 ms | `just test` |
+| integration | `integration` | 真 NATS、Postgres、真的 Supervisor 和 shim 子進程 | — | 10 s | `just test-int`、CI |
+| e2e | `e2e` | compose stack | — | — | release 前 |
+
+**預算（F30）：** 以 GitHub Actions 的 `ubuntu-latest` 為準：`just test`（unit 加 component，`pytest -n auto`）那一步的 wall time 在 120 秒內，不含 `uv sync` 和服務啟動；integration tier 另開 job，不算在內。CI 設閘門：這一步超過 120 秒就判定失敗。單一測試的 call phase 上限（unit 50 ms、component 500 ms）在本機判定失敗，在 CI 上只輸出 warning，因為 runner 的計時抖動會讓接近上限的測試隨機失敗；integration 的 10 秒上限在 CI 上仍判定失敗（F47）。B0 的基線也在 GitHub Actions 上量。
+
+### 9.2 規則
+
+1. **時間一律注入。** controller、worker、reconciler 都透過 `Clock` 協定（`now`、`monotonic`、`sleep`）取得時間。測試用 `FakeClock.advance()` 推進。在 unit 和 component tier 呼叫 `asyncio.sleep(x > 0)` 會被 conftest 攔下並報錯。
+2. **broker：連線和收到之後的行為分開測，不做 fake（F31）。**
+   - **不引入 in-memory broker。** 之前的 fake（fakeredis）在 bb005db 被移除，理由是它掩蓋了兩個真實的 bug：trim 的精確度，以及 subscription 不是建立當下就生效。這個理由仍然成立。
+   - **連線測試**（component tier，真 NATS）：只有兩類。一是 broker 本身的語意，也就是現有的 `test_nats_transport`、`test_broker*`（no-responders、subscription 何時生效、取消時不遺漏）；二是每種 worker 一個接線 smoke，證明它服務了該服務的 subject。
+   - **行為測試**（unit tier，不碰 NATS）：worker 的訊息處理和傳輸分開寫，handler 是「收到解碼後的訊息 → 回覆與副作用」，測試直接呼叫 handler。下單驗證、ledger 預扣、FOK 語意、unknown 追查這類邏輯都屬於這裡。
+   - **共用連線：** 每個 xdist worker 只連一次 NATS（session 級 fixture，pytest-asyncio 用 session 級 event loop），每個測試拿到自己 `key_prefix` 的 broker 包裝，teardown 時退訂該 prefix 下的所有訂閱，不關連線。
+3. **reconciler 和 generator 以表格驅動的純函數測試：** `reconcile(desired, observed) -> actions`、`evaluate(listing, refs) -> desired`。
+4. **worker 在 component tier 以 in-process 方式測**：直接跑 `amain`，procman 用 fake。真的子進程只出現在 integration tier。
+5. **策略以 `StrategyHarness` 測。** 這是一個 in-process 的假 session，可以注入事件、斷言送出的單，不依賴任何平面。
+6. **DB：** repository 在 component tier 用 sqlite 測；Postgres 方言只在 integration tier（CI）跑。
+7. **每個 bug fix 都附上能重現問題的最低 tier 測試。**
+8. **每個 tier 都設 `pytest-timeout`。** 測試只能依賴明確的 event 或 future，不能依賴 task 的排程順序。
+
+### 9.3 移除與保留
+
+- **RM 刪除：** 直接依賴三個平面 session 機制，或依賴 `orchestrate` 的測試。依 import 自動分類時是 566 個（四個 app 目錄的檔案總和）；B0-05 逐案例查核後是 **401** 個，差額是那些被整檔算進去、但實際上測的是 RM 明文留下的模組的案例。定稿清單與每個檔案的刪／留見附錄 A。
+- **策略實作測試（224 個，F16）：** 保留到 B5，再改寫到 `StrategyHarness` 上。B2 到 B5 之間策略代碼不會變，沒有必要提早拿掉這張安全網。這批測試不依賴 NATS，真的 sleep 只有一處（`test_chase` 的 0.2 秒），放在 unit tier 不會威脅預算。7 個檔案裡有 6 個、約 50 行引用了 F9、F10、F13 要刪的 API（rebuild、`remember`、`on_recon_done`、`send_recon`、`breathe`），這部分在 B5 隨 API 一起改寫或刪除。
+- **其他測試**（venue adapter、registry、CLI、db、auth 等）保留，但依 B0 量出的耗時重新分 tier。
+- **用到 NATS 的測試（靜態計數，參數化展開前）：** 75 個檔案、650 個測試函數。其中 53 個檔案、483 個在**初版**的 RM 刪除清單裡；剩下 22 個檔案、167 個。附錄 A 在 B0-05 定稿後，RM 實際刪掉的 NATS 測試少了 121 個，所以 RM 之後剩下 288 個：broker 本身的語意測試 38 個留作連線測試，其餘 250 個（`test_plane`、`test_backfill_executor`、`test_tape_read`、`test_ledger_view`、`test_md_fetch`、`test_venue_factory` 等）是透過 NATS 測行為，依 F31 改寫成直接呼叫 handler。§9.3 之前寫的「約 900 個」是錯的，「129 個」是依初版清單算的。
+
+---
+
+## 10. 文件（範圍 1）
+
+**B1 的做法：**
+
+- `docs/*.md` 全部移到 `docs/archive/`，加上一份索引，記錄每份文件封存的日期和取代它的文件。
+- `docs/` 根目錄只保留：
+  - `ARCHITECTURE.md`：新建。各決策定案後，從本文萃取出目標架構。
+  - `ARCHITECTURE_CHANGE_PLAN.md`：本文。
+  - `TESTING.md`：B2 產出。
+  - `REFACTOR_TICKETS.md`：本重構的工作票，B10 完成後封存。
+  - `Deployment.md`：不封存（F28）。B1 依現況重寫（Strategon plane sets、OCI、每個 site 一台 NATS 加 gateway），B10 再依新架構更新。
+- README 改成簡短的指引加 quick start。完整重寫放在 B10。
+
+**分類建議：**
+
+| 類型 | 文件 | 建議 |
+|---|---|---|
+| 舊模型的設計紀錄 | `JetStreamRemoval`、`RedisRemoval`、`BrokerProvisioning`、`BrokerPatterns`、`MdHandover`、`MdVenueSubscriptions`、`MdExpiry`、`MdOpenInterest`、`StsPause`、`StsSessionList`、`Instances`、`EventLoop`、`Broker` | 封存 |
+| 功能設計紀錄 | `Alert`、`Artifact`、`AuditIdentity`、`Auth`、`StrategyEnvironment`、`CLI` | 封存 |
+| venue 實測事實 | `Deribit`、`BitgetUta`（Extra verification 表） | 封存（F28） |
+| 維運 | `Deployment` | 不封存，B1 依現況重寫，B10 依新架構更新（F28） |
+
+---
+
+## 11. 批次
+
+依 F1、F2，這是一次切換的破壞性版本。**批次是開發里程碑，不是各自的生產部署**：每個批次結束時分支上的測試要全綠、行為要能在 compose 上展示，但不需要和舊版互通，也不需要單獨上線。上線只有一次，就是 B10。
+
+順序的考量：
+
+- **先清場、再定介面（RM、IF）。** 動工前先把要重寫的代碼和它們的測試刪掉，新的抽象層先只定義介面、回傳 null data。這樣重構的範圍、新增的抽象層（§3.4）和每種狀態的權威（§3.3），在寫實作之前就看得見。
+- procman 是所有後續工作的前提，所以在介面之後最先實作。
+- 既然沒有相容層，就不必「先在舊結構上換協定、再拆進程」。B4 直接做一條**端到端的最小骨架**：新協定、三種 worker、API start/end，只接 paper venue。之後各平面在這個骨架上補齊。
+- 骨架完成後，STS、TD、MD 三條線可以並行。
+
+```
+B0 ─▶ RM 清場 ─┬─▶ B2 測試 ─┐
+               └─▶ IF 介面 ─┴─▶ B3 procman ─▶ B4（骨架）─┬─▶ B5 STS ─────────────────┐
+B1（獨立）                                               ├─▶ B6 TD ──────────────────┤
+                                                         └─▶ B7 MD atom ─▶ B8 MD 編排 ┴─▶ B9 Selector ─▶ B10 切換
+```
+
+每個批次拆成的工作票（描述、範圍、驗收、依賴）見 `docs/REFACTOR_TICKETS.md`。
+
+| 批次 | 目標 | 範圍 | 完成條件 | 依賴決策 |
+|---|---|---|---|---|
+| **B0 基線** | 量測，凍結現況 | 以 `pytest --durations=0 --junitxml` 跑現行測試（NATS 加 sqlite）；從 `protocol/messages.py` 盤點 subject 和 RPC type；打 tag `arch/baseline` | 每個模組的耗時寫進附錄 C；附錄 A、B 已於 B0-05 定稿 | — |
+| **B1 文件** | 封存 `docs/` | §10 | `docs/` 根目錄只剩架構文件和依現況重寫的 `Deployment.md` | — |
+| **RM 清場** | 刪掉要重寫的代碼和它們的測試 | §5.4、§8.1、§8.2 列出的刪除項，以及附錄 A、B；還有呼叫端需要的地方，留下 IF 的 stub | 清單上的符號在 repo 裡 grep 不到；剩下的測試全綠；各平面能 import、能啟動到「沒有 session 機制」的狀態 | — |
+| **IF 介面** | 新抽象層只定義介面，回傳 null data | §3.4 的每一層：型別、函式簽名、寫明不變式的 docstring；附 `xfail(strict=True)` 的契約測試當作之後的驗收 | 每個介面都能 import、`ruff` 通過；契約測試以 xfail 存在；B3 以後的每張票都能指到對應的介面 | — |
+| **B2 測試重置** | 建立測試標準 | 附錄 A 的測試已在 RM 隨代碼刪除；寫 `TESTING.md`；加入 `Clock` / `FakeClock`、每個 xdist worker 共用一條 NATS 連線的 fixture、handler 與傳輸分開的規範（F31）、tier marker、`pytest-xdist`、`pytest-timeout`、耗時閘門；`just test` / `just test-int`；CI 拆分 | 剩下的測試在 `just test` 下少於 120 秒；CI 的 integration tier 全綠 | — |
+| **B3 procman** | Supervisor、shim；以 strategon#60 為前提 | mftik：`mftik.procman`（以你的 prototype 為底）、shim、Spec / 狀態機 / 重啟策略、reattach、`procman.report.*`（含 worker RSS）、shim 套用 `oom_score_adj` 和 `RLIMIT_DATA`。Strategon 端由 #60 完成：`oci_host_pid`、release GC 檢查 in-use rootfs、agent unit `KillMode=process` | integration：controller 以 detach 結束後 worker 存活，新 controller 能 reattach；殺掉 shim 後 worker 自行 graceful stop；新舊版本的 worker 能並存；在 cp 和 yite 上以 `oci_host_pid` 實際滾動一次；GC 不刪仍在使用的 rootfs；重啟 agent 不影響任何 strategy；`/proc/<pid>/oom_score_adj` 符合 §4.7 的分級 | — |
+| **B4 端到端骨架** | 新協定與三種 worker 跑通一條路徑 | 協定 v2（§8.3）：`pv` 放在 NATS header，deploy 時比對、transport 丟棄不符的 frame（F26、F41）；intent、owner GC、存活報告，不再有 lease；API start/end（§8.1）；STS session worker 的雙 thread 模型、`on_start` 獨佔、readiness gate；TD 帳號 worker；MD 連線 worker；**只接 paper venue**；平面以純進程執行；三個 orchestrator 的准入控制 | paper 上 deploy → `on_start` → `on_ready` → 下單 → 成交回報 → end 全程走新路徑；三個 controller 各自滾動都不中斷；一個 30 秒 CPU-bound 的 hook 不會讓 session fail、不會讓 NATS 斷線、不會造成假 ack timeout；送單不跨 thread、ack 回程的跨 thread 延遲已量測；no-responders 在跨連線 reply 時的行為已驗證；各 kind 的 RSS 已量測，§4.7 的初始值據此調整；超過預算的 start 以 `capacity_exceeded` 拒絕 | — |
+| **B5 STS 補齊** | SDK 功能完整，取消 rebuild；crash 與重新掛起（F10） | artifacts、tape、event log、fetch、timer 搬到新 worker；交付策略（`latest` / `all`）；`offload` / `offload_pool`（§5.5）；hook 時間預算的量測與處理（F15）；`on_md_update` / `on_td_update`（§5.6）；crash 分類、平台清場、`restart` / `max_restarts` / `window`、alert（§5.2）；worker 端所有 DB 存取移除；刪除 §5.4 的清單；`StrategyHarness` 和策略測試改寫 | 所有內建策略在 `StrategyHarness` 上測試全綠；A、B、C 三類 crash 都能清場；`on_failure` 能從 `on_start` 重新掛起，且 R1 到 R4 成立；STS worker 不持有任何 DB 連線；process 模式的 offload 在 stop 時被 terminate、子進程 OOM 時 session 收到 `OffloadWorkerLost` 但不會跟著死；舊的 session 機制代碼全部刪除 | — |
+| **B6 TD 補齊** | 所有 venue 的帳號 worker | 各 venue 的帳號 worker：常駐層（溫熱的 HTTP 連線池、backfill）與隨 intent 開關的交易層（F35）；私有連線、OMS、ledger、recon；`td.order.cancel_session`；Supervisor 的 PID fence（F36）；drain-replace；cancel-on-disconnect 的倒數刷新（F37） | 殺掉帳號 worker 後能重啟、recon，`TdReady` 經歷 false 再回到 true；drain-replace 期間沒有遺失或重複的單；交易層隨 intent 開關時，常駐層和連線池不受影響；沒有 session 的帳號也能 backfill | — |
+| **B7 MD atom 模型** | 所有 venue 改成 atom | adapter 提供 `atoms_for`、`decode`、`capacity`、`join_policy`；per-atom subject；`TickerStats` 與 STS 端的 join（F19）；tape 改以 `atom_id` 為 key，加錄 `liquidation`（F20） | 所有 venue 現有的 product topic 都改由 atom 提供 | — |
+| **B8 MD 編排** | orchestrator 加 reconciler 完整版 | placement（黏性、不遷移）；連線 worker 內的 reconciler；以 listing 驅動到期；常駐訂閱；`tape_keeper` 退役；連線 worker 的人工原地重啟與列出舊版 worker 的指令（F24） | 滾動 MD controller 時，連線、行情與 tape 都不中斷；原地重啟連線 worker 造成的 tape 空洞都有量測紀錄 | — |
+| **B9 Selector** | ATM 期權鏈、轉倉 | §6.4：`option_chain`、`rolling_future` 的 `evaluate`、防抖動、`prev` 持久化、部署時的容量上限、相同規格共用；`md.universe.{session_id}`；SDK 的 `on_universe_change`、`self.md.universe`、`self.md.current` | 期權鏈在 ref 移動時依防抖動規則重新置中；轉倉在 `roll_before` 切換 current，舊合約保留到到期；controller 重啟後 universe 和 epoch 不變；I-SEL1 成立 | — |
+| **B10 切換** | 唯一一次上線 | 先升級 agent（含 S-1 到 S-3，這一步本身會殺掉所有 strategy，所以必須在停掉所有策略之後做），再讓 plane sets 開啟 `oci_host_pid: true`；strategon#61 若已上線，依 §4.7 重估並設定每個平面的 `memoryBytes`；DB migration（含 drop 舊欄位）；**preflight：任何 `sts_sessions` 仍是 live 狀態就拒絕套用**；runbook；README、`ARCHITECTURE.md` 定稿；前端狀態頁 | 依 runbook 在空的平面上完成切換，舊版可以回滾到 `arch/baseline` | D21 |
+
+---
+
+## 12. 待釐清
+
+**A. 部署與進程管理（卡住 B3、B4）**
+
+v0.1 的 D2（worker 代碼版本）和 D3（procd 粒度）已經由 F6 解決，不再單獨列出。
+
+- **D1** 已定案（F6）。Strategon 的改動追蹤於 strategon#60。
+- **D4** 已定案（F7）。cgroup 上限追蹤於 strategon#61，不是本重構的前提。
+- **D5** 已定案（F29）。
+- **D26** 已定案（F32）。
+- **D29** 已定案（F26）。
+
+**B. STS**
+
+- **D6** 已定案（F10、F11）。
+- **D7** 已定案（F12）。
+- **D8** 已定案（F15）。
+- **D9** 已定案（F14）。
+- **D10** 已定案（F16）。
+- **D25** 已定案（F8、F9）。
+- **D28** 已定案（F25）。
+
+**C. MD**
+
+- **D11** 已定案（F17）。
+- **D12** 已定案（F18）。
+- **D13** 已定案（F21）。
+- **D14** 已定案（F19）。
+- **D15** 已定案（F24）。
+- **D16** 已定案（F20）。
+- **D17** 已定案（F33）。
+
+**D. TD**
+
+- **D18** 已定案（F34）。
+- **D19** 已定案（F35）。
+- **D30** 已定案（F27）。
+- **D27** 已定案（F37）。
+- **D20** 已定案（F36）。
+
+**E. API 與資料**
+
+- **D21** 已定案（F38）。
+
+**F. 文件與測試**
+
+- **D22** 已定案（F28）。
+- **D23** 已定案（F30）。
+- **D24** 已定案（F31）。
+
+---
+
+## 附錄 A：RM 測試刪除清單（B0-05 定稿）
+
+**方法：** 以 `main` @ `a0cbfb2` 的 AST 計數測試函數（參數化展開前），再逐檔算出「有多少個測試會經由同檔的 helper 碰到 RM 要刪的符號」。初版清單是依 import 自動分類的，所以把整個檔案都算進去；定稿版改成逐案例，並把三種情況分開：
+
+- **整檔刪除**：檔案裡每個案例都依賴被刪的代碼。
+- **部分刪除**：只刪依賴被刪代碼的案例，其餘留在原檔（行為本身保留，改寫由後面的批次負責）。
+- **從清單移出**：沒有任何案例依賴被刪的代碼，而且測的正是 RM 明文「留下」的模組。初版把它們算進刪除清單是錯的。
+
+**初版每個平面的總數都查核無誤**（sts 233、md 125、td 139、api 69、策略 224），錯的是組成。定稿後 RM 實際刪除 **401** 個（sts 194、md 88、td 94、api 25），不是初版的 566；另有 2 個（`test_plane_serves_its_subject`）必須改寫而不是刪除。§1.3 和 §9.3 的「566」指的是 sts + md + td + api 四個目錄的檔案總和（233+125+139+69 = 566），沒有算 `packages/common` 的 `test_plane_serves_its_subject`；連同它是 568。
+
+### `apps/sts/tests`（清單 233 → RM 刪 194）
+
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_rebuild` | 33 | 33 | 整檔（RM-01） |
+| `test_session_processes` | 41 | 41 | 整檔（RM-04） |
+| `test_environment_rebuild` | 5 | 5 | 整檔（RM-01） |
+| `test_session_failed` | 15 | 15 | 整檔（RM-04） |
+| `test_orphan_reaper` | 6 | 6 | 整檔（RM-04） |
+| `test_sts_session` | 3 | 3 | 整檔（RM-04） |
+| `test_md_ack_watchdog` | 10 | 10 | 整檔（RM-02） |
+| `test_td_ack_watchdog` | 3 | 3 | 整檔（RM-02） |
+| `test_recon_oms` | 1 | 1 | 整檔（RM-02） |
+| `test_mds_query` | 17 | 17 | 整檔（RM-04）；`md.fetch` 的行為在 B5-07 重寫 |
+| `test_attach_refused` | 3 | 3 | 整檔（RM-04） |
+| `test_detach_is_not_awaited` | 4 | 4 | 整檔（RM-04） |
+| `test_detach_refcount` | 1 | 1 | 整檔（RM-04） |
+| `test_md_events` | 2 | 2 | 整檔（RM-04） |
+| `test_private_events` | 3 | 3 | 整檔（RM-04） |
+| `test_session_control_addressing` | 5 | 5 | 整檔（RM-04）；位址語意在 B4-02 重寫 |
+| `test_status_events` | 5 | 5 | 整檔（RM-04）；status 在 B4-02 重寫 |
+| `test_stop_ordering` | 4 | 4 | 整檔（RM-04） |
+| `test_strategy_lifecycle` | 6 | 6 | 整檔（RM-04） |
+| `test_sts_cid` | 4 | 4 | 整檔（RM-04）；R2 的不撞號在 B4-03 重寫 |
+| `test_sts_incompatible_environment` | 5 | 5 | 整檔（RM-04）；環境不相容的拒絕在 B4-02 重寫 |
+| `test_eventlog` | 22 | 15 | 部分：15 個經 `_session` / `_tape_session` 驅動 `StsSession`，隨 RM-04 刪；7 個直接測 writer，留到 B5-02 |
+| `test_oms_wait_cids` | 11 | 3 | 部分：3 個經 `StsSession`，隨 RM-04 刪；8 個直接測 `StrategyOms.wait_cids`，留到 B6-08 |
+| `test_boot_schema_guard` | 6 | 0 | **移出**：測 `app.schema_is_current` / `_schema_wait_s`，RM-04 留下 |
+| `test_rpc_loop_survives` | 2 | 0 | **移出**：測 `app.run_rpc`，RM-04 留下 |
+| `test_sts_runtime_env` | 16 | 0 | **移出**：測 `runtime_env.py` 與 `rpc/env.py`，RM-04 明文留下 |
+
+### `apps/md/tests`（清單 125 → RM 刪 88）
+
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_md_session` | 5 | 5 | 整檔（RM-05） |
+| `test_md_expiry` | 12 | 12 | 整檔（RM-05）；到期改由 B8-04 以 listing 驅動 |
+| `test_md_feed_end` | 13 | 13 | 整檔（RM-05）；`md.feed.end` 保留，B8-04 重寫 |
+| `test_md_lease_resilience` | 2 | 2 | 整檔（RM-05、RM-07） |
+| `test_md_orphan_reaper` | 9 | 9 | 整檔（RM-05） |
+| `test_md_detach_disconnect` | 3 | 3 | 整檔（RM-05） |
+| `test_md_two_instances` | 6 | 6 | 整檔（RM-05） |
+| `test_md_shared_venue_topics` | 12 | 12 | 整檔（RM-05）；共用 channel 的語意由 atom 定義取代（§6.1） |
+| `test_md_venue_feeds` | 11 | 11 | 整檔（RM-05）；topic → stream 的解析由 `atoms_for` 取代（IF-08） |
+| `test_md_venue_factory` | 13 | 13 | 整檔（RM-05）；connector 工廠在 B4-06 / B7-02 重建 |
+| `test_md_tape` | 10 | 2 | 部分：2 個測 `Dispatcher` 的錄製（`test_dispatcher_records_after_fanning_out`、`test_dispatcher_without_a_recorder_records_nothing`），隨 RM-05 刪；8 個測 `TapeRecorder` / `TapeStore`，RM-05 留下 |
+| `test_md_fetch` | 29 | 0 | **移出**：測 `mftik_md.fetch`，RM-05 明文留下 |
+
+### `apps/td/tests`（清單 139 → RM 刪 94）
+
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_session_create` | 9 | 9 | 整檔（RM-06） |
+| `test_detach_rpc` | 4 | 4 | 整檔（RM-06） |
+| `test_lease_resilience` | 4 | 4 | 整檔（RM-06、RM-07） |
+| `test_td_orphan_reaper` | 6 | 6 | 整檔（RM-06） |
+| `test_recon_snapshot` | 5 | 5 | 整檔（RM-06）；`settled` 的等待在 B6-08 重寫 |
+| `test_history_wiring` | 5 | 5 | 整檔（RM-06） |
+| `test_cid_ownership` | 5 | 5 | 整檔（RM-06） |
+| `test_stream_rejects` | 5 | 5 | 整檔（RM-06）；拒絕碼在 B6-02 重寫 |
+| `test_leverage_rpc` | 4 | 4 | 整檔（RM-06） |
+| `test_order_rpc` | 46 | 42 | 部分：42 個經 `attached` 驅動 attach + `_serve_orders`；4 個（`test_no_td_serving_times_out`、`test_a_malformed_ticker_is_left_to_the_instrument_check`、`test_a_gate_market_buy_sized_in_base_is_unsupported_shape`、`test_reduce_only_passes_on_a_contract_ticker`）不經 manager，保留 |
+| `test_account_ownership` | 3 | 2 | 部分：`test_boot_probe_refuses_a_second_process_of_the_same_instance` 測 `refuse_if_serving`，F36 保留 |
+| `test_session_oms` | 3 | 1 | 部分：2 個測 `Session` 的 OMS callback 與 paper 金鑰隔離，RM-06 留下 |
+| `test_backfill_triggers` | 9 | 2 | 部分：7 個測 `backfill.trigger.request_backfill` 對 stub server，RM-06 留下 `backfill/` |
+| `test_connector_capabilities` | 6 | 0 | **移出**：測 `Session` 的 venue 能力旗標，RM-06 留下 |
+| `test_venue_factory` | 17 | 0 | **移出**：測 `session/factory.py`，B0-05 已把它列進 RM-06 的「留下」 |
+| `test_session_leverage` | 8 | 0 | **移出**：測 `Session` 的槓桿路徑，RM-06 留下 |
+
+### `apps/api/tests`（清單 69 → RM 刪 25）
+
+| 檔案 | 測試數 | RM 刪 | 處理 |
+|---|---|---|---|
+| `test_md_instance_deploy` | 12 | 12 | 整檔（RM-08） |
+| `test_deploy_refused` | 4 | 4 | 整檔（RM-08） |
+| `test_orchestrate_log_type` | 4 | 3 | 部分：`test_mint_session_id_retries_when_the_row_exists` 測留下的 `mint_session_id`，保留 |
+| `test_registry_add` | 23 | 3 | 部分：只有 `test_incompatible_environment_deploy_is_409`、`test_unknown_strategy_deploy_is_still_404`、`test_cross_arb_deploy_refuses_sts_account_not_in_td` 走 deploy 路由 |
+| `test_environment_flow` | 19 | 3 | 部分：只有 `test_s1_bare_node_stdlib_tree`、`test_s2_declare_then_apply_then_add`、`test_s6_already_connected_can_pull_a_heavier_tree` 走 deploy 路由 |
+| `test_td_instance_routing` | 4 | 0 | **移出**：用留下的 `_td_instance` 與 `backfill_cron.sweep` |
+| `test_td_sessions_route` | 3 | 0 | **移出**：只讀 `td_sessions`，F38 保留唯讀到 B10 |
+
+### `packages/common/tests`
+
+- `test_plane_serves_its_subject`（2）：啟動三個平面的 `app.amain`，所以 RM-04 / RM-05 / RM-06 改 `app.py` 時一定要跟著改。**改寫，不刪除**——「平面只在它被指派的 subject 上回答」這條行為保留（§8.3「instance subject 保留」）。
+- `test_strategy_public_api`：2 個 pacing helper 案例隨 RM-03 刪（見 RM-03 的補正）。
+- `test_cli_run`：2 個 `deploy_http_timeout` 案例隨 RM-09 刪。
+- `test_broker`（8）：2 個 leased link 案例隨 RM-07 刪，其餘 6 個留作連線測試。
+- `test_wire_ledger`（28）、`test_last_reader_release`（20）：不在 RM 範圍，隨 B4（lease）、B7（wire ledger）刪除代碼時一起處理。
+
+### 對「用到 NATS 的測試」的連帶修正
+
+§9.3 的三個數字（75 檔 650 個、其中 53 檔 483 個在刪除清單裡、剩 22 檔 167 個、broker 語意 38 個）以初版的整檔清單為前提，B0-05 重算後確認它們對初版而言都正確。附錄 A 定稿之後：
+
+- 整檔移出而且用到 NATS 的：`test_md_fetch`（29）、`test_sts_runtime_env`（16）、`test_venue_factory`（17）、`test_session_leverage`（8）、`test_connector_capabilities`（6）、`test_td_instance_routing`（4）、`test_rpc_loop_survives`（2）＝ 82 個。
+- 部分保留而且用到 NATS 的：`test_oms_wait_cids`（8）、`test_md_tape`（8）、`test_backfill_triggers`（7）、`test_eventlog`（7）、`test_order_rpc`（4）、`test_session_oms`（2）、`test_account_ownership`（1）＝ 37 個，再加 `test_plane_serves_its_subject`（2）。
+- 所以 RM 之後剩下的 NATS 測試是 **288 個**（不是 167），其中 broker 語意仍是 38 個，**借 NATS 測行為的是 250 個**（不是 129）。B2-05 的範圍要依這個數字重寫。
+
+### `apps/sts/tests` 的策略實作（224，F16：RM 不刪，B5-08 改寫）
+
+`test_chase`（54）、`test_cross_arb`（36）、`test_macd_dollar`（39）、`test_noop_strategy`（17）、`test_oco`（50）、`test_tape_keeper`（6）、`test_twap`（22）。
+
+B0-05 實測出兩個 F16 的例外，RM 不可能完全不動這批測試：
+
+- **`on_recon_done`：111 個案例**靠它驅動策略（`test_oco` 40、`test_cross_arb` 24、`test_macd_dollar` 21、`test_twap` 17、`test_chase` 9）。RM-02 因此只刪平台側的自動 recon，`Strategy.on_recon_done` 的 hook 與 6 支內建策略的實作留到 B5-08 一起改寫。
+- **rebuild API：17 個案例**用到 `on_rebuild` / `rebuildable` / `remember`（`test_oco` 9 個經 `_restore`、`test_chase` 6 個、`test_cross_arb` 1 個、`test_tape_keeper` 1 個）。`test_oco` 那 9 個的主題是接回留在交易所的兩腳，不是 rebuild，要改寫而不是刪。
+- `test_macd_dollar:test_warm_up_ingest_yields_the_loop` 是唯一會被 RM-03 弄紅的策略案例（monkeypatch `SLICE_S`），隨 RM-03 刪。
+
+### RM 落地之後和這份清單的差異（RM-10，#173 查核）
+
+RM-01 到 RM-09 全部合併之後，RM-10 逐檔比對了上面每一列。**42 個整檔刪除的模組一個不剩，部分刪除與「移出」的每一列都符合**，除了下面五處。本節記錄事實，**不是要補刪測試**：
+
+1. **`test_order_rpc`：留 1 個，不是 4 個。** 附錄 A 把 `test_a_malformed_ticker_is_left_to_the_instrument_check`、`test_a_gate_market_buy_sized_in_base_is_unsupported_shape`、`test_reduce_only_passes_on_a_contract_ticker` 算成「不經 manager」，但它們測的是 `manager.py` 的模組層函式 `_wrong_instrument`、`_place_order_request`、`_refusal_code`、`_reduce_only_unsupported`，而 RM-06 的補正明文把這四個列進刪除範圍。**補正勝過附錄 A**，三個案例隨代碼走，由 B6-02（#220）重新實作時補回。留下的是 `test_no_td_serving_times_out`。
+2. **`test_eventlog` 留 21 個、`test_oms_wait_cids` 留 11 個，附錄 A 分別列了刪 15 個和 3 個。** 那些案例直接建構 `StsSession`，而 `StsSession` 依 RM-04 的「留下」保留到 B4-03（#203），所以它們仍然綠。RM-04 因此留下它們；`test_eventlog` 只刪了 `test_lease_ack_is_recorded`（隨 RM-07 的 lease ack 走）。B5-02（#211）與 B6-08（#226）改寫時一起處理。
+3. **`test_environment_flow` 刪 5 個，附錄 A 列 3 個。** 多出來的 `test_s16_silent_sts_is_not_idle`、`test_s17_session_arriving_mid_install_aborts` 測的是 `_require_no_live_sessions` 會向 STS 問 live session；RM-08 之後那個守衛是 no-op，主題不存在。
+4. **附錄 A 沒有列、但主題已經不存在而被一起刪掉的：** `apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（RM-04）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標自 RM-04 起恆為 false）。另外 `packages/db/tests/test_sts_session_repository.py` 少了 10 個（54 → 44）：那些是 RM-01 範圍裡的 `remember` / `rebuild_count` 案例，只是這張表沒有 `packages/db/tests` 這一節。
+5. **`test_strategy_yml` 多一個案例。** RM-09 把 `test_restart_defaults_to_always` 改成 `test_restart_defaults_to_never`，並加上 `test_the_old_always_is_refused_and_says_what_to_write`（票面驗收要求的錯誤訊息）。
+
+RM 之後實際剩下的測試數與耗時見 C.8；平面上還剩哪些模組見 `docs/baseline/remaining.md`。
+
+## 附錄 B：預計刪除的主要代碼（B0-05 定稿）
+
+行數是 `main` @ `a0cbfb2` 上 `wc -l` 的實測值，初版列的每一個數字都查核無誤。定稿補上了原本漏掉的四個檔案，以及負責的票號。
+
+| 檔案 | 現在 | 票 | 去向 |
+|---|---|---|---|
+| `apps/sts/src/mftik_sts/session/manager.py` | 2,418 行 | RM-01、RM-04 | 拆成 controller 的 orchestrator（預估少於 600 行）和 worker 端；rebuild、reaper、雙模式全部刪除 |
+| `apps/sts/src/mftik_sts/spawn.py`（243）、`worker.py`（308） | 551 行 | RM-04 | 由 procman 取代；worker 只剩 session 執行 |
+| `apps/sts/src/mftik_sts/session/session.py` | 1,260 行 | RM-02 刪 lease 與自動 recon，其餘留到 B4-03 搬進 `session_worker` | 下單與事件分派搬進 ingress / strategy 兩條 thread |
+| `apps/sts/src/mftik_sts/rpc/sessions.py` | — | RM-04 | 改成占位（IF-04） |
+| `apps/md/src/mftik_md/session/*` | 2,182 行（`manager.py` 1,533、`venue.py` 336、`dispatcher.py` 161、`factory.py` 146、`__init__.py` 6） | RM-05 | 由 orchestrator、連線 worker、reconciler 重寫 |
+| `apps/md/src/mftik_md/rpc/sessions.py` | 151 行 | RM-05 | attach / detach / list 整組消失，改成 `md.intent.*`（IF-01、IF-09） |
+| `apps/td/src/mftik_td/session/manager.py` | 1,711 行 | RM-06 | 拆成 TD orchestrator 和帳號 worker；lease、reaper、attach / detach 刪除；下單與帳號 RPC 的 handler 由 IF-11 定介面、B6-02 / B6-08 重寫 |
+| `apps/td/src/mftik_td/rpc/sessions.py` | 131 行 | RM-06 | 同上，改成 `td.intent.*` |
+| `apps/api/src/mftik_api/orchestrate.py` | 538 行 | RM-08 | 只剩 start/end，預估少於 250 行 |
+| `packages/common/src/mftik/broker/link.py`（`LeasedSessionLink`） | — | RM-07 | 刪除，由 `procman.report.*` 與 intent owner GC 取代（§8.2） |
+| `packages/common/src/mftik/exchange/wire.py` | 768 行 | B7 | 搬進連線 worker 的 reconciler，連同各 adapter socket 的訂閱管理 |
+
+**不在刪除清單裡（B0-05 查核，容易誤刪）：**
+
+- `apps/td/src/mftik_td/session/factory.py`（329 行）和 `session/session.py`（1,440 行）是「`api_id` → venue client → `Session`」那一層，F35 的常駐層與交易層都要用，B4-05 搬移而不刪除。
+- `apps/md/src/mftik_md/fetch/*`、`tape.py`、`tape_store.py`、`rpc/tape.py` 保留（RM-05 的「留下」）。
+- `packages/db/src/mftik_db/repositories/session.py` 的 `mark_done` / `mark_live` / `list_sessions` / `get_by_session_id` / `create_live` / `mark_finished` / `count_by_instance` / `list_live_for_origin` 有大量 API 呼叫端（`routes/sts.py`、`routes/board.py`、`routes/stats.py`、`routes/td.py`、`routes/apis.py`、`routes/registry.py`、`ws.py`、`alert_match.py`），RM 只刪各平面 `db.py` 的包裝與接線。只有 `remember`、`bump_rebuild_count`、`reset_rebuild_count` 沒有其他呼叫端，由 RM-01 刪除。
+- `interrupted` 這個 session 狀態（§5.2 要刪）的讀取端在 `packages/db` 的 `SessionStatus`、API 的 `_ATTENTION` / `ack_session` / `get_stats` / `schemas.py`，以及前端 9 個檔案。RM 只刪寫入端；讀取端在 B10-01 與 B10-03。
+
+## 附錄 C：B0 量測結果
+
+> **B0-02（#155）的量測。** Run：[Baseline test durations #36869973075](https://github.com/lynxlinkage/mftik/actions/runs/36869973075)（job `measure`，commit `cbb3f78`）。同一個 commit 的正式 CI：[Tests #36869972954](https://github.com/lynxlinkage/mftik/actions/runs/36869972954)，綠。
+>
+> 機器是 GitHub Actions `ubuntu-latest`：4 vCPU、16 GB、Python 3.12.3、NATS 2.11-alpine、Postgres 16-alpine、uvloop。量的是 `just test`（`uv run --all-packages pytest packages apps -q`）那一步 —— F30 下預算的就是這一步 —— 不含 `uv sync`、服務啟動、lint、contract 與 migration 檢查。
+>
+> 量測的代碼是 `refactor/process-planes`，與計畫的基準 commit `main` @ `a0cbfb2` 只差文件。原始資料（`junit.xml`、`durations.txt`、每個測試的成因拆解 `probe.json`、彙整好的 `report.md`）在那個 run 的 `baseline-durations` artifact 裡。
+
+### C.1 總量
+
+| 項目 | 數字 |
+|---|---|
+| `just test` 的 wall time | **428 秒** |
+| 同一份代碼的其他觀測 | 398、412、418 秒（`measure` job 的同一步）；421、422、435 秒（`tests.yml` 的 `Test` step）。區間 398–435 秒 |
+| F30 的預算 | 120 秒。現況是 **3.3 到 3.6 倍** |
+| 測試數（參數化展開後） | 4,244，其中 4 個 skip、0 個失敗 |
+| 測試模組數 | 281 |
+| 每個測試耗時加總 | 411.3 秒（junit 的 `testsuite time` 是 423.4 秒，差額是 session 級的收集與 fixture） |
+| 單一測試耗時中位數 | 3 毫秒 |
+| ≥ 0.5 秒的測試 | 157 個，合計 212.6 秒（52%） |
+| < 50 毫秒的測試 | 3,119 個，合計 18.9 秒（4.6%） |
+| 最慢的 50 個 | 合計 140.7 秒（34%） |
+| 整個 `Tests` job 的 wall time | 517 秒（含服務啟動、`uv sync`、lint、contract、migration，以及下面那一趟） |
+| 第二趟（只有 `packages`，`MFTIK_TEST_LOOP=asyncio`） | 66 秒 |
+
+**耗時集中在三個平面的 session 測試上。** 依套件分：
+
+| 套件 | 測試數 | 秒 | 占比 |
+|---|---|---|---|
+| `apps/api` | 743 | 119.9 | 29.1% |
+| `apps/td` | 429 | 112.8 | 27.4% |
+| `apps/sts` | 586 | 70.9 | 17.2% |
+| `packages/common` | 1891 | 36.4 | 8.9% |
+| `packages/db` | 237 | 29.5 | 7.2% |
+| `apps/md` | 235 | 27.6 | 6.7% |
+| `apps/sym` | 117 | 13.5 | 3.3% |
+| `apps/paper` | 6 | 0.6 | 0.2% |
+
+**`database_url` 的參數化是最大的單一成本。** 同樣 437 個測試，跑 Postgres 要 148.7 秒，跑 sqlite 只要 31.8 秒 —— 多出來的 117 秒是整套的 28%：
+
+| `database_url` | 測試數 | 秒 | 占比 |
+|---|---|---|---|
+| `postgres` | 437 | 148.7 | 36.1% |
+| `sqlite` | 437 | 31.8 | 7.7% |
+| 沒有這個參數 | 3,370 | 230.8 | 56.1% |
+
+這和 §9.1 規則 6（Postgres 方言只在 integration tier 跑）指的是同一件事，現在有數字：把 Postgres 那一趟移出 `just test`，`just test` 直接少 149 秒。
+
+### C.2 時間花在哪裡
+
+第二趟（加了量測外掛的那一趟，390.8 秒）把每個測試的時間記到會真的 block 的那幾種呼叫上。桶子之間互斥，各自上限是該測試自己的耗時：
+
+| 成因 | 秒 | 占比 |
+|---|---|---|
+| 其餘（CPU 與沒被歸類的等待） | 203.7 | 52.1% |
+| 真的 sleep（在測試自己的 task 上） | 69.4 | 17.8% |
+| NATS 的 no-responders re-ask 迴圈（`transport/nats.py:268`） | 55.2 | 14.1% |
+| `asyncpg.connect` | 46.8 | 12.0% |
+| NATS 其他（`connect`、`request`、`publish`、`subscribe`） | 9.8 | 2.5% |
+| 子進程 | 5.2 | 1.3% |
+| `wait_for` 逾時（在測試自己的 task 上） | 0.8 | 0.2% |
+
+三個讀這張表時必須知道的事：
+
+1. **「其餘」203.7 秒裡有 60 秒是一個測試。** `test_td_orphan_reaper.py::test_a_revived_lease_loop_clears_the_strikes` 把 `link.tasks` 換成 `asyncio.create_task(asyncio.sleep(60))`（`test_td_orphan_reaper.py:211`），然後在 `link.stop.set()` 之後 `gather` 它。`stop` 不會取消一個裸的 `asyncio.sleep(60)`，所以這個測試整整等 60 秒 —— 一個測試就是整套的 15%。這是這次量測最大的單一發現。扣掉它，「其餘」是 143 秒（37%），內容是 4,244 個測試各自幾十毫秒的實際工作：建 FastAPI app、建 sqlite schema、pydantic 驗證、paper 引擎撮合。
+2. **`asyncpg.connect` 的 46.8 秒只是連線。** `db_harness` 用 `NullPool`（`db_harness.py:127` 的註解寫明原因：pytest-asyncio 給每個測試自己的 loop，池裡的連線會屬於已經關掉的 loop），所以每個 session 一條新連線，整套開了 2,409 條，平均 19.4 毫秒。每個測試的 `TRUNCATE ... RESTART IDENTITY CASCADE` 與查詢本身落在「其餘」裡。C.1 的 149 秒才是 Postgres 的全部帳。
+3. **背景 loop 的 sleep 不算在裡面。** 整套有 703 秒的 sleep 發生在背景 task 上（NATS client 的 ping timer 220 秒、paper 引擎的 tick 118 秒、TD 的 pending sweep 兩個各 85 秒、`LeasedSessionLink` 的 watchdog 39 秒），它們和測試並行、不占 wall time。把它們加進來會得到「sleep 總和是 wall time 的兩倍」這種沒有意義的數字；外掛因此只認在測試自己那個 task 的 frame 鏈上的等待。
+
+### C.3 慢是不是 NATS 造成的（F31 的前提）
+
+**不是連線，但是 NATS 的往返模式。** 分開講三件事：
+
+1. **開連線幾乎不花時間。** 整套開了 602 條 NATS 連線（NATS 自己的 `/varz` 報 `total_connections = 606`；多出的四條不是測試開的，`conftest.py` 的 reachability 探測算其中一條），合計 **0.8 秒，平均 1.3 毫秒**。B2-03（#176）要做的「每個 xdist worker 共用一條連線」省下的就是這 0.8 秒 —— 占整套 0.2%。**F31 裡「共用連線」這一條不能用效能當理由**；它真正的價值是 §9.2 寫的那個（連線數可用 `/connz` 驗證、訂閱不互相干擾），不是省時間。
+2. **傳輸本身也不花時間。** `Client.publish`／`subscribe`／`flush`／`close` 共 9,771 次，合計 0.3 秒。NATS 送到的訊息數是 `in_msgs = 7338`、`out_msgs = 1706`。
+3. **貴的是「打到沒人服務的 subject」。** `Client.request` 1,644 次合計 13.0 秒，而 broker 自己的 re-ask 迴圈（`transport/nats.py:268`，`_NO_RESPONDERS_GRACE_S = 0.05`）另外睡掉 **55.2 秒**。兩者相加 **71.3 秒，整套的 18.2%**，而且幾乎全部來自兩個固定模式：
+   - **TD 的每一次 detach。** `SessionManager.detach`（`apps/td/src/mftik_td/session/manager.py:600`）會 `request_backfill` 到 `Topics.td_backfill(instance)`，`REQUEST_TIMEOUT_S = 3.0`，re-ask 預算是 `min(max(timeout * 0.5, 0.1), 1.0) = 1.0` 秒。測試裡沒有人服務那個 subject，所以**每一次 detach 固定付掉 0.95 秒**。`test_detach_rpc` 的三個測試、`test_td_orphan_reaper` 的兩個、`test_cid_ownership` 的兩個都是這樣，`test_session_create::test_attach_refcount_same_api` 和 `test_session_oms::test_attach_refcount_destroy` 做兩次 detach，就付兩次。
+   - **STS 的每一次 `stop()`。** `_publish_detaches` 的 detach RPC，`DETACH_TIMEOUT_S = 1.5`（`apps/sts/src/mftik_sts/session/session.py:177`），re-ask 預算 0.75 秒。對端是 subscriber 但不回答時（`test_eventlog` 的三個 tape 測試）就等滿 1.5 秒；對端完全不在時付 0.70 秒。`test_md_ack_watchdog`、`test_td_ack_watchdog`、`test_private_events`、`test_sts_session`、`test_detach_is_not_awaited` 全部都有這 0.70 秒。
+   
+   有 117 個測試碰到這個迴圈。它不是 NATS 慢，是測試只立起 RPC 的一端；**F31 的「行為測試直接呼叫 handler、不走傳輸」正好會把這 71 秒整批拿掉** —— 理由和 F31 原本寫的不同，但結論一致。不過 RM 已經先拿掉大部分：按定稿的附錄 A，這 55.2 秒裡有 47.3 秒隨 RM 刪的測試一起走，剩 7.9 秒分布在44 個測試上，所以這是 F31 的佐證，不是 B2-05 的優先順序依據。
+
+**對照：** 同一套測試裡，Postgres 參數化要 149 秒（C.1）、真的 sleep 要 69 秒（C.2）。所以要回答「慢是不是 NATS 造成的」：NATS 占 18%，排在 Postgres 之後；而 NATS 那 18% 裡有 98% 是對端不存在的 request，不是連線也不是傳輸延遲。
+
+### C.4 最慢的 50 個測試
+
+「秒」是不加量測外掛那一趟的 junit 數字；「依據」裡的秒數來自加了外掛的那一趟。主因是讀過測試之後標的，不是從名字猜的；標的規則是：
+
+- **真的 sleep** —— 擋住測試前進的 wall-clock sleep，不管寫在測試裡還是在被測的 production code 裡；
+- **lease 心跳** —— 等待長度由 lease／ack 的 interval 或 grace 決定；
+- **NATS 往返** —— 時間花在 broker 的 `request`／`probe` 上，含 re-ask 迴圈與 caller 的 timeout；
+- **子進程**、**Postgres**、**其他**。
+
+| # | 測試 | 秒 | 主因 | 依據（量到的數字與程式位置） |
+|---|---|---|---|---|
+| 1 | `test_td_orphan_reaper.py::test_a_revived_lease_loop_clears_the_strikes` | 61.02 | 真的 sleep | 測試把 `link.tasks` 換成 `asyncio.create_task(asyncio.sleep(60))`（`test_td_orphan_reaper.py:211`），然後 `link.stop.set()` 之後 `gather` 它。`stop` 不會取消那個 sleep，所以整整等 60 秒。一個測試就是整套的 15%。 |
+| 2 | `test_broker_probe.py::test_probing_a_dead_instance_does_not_pile_up` | 4.25 | NATS 往返 | `DEAD_PROBES = 64` 次 probe 打在沒人服務的 subject 上，每次在 re-ask 迴圈裡睡掉 `_NO_RESPONDERS_FLOOR_S = 0.1` 的預算（量到 3.2 s），加測試自己的 `sleep(1.0)`（`test_broker_probe.py:93`）。 |
+| 3 | `test_md_detach_disconnect.py::test_detach_returns_before_the_venue_is_disconnected` | 3.11 | 真的 sleep | `_make_venue_slow_to_close` 用 `asyncio.sleep(SLOW_CLOSE_S)` 當作關不掉的 venue，`SLOW_CLOSE_S = 3.0`（`test_md_detach_disconnect.py:32`、`:98`）。 |
+| 4 | `test_md_detach_disconnect.py::test_shutdown_waits_for_the_disconnects_it_started` | 3.10 | 真的 sleep | 同上，`SLOW_CLOSE_S = 3.0`。 |
+| 5 | `test_md_detach_disconnect.py::test_a_closing_venue_does_not_block_the_next_attach` | 3.10 | 真的 sleep | 同上，`SLOW_CLOSE_S = 3.0`。 |
+| 6 | `test_chase.py::test_the_sweep_gives_up_rather_than_looping_forever` | 3.06 | 真的 sleep | `chase.py:883` 的 `IOC_SLICE_PAUSE_S = 0.25` × `IOC_MAX_SLICES = 10` = 2.5 s，加 `chase.py:778` 的 `CANCEL_POLL_S` 輪詢 0.55 s。時鐘是注入的，這兩個 sleep 不是。 |
+| 7 | `test_session_create.py::test_lease_expiry_marks_done_and_destroys` | 2.56 | lease 心跳 | 停掉心跳後等 `lease_grace = 2.0` 到期，用 `sleep(0.1)` 輪詢最多 40 次（`test_session_create.py:201`）。 |
+| 8 | `test_detach_refcount.py::test_stop_one_sts_drops_td_refcount` | 2.18 | NATS 往返 | 1.95 s 在 `Client.request`、1.90 s 在 re-ask 迴圈：STS `stop()` 的 detach RPC 與 TD detach 觸發的 `request_backfill`，兩個對端在這個測試裡都沒立起來。 |
+| 9 | `test_session_oms.py::test_attach_refcount_destroy` | 2.13 | NATS 往返 | 兩次 TD detach，各觸發 `manager.py:600` 的 `request_backfill`（`REQUEST_TIMEOUT_S = 3.0`）打到沒人服務的 `td.backfill`，各耗掉 1.0 s 的 re-ask 預算。 |
+| 10 | `test_session_create.py::test_attach_refcount_same_api` | 2.13 | NATS 往返 | 同上，兩次 detach 共 1.90 s 在 re-ask 迴圈。 |
+| 11 | `test_session_processes.py::test_a_real_worker_answers_stop_on_its_control_subject` | 2.08 | 子進程 | `SubprocessSpawner` 真的 spawn 一個 worker；1.13 s 在 `create_subprocess_*` 與 `Process.wait`，0.74 s 在等那個進程回 RPC。 |
+| 12 | `test_order_rpc.py::test_state_is_cleared_when_the_session_dies` | 2.04 | NATS 往返 | 1.91 s 全在 re-ask 迴圈：兩個 request 打到沒人服務的 subject，各一個 1.0 s 的預算。 |
+| 13 | `test_md_ack_watchdog.py::test_overrunning_every_beat_still_notices_a_quiet_peer` | 2.04 | lease 心跳 | 每個 beat 用 `time.sleep(HEARTBEAT_LATE_S + heartbeat_interval)` 擋住 loop（`test_md_ack_watchdog.py:433`），再用 `sleep(0.02)` 輪詢到 ack grace 過期。 |
+| 14 | `test_binance_spot_client.py::test_unsubscribe_in_the_reconnect_gap_closes_locally` | 2.01 | 真的 sleep | `retry_backoff=2.0`，socket 的重連退避真的睡 2 秒（`binance/socket.py:333`）；測試用 `sleep(0.05)` × 80 等它（`test_binance_spot_client.py:185`）。 |
+| 15 | `test_session_processes.py::test_closing_the_lifeline_makes_the_worker_exit` | 1.85 | 子進程 | spawn 一個真的 worker 再關掉 lifeline；0.86 s 在子進程 spawn 與 wait。 |
+| 16 | `test_md_ack_watchdog.py::test_a_live_print_stream_never_trips_the_watchdog` | 1.74 | lease 心跳 | `sleep(GRACE * 4)`，`GRACE = 0.25` 就是 `md_ack_grace`（`test_md_ack_watchdog.py:270`）；另有 0.70 s 是 `stop()` 的 detach re-ask。 |
+| 17 | `test_td_ack_watchdog.py::test_a_live_td_never_trips_the_watchdog` | 1.73 | lease 心跳 | `sleep(GRACE * 4)`，加 `stop()` 的 detach re-ask 0.70 s。 |
+| 18 | `test_md_ack_watchdog.py::test_a_live_feed_never_trips_the_watchdog` | 1.73 | lease 心跳 | `sleep(GRACE * 4)`，加 `stop()` 的 detach re-ask 0.70 s。 |
+| 19 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[postgres]` | 1.72 | 真的 sleep | `backfill_cron.py:120` 的 `ACCOUNT_PAUSE_S = 0.5`，兩個帳號 1.0 s，加測試自己 `sleep(0.2)` × 2。 |
+| 20 | `test_backfill_executor.py::test_a_backwards_walk_still_makes_progress_across_runs[postgres]` | 1.67 | Postgres | 42 次 `asyncpg.connect`，0.73 s。`db_harness` 用 `NullPool`，每個 session 一條新連線。 |
+| 21 | `test_session_processes.py::test_a_worker_reports_the_qualified_key` | 1.59 | 子進程 | 0.62 s 在子進程，其餘是 sqlite 建 schema 與 registry 寫檔。 |
+| 22 | `test_cid_ownership.py::test_detached_owner_is_reported_as_detached` | 1.57 | NATS 往返 | 0.95 s 在 re-ask 迴圈（detach 的 `request_backfill`），加測試自己的 `sleep(0.2)` × 2。 |
+| 23 | `test_eventlog.py::test_a_capped_tape_read_says_it_was_capped` | 1.56 | NATS 往返 | 1.50 s 在 `Client.request`：`sts.stop()` 的 `_publish_detaches` 把 detach 送給只服務 tape 的那個 MD subject，有 subscriber 但不回答，等滿 `DETACH_TIMEOUT_S = 1.5`。 |
+| 24 | `test_eventlog.py::test_tape_read_records_the_prints_not_just_the_coverage` | 1.56 | NATS 往返 | 同上，1.50 s 等滿 `DETACH_TIMEOUT_S`。 |
+| 25 | `test_eventlog.py::test_a_spanned_gap_is_written_to_the_log` | 1.56 | NATS 往返 | 同上，1.51 s 等滿 `DETACH_TIMEOUT_S`。 |
+| 26 | `test_md_ack_watchdog.py::test_prints_do_not_arm_the_watchdog` | 1.47 | lease 心跳 | `sleep(GRACE * 3)` 等 ack grace 過，加 `stop()` 的 detach re-ask 0.70 s。 |
+| 27 | `test_md_ack_watchdog.py::test_a_session_that_never_heard_an_md_is_not_failed` | 1.46 | lease 心跳 | `sleep(GRACE * 3)`（`test_md_ack_watchdog.py:167`），加 detach re-ask 0.70 s。 |
+| 28 | `test_td_ack_watchdog.py::test_a_session_that_never_heard_a_td_is_not_failed` | 1.46 | lease 心跳 | `sleep(GRACE * 3)`（`test_td_ack_watchdog.py:103`），加 detach re-ask 0.70 s。 |
+| 29 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[sqlite]` | 1.46 | 真的 sleep | 和第 19 名同一個測試的 sqlite 版：`ACCOUNT_PAUSE_S` 1.0 s 加測試自己 0.4 s。兩個版本只差 0.26 s，所以這題和 DB 無關。 |
+| 30 | `test_cid_ownership.py::test_detach_keeps_owner_for_provenance` | 1.37 | NATS 往返 | 0.95 s 在 re-ask 迴圈（一次 detach 的 `request_backfill`），加 `sleep(0.2)`。 |
+| 31 | `test_chase.py::test_the_sweep_takes_one_level_at_a_time` | 1.25 | 真的 sleep | `IOC_SLICE_PAUSE_S` × 4 個 slice = 1.0 s，加 `CANCEL_POLL_S` 輪詢 0.25 s。 |
+| 32 | `test_td_instance_routing.py::test_a_jp_credential_never_reaches_the_us_queue[postgres]` | 1.17 | 真的 sleep | `ACCOUNT_PAUSE_S = 0.5` 加測試自己 0.4 s。 |
+| 33 | `test_detach_is_not_awaited.py::test_the_heartbeat_stops_which_is_what_ends_the_attach` | 1.11 | NATS 往返 | 0.70 s 在 re-ask 迴圈（STS detach RPC，`DETACH_TIMEOUT_S = 1.5` 的 re-ask 預算 0.75 s），加測試自己 0.4 s 的 sleep。 |
+| 34 | `test_alert_scenarios.py::test_s3_short_name_is_not_a_source[postgres]` | 1.10 | Postgres | 同一個測試在 sqlite 上 0.11 s、在 Postgres 上 1.10 s。時間在每個測試的 `TRUNCATE ... RESTART IDENTITY CASCADE` 與 `asyncpg.connect`。 |
+| 35 | `test_detach_rpc.py::test_a_detach_does_not_need_its_own_lease_loop` | 1.07 | NATS 往返 | 一次 TD detach → `request_backfill` 打到沒人服務的 `td.backfill`，0.95 s 在 re-ask 迴圈、0.97 s 在 `Client.request`。 |
+| 36 | `test_td_orphan_reaper.py::test_a_link_whose_lease_loop_died_is_detached` | 1.02 | NATS 往返 | reap 之後的 detach 一樣付一次完整的 re-ask 預算，0.95 s。 |
+| 37 | `test_dist_version.py::test_unset_is_not_a_release` | 1.02 | 子進程 | `subprocess.run(['uv', 'build', '--package', 'mftik', ...])`（`test_dist_version.py:33`），1.00 s 全在那個進程裡。 |
+| 38 | `test_detach_rpc.py::test_a_detach_request_closes_the_attach_and_answers` | 1.02 | NATS 往返 | 一次 detach 的 `request_backfill`，0.95 s re-ask。 |
+| 39 | `test_td_orphan_reaper.py::test_a_running_strategy_keeps_its_link` | 1.02 | NATS 往返 | teardown 的 detach 付一次 re-ask 預算，0.95 s。 |
+| 40 | `test_detach_rpc.py::test_detaching_twice_is_not_an_error` | 1.02 | NATS 往返 | 一次 detach 的 `request_backfill`，0.95 s re-ask。第二次 detach 已經沒有 link，不會再送。 |
+| 41 | `test_dist_version.py::test_the_tag_is_the_wheel_version` | 1.01 | 子進程 | 另一次 `uv build`，1.00 s 全在那個進程裡。 |
+| 42 | `test_broker_is_the_only_transport.py::test_no_domain_talks_to_a_store_directly` | 1.00 | 其他 | 量不到任何等待：這題讀遍所有 `src` 樹的檔案做 AST 檢查，1.00 s 全是 CPU。 |
+| 43 | `test_nats_transport.py::test_a_request_to_nobody_fails_at_once_rather_than_waiting` | 0.97 | NATS 往返 | 這題量的就是 re-ask 行為本身：0.95 s 全在 `transport/nats.py:268`。 |
+| 44 | `test_ledger_view.py::test_td_down_fails_closed` | 0.97 | NATS 往返 | TD 不在，ledger 的 request 耗掉完整的 re-ask 預算 0.95 s。 |
+| 45 | `test_sts_session.py::test_sts_session_lives_independently` | 0.96 | NATS 往返 | 0.70 s 在 re-ask 迴圈（`stop()` 的 detach），加 0.25 s 測試 sleep。 |
+| 46 | `test_td_instance_routing.py::test_a_jp_credential_never_reaches_the_us_queue[sqlite]` | 0.95 | 真的 sleep | 和第 32 名同一個測試的 sqlite 版：`ACCOUNT_PAUSE_S = 0.5` 加測試自己 0.4 s。 |
+| 47 | `test_auth_oauth.py::test_a_callback_we_did_not_start_is_refused[postgres-never-issued]` | 0.94 | Postgres | 同一個測試在 sqlite 上 0.09 s、在 Postgres 上 0.94 s。 |
+| 48 | `test_deribit_reconnect.py::test_a_resync_from_the_old_socket_does_not_drop_the_new_one` | 0.94 | 真的 sleep | `sleep(0.6)` 加 `sleep(0.3)`（`test_deribit_reconnect.py:252`、`:259`）。 |
+| 49 | `test_private_events.py::test_order_and_cancel_reject_paths` | 0.92 | NATS 往返 | 0.70 s 在 re-ask 迴圈（`stop()` 的 detach），加 0.10 s 測試 sleep。 |
+| 50 | `test_alert_scenarios.py::test_s2_session_id_is_not_a_source[postgres]` | 0.92 | Postgres | 同一個測試在 sqlite 上 0.10 s、在 Postgres 上 0.92 s。 |
+
+**按主因彙總：**
+
+| 主因 | 測試數 | 秒 |
+|---|---|---|
+| 真的 sleep | 12 | 82.9（扣掉第 1 名那個 60 秒的，是 21.9） |
+| NATS 往返 | 20 | 30.4 |
+| lease 心跳 | 8 | 14.2 |
+| 子進程 | 5 | 7.5 |
+| Postgres | 4 | 4.6 |
+| 其他 | 1 | 1.0 |
+
+### C.5 每個測試模組的耗時
+
+281 個模組，依耗時排序。「秒」是每個模組底下所有測試（參數化展開後）的耗時加總，占比以 411.3 秒為分母。
+
+**「RM 之後」兩欄是 RM-10（#173）在清場完成後量的同一份數字**，來源見 C.8；`—` 表示那個模組整檔刪除。沒有任何新模組出現，所以這張表的列和基線一一對應。
+
+| 模組 | 測試數 | 秒 | 占比 | RM 之後 測試數 | RM 之後 秒 |
+|---|---|---|---|---|---|
+| `apps/td/tests/test_td_orphan_reaper.py` | 6 | 63.07 | 15.3% | — | — |
+| `apps/sym/tests/test_plane.py` | 61 | 13.35 | 3.2% | 61 | 15.29 |
+| `apps/td/tests/test_backfill_executor.py` | 50 | 13.31 | 3.2% | 50 | 17.59 |
+| `apps/api/tests/test_board_route.py` | 70 | 12.65 | 3.1% | 70 | 12.99 |
+| `apps/sts/tests/test_eventlog.py` | 22 | 12.51 | 3.0% | 21 | 11.77 |
+| `apps/api/tests/test_auth_registry_keys.py` | 40 | 11.83 | 2.9% | 40 | 15.22 |
+| `apps/api/tests/test_alert_scenarios.py` | 28 | 10.74 | 2.6% | 28 | 11.16 |
+| `apps/api/tests/test_auth_oauth.py` | 32 | 10.68 | 2.6% | 32 | 9.57 |
+| `apps/sts/tests/test_md_ack_watchdog.py` | 10 | 10.29 | 2.5% | — | — |
+| `apps/md/tests/test_md_detach_disconnect.py` | 3 | 9.32 | 2.3% | — | — |
+| `apps/sts/tests/test_mds_query.py` | 17 | 8.70 | 2.1% | — | — |
+| `packages/db/tests/test_history_repository.py` | 54 | 8.01 | 1.9% | 54 | 8.37 |
+| `packages/db/tests/test_sts_session_repository.py` | 54 | 7.69 | 1.9% | 44 | 6.58 |
+| `apps/td/tests/test_order_rpc.py` | 46 | 7.69 | 1.9% | 1 | 0.11 |
+| `apps/api/tests/test_instances_route.py` | 46 | 6.71 | 1.6% | 46 | 7.53 |
+| `apps/api/tests/test_auth_keys.py` | 26 | 6.26 | 1.5% | 26 | 7.20 |
+| `apps/sts/tests/test_session_processes.py` | 42 | 6.24 | 1.5% | — | — |
+| `apps/sts/tests/test_chase.py` | 56 | 5.97 | 1.5% | 50 | 5.96 |
+| `apps/td/tests/test_session_create.py` | 9 | 5.93 | 1.4% | — | — |
+| `apps/api/tests/test_td_instance_routing.py` | 8 | 5.81 | 1.4% | 8 | 6.13 |
+| `apps/api/tests/test_auth_setup.py` | 22 | 5.65 | 1.4% | 22 | 7.33 |
+| `apps/api/tests/test_sts_strategies.py` | 39 | 5.51 | 1.3% | 21 | 3.05 |
+| `apps/md/tests/test_md_expiry.py` | 12 | 5.27 | 1.3% | — | — |
+| `packages/common/tests/test_broker_probe.py` | 8 | 4.91 | 1.2% | 8 | 4.93 |
+| `apps/td/tests/test_cid_ownership.py` | 5 | 4.72 | 1.1% | — | — |
+| `apps/api/tests/test_sts_env_fanout.py` | 30 | 4.67 | 1.1% | 30 | 4.03 |
+| `apps/td/tests/test_history_writer.py` | 32 | 4.50 | 1.1% | 32 | 5.66 |
+| `apps/api/tests/test_auth_google.py` | 15 | 4.47 | 1.1% | 15 | 4.69 |
+| `apps/api/tests/test_backfill_cron.py` | 14 | 4.47 | 1.1% | 14 | 4.50 |
+| `packages/db/tests/test_symbol_repository.py` | 28 | 4.21 | 1.0% | 28 | 3.79 |
+| `apps/api/tests/test_md_instance_deploy.py` | 24 | 3.78 | 0.9% | — | — |
+| `apps/api/tests/test_list_offset_cap.py` | 24 | 3.67 | 0.9% | 24 | 3.75 |
+| `apps/md/tests/test_md_fetch.py` | 29 | 3.54 | 0.9% | 29 | 3.56 |
+| `apps/api/tests/test_auth_cli_flow.py` | 14 | 3.54 | 0.9% | 14 | 3.80 |
+| `apps/sts/tests/test_td_ack_watchdog.py` | 3 | 3.50 | 0.9% | — | — |
+| `apps/api/tests/test_alerts_route.py` | 20 | 3.33 | 0.8% | 20 | 3.31 |
+| `apps/td/tests/test_detach_rpc.py` | 4 | 3.16 | 0.8% | — | — |
+| `apps/md/tests/test_md_feed_end.py` | 13 | 2.81 | 0.7% | — | — |
+| `apps/sts/tests/test_private_events.py` | 3 | 2.75 | 0.7% | — | — |
+| `packages/common/tests/test_nats_transport.py` | 16 | 2.63 | 0.6% | 16 | 2.62 |
+| `apps/api/tests/test_auth_gate.py` | 17 | 2.61 | 0.6% | 17 | 3.05 |
+| `packages/common/tests/test_deribit_reconnect.py` | 6 | 2.60 | 0.6% | 6 | 2.58 |
+| `apps/sts/tests/test_sts_session.py` | 3 | 2.55 | 0.6% | — | — |
+| `apps/sts/tests/test_rebuild.py` | 33 | 2.46 | 0.6% | — | — |
+| `packages/common/tests/test_binance_spot_client.py` | 33 | 2.42 | 0.6% | 33 | 2.42 |
+| `apps/api/tests/test_board_ws.py` | 19 | 2.25 | 0.5% | 19 | 2.43 |
+| `apps/api/tests/test_audit_identity.py` | 6 | 2.23 | 0.5% | 6 | 2.22 |
+| `apps/md/tests/test_md_session.py` | 5 | 2.19 | 0.5% | — | — |
+| `apps/td/tests/test_session_oms.py` | 3 | 2.19 | 0.5% | 2 | 0.06 |
+| `apps/sts/tests/test_detach_refcount.py` | 1 | 2.18 | 0.5% | — | — |
+| `apps/td/tests/test_history_wiring.py` | 9 | 2.13 | 0.5% | — | — |
+| `apps/sts/tests/test_detach_is_not_awaited.py` | 4 | 2.04 | 0.5% | — | — |
+| `packages/common/tests/test_dist_version.py` | 2 | 2.03 | 0.5% | 2 | 2.12 |
+| `packages/db/tests/test_0027_upgrade.py` | 12 | 1.93 | 0.5% | 12 | 2.52 |
+| `apps/api/tests/test_stats_instances.py` | 10 | 1.79 | 0.4% | 10 | 1.61 |
+| `apps/md/tests/test_md_role_subjects.py` | 3 | 1.72 | 0.4% | 3 | 1.72 |
+| `apps/api/tests/test_eventlog_across_instances.py` | 10 | 1.70 | 0.4% | 10 | 1.28 |
+| `apps/td/tests/test_recon_snapshot.py` | 5 | 1.68 | 0.4% | — | — |
+| `apps/sts/tests/test_md_events.py` | 2 | 1.56 | 0.4% | — | — |
+| `packages/common/tests/test_wire_ledger.py` | 28 | 1.55 | 0.4% | 28 | 1.54 |
+| `packages/db/tests/test_derived_sts.py` | 12 | 1.54 | 0.4% | 12 | 1.63 |
+| `packages/db/tests/test_alert_repository.py` | 14 | 1.50 | 0.4% | 14 | 1.96 |
+| `packages/common/tests/test_deribit_socket.py` | 13 | 1.47 | 0.4% | 13 | 1.47 |
+| `apps/td/tests/test_backfill_triggers.py` | 9 | 1.24 | 0.3% | 7 | 0.84 |
+| `packages/common/tests/test_broker.py` | 8 | 1.23 | 0.3% | 6 | 0.33 |
+| `packages/common/tests/test_bybit_public.py` | 44 | 1.19 | 0.3% | 44 | 1.18 |
+| `apps/sts/tests/test_stop_ordering.py` | 4 | 1.12 | 0.3% | — | — |
+| `packages/db/tests/test_0031_upgrade.py` | 8 | 1.11 | 0.3% | 8 | 1.23 |
+| `packages/common/tests/test_deribit_public.py` | 27 | 1.10 | 0.3% | 27 | 1.10 |
+| `apps/api/tests/test_registry_add.py` | 25 | 1.07 | 0.3% | 22 | 1.14 |
+| `packages/common/tests/test_broker_is_the_only_transport.py` | 2 | 1.06 | 0.3% | 2 | 0.83 |
+| `packages/db/tests/test_session_log_repository.py` | 6 | 1.05 | 0.3% | 6 | 0.75 |
+| `apps/sts/tests/test_tape_read.py` | 19 | 1.04 | 0.3% | 18 | 1.00 |
+| `apps/api/tests/test_apis_create.py` | 6 | 1.00 | 0.2% | 6 | 0.99 |
+| `apps/sts/tests/test_ledger_view.py` | 7 | 1.00 | 0.2% | 7 | 1.00 |
+| `apps/td/tests/test_lease_resilience.py` | 4 | 0.99 | 0.2% | — | — |
+| `packages/common/tests/test_last_reader_release.py` | 20 | 0.98 | 0.2% | 20 | 0.98 |
+| `apps/td/tests/test_stream_rejects.py` | 7 | 0.95 | 0.2% | — | — |
+| `apps/sts/tests/test_timer.py` | 7 | 0.85 | 0.2% | 7 | 0.85 |
+| `apps/api/tests/test_sts_ack.py` | 6 | 0.83 | 0.2% | 6 | 0.82 |
+| `packages/common/tests/test_binance_future_client.py` | 17 | 0.82 | 0.2% | 17 | 0.82 |
+| `apps/sts/tests/test_recon_oms.py` | 1 | 0.82 | 0.2% | — | — |
+| `packages/common/tests/test_binance_delivery_client.py` | 16 | 0.82 | 0.2% | 16 | 0.82 |
+| `packages/db/tests/test_api_repository.py` | 6 | 0.81 | 0.2% | 6 | 0.89 |
+| `apps/api/tests/test_td_sessions_route.py` | 6 | 0.79 | 0.2% | 6 | 1.20 |
+| `apps/sts/tests/test_environment_rebuild.py` | 5 | 0.75 | 0.2% | — | — |
+| `apps/sts/tests/test_strategy_lifecycle.py` | 6 | 0.74 | 0.2% | — | — |
+| `apps/api/tests/test_audits_list.py` | 4 | 0.74 | 0.2% | 4 | 0.80 |
+| `apps/sts/tests/test_sts_incompatible_environment.py` | 5 | 0.74 | 0.2% | — | — |
+| `packages/common/tests/test_binance_delivery_public.py` | 12 | 0.73 | 0.2% | 12 | 0.75 |
+| `packages/db/tests/test_0029_upgrade.py` | 6 | 0.69 | 0.2% | 6 | 0.93 |
+| `packages/common/tests/test_gate_spot_client.py` | 26 | 0.65 | 0.2% | 26 | 0.65 |
+| `packages/common/tests/test_binance_future_public.py` | 11 | 0.64 | 0.2% | 11 | 0.64 |
+| `apps/md/tests/test_md_lease_resilience.py` | 2 | 0.62 | 0.2% | — | — |
+| `packages/common/tests/test_listed.py` | 1 | 0.60 | 0.1% | 1 | 0.60 |
+| `apps/md/tests/test_md_two_instances.py` | 6 | 0.57 | 0.1% | — | — |
+| `packages/common/tests/test_binance_delivery_private.py` | 24 | 0.53 | 0.1% | 24 | 0.53 |
+| `apps/sts/tests/test_session_control_addressing.py` | 5 | 0.53 | 0.1% | — | — |
+| `apps/paper/tests/test_paper_book_feed.py` | 4 | 0.52 | 0.1% | 4 | 0.52 |
+| `packages/common/tests/test_broker_serve_survives.py` | 2 | 0.51 | 0.1% | 2 | 0.51 |
+| `packages/common/tests/test_binance_future_feed.py` | 11 | 0.50 | 0.1% | 11 | 0.50 |
+| `packages/common/tests/test_plane_serves_its_subject.py` | 6 | 0.47 | 0.1% | 6 | 0.48 |
+| `packages/common/tests/test_binance_future_private.py` | 28 | 0.45 | 0.1% | 28 | 0.63 |
+| `apps/sts/tests/test_oms_wait_cids.py` | 11 | 0.45 | 0.1% | 11 | 0.45 |
+| `packages/common/tests/test_bybit_private.py` | 28 | 0.45 | 0.1% | 28 | 0.45 |
+| `apps/md/tests/test_md_orphan_reaper.py` | 9 | 0.44 | 0.1% | — | — |
+| `apps/md/tests/test_md_shared_venue_topics.py` | 12 | 0.44 | 0.1% | — | — |
+| `apps/td/tests/test_leverage_rpc.py` | 4 | 0.43 | 0.1% | — | — |
+| `packages/common/tests/test_binance_spot_public.py` | 15 | 0.41 | 0.1% | 15 | 0.41 |
+| `packages/db/tests/test_0030_upgrade.py` | 6 | 0.39 | 0.1% | 6 | 0.69 |
+| `packages/common/tests/test_bybit_private_stream.py` | 17 | 0.36 | 0.1% | 17 | 0.36 |
+| `packages/common/tests/test_cli_run.py` | 18 | 0.36 | 0.1% | 16 | 0.13 |
+| `apps/sts/tests/test_session_failed.py` | 15 | 0.36 | 0.1% | — | — |
+| `packages/db/tests/test_audit_repository.py` | 2 | 0.28 | 0.1% | 2 | 0.29 |
+| `packages/common/tests/test_gate_spot_private.py` | 35 | 0.28 | 0.1% | 35 | 0.28 |
+| `apps/sts/tests/test_status_events.py` | 5 | 0.27 | 0.1% | — | — |
+| `packages/common/tests/test_gate_future_public.py` | 7 | 0.27 | 0.1% | 7 | 0.28 |
+| `packages/common/tests/test_binance_delivery_feed.py` | 4 | 0.27 | 0.1% | 4 | 0.27 |
+| `apps/td/tests/test_account_ownership.py` | 3 | 0.26 | 0.1% | 1 | 0.06 |
+| `apps/md/tests/test_md_venue_feeds.py` | 22 | 0.26 | 0.1% | — | — |
+| `packages/common/tests/test_paper_exchange.py` | 23 | 0.26 | 0.1% | 23 | 0.26 |
+| `packages/db/tests/test_strategy_repository.py` | 2 | 0.26 | 0.1% | 2 | 0.26 |
+| `packages/common/tests/test_binance_spot_private.py` | 27 | 0.26 | 0.1% | 27 | 0.26 |
+| `apps/sts/tests/test_eventlog_rpc.py` | 8 | 0.24 | 0.1% | 7 | 0.22 |
+| `apps/sts/tests/test_sts_runtime_env.py` | 16 | 0.22 | 0.1% | 16 | 0.24 |
+| `packages/common/tests/test_okx_public.py` | 10 | 0.22 | 0.1% | 10 | 0.22 |
+| `packages/common/tests/test_bitget_public.py` | 8 | 0.22 | 0.1% | 8 | 0.22 |
+| `apps/api/tests/test_environment_api.py` | 32 | 0.20 | 0.0% | 27 | 0.18 |
+| `apps/api/tests/test_environment_flow.py` | 19 | 0.20 | 0.0% | 14 | 0.10 |
+| `packages/common/tests/test_cli_node.py` | 18 | 0.20 | 0.0% | 18 | 0.21 |
+| `packages/common/tests/test_cli_alert.py` | 25 | 0.18 | 0.0% | 25 | 0.18 |
+| `apps/api/tests/test_alert_flush.py` | 13 | 0.17 | 0.0% | 13 | 0.17 |
+| `packages/common/tests/test_cli_env.py` | 22 | 0.17 | 0.0% | 22 | 0.17 |
+| `packages/common/tests/test_boot_probe.py` | 3 | 0.16 | 0.0% | 3 | 0.17 |
+| `packages/common/tests/test_registry_store.py` | 35 | 0.16 | 0.0% | 35 | 0.16 |
+| `packages/common/tests/test_cli_client.py` | 25 | 0.16 | 0.0% | 25 | 0.36 |
+| `packages/common/tests/test_gate_spot_public.py` | 23 | 0.16 | 0.0% | 23 | 0.16 |
+| `apps/sts/tests/test_boot_schema_guard.py` | 6 | 0.15 | 0.0% | 6 | 0.15 |
+| `apps/td/tests/test_backfill_session.py` | 7 | 0.14 | 0.0% | 7 | 0.15 |
+| `apps/api/tests/test_eventlog_route.py` | 6 | 0.14 | 0.0% | 6 | 0.15 |
+| `packages/common/tests/test_cli_check.py` | 18 | 0.14 | 0.0% | 18 | 0.14 |
+| `apps/sym/tests/test_sources.py` | 56 | 0.13 | 0.0% | 56 | 0.14 |
+| `packages/common/tests/test_gate_future_client.py` | 7 | 0.13 | 0.0% | 7 | 0.13 |
+| `apps/sts/tests/test_artifact_rpc.py` | 3 | 0.12 | 0.0% | 3 | 0.10 |
+| `apps/md/tests/test_md_tape_rpc.py` | 2 | 0.12 | 0.0% | 2 | 0.12 |
+| `packages/common/tests/test_deribit_socket_race.py` | 2 | 0.12 | 0.0% | 2 | 0.12 |
+| `apps/paper/tests/test_paper_rpc.py` | 2 | 0.12 | 0.0% | 2 | 0.12 |
+| `apps/sts/tests/test_ledger_leverage.py` | 4 | 0.11 | 0.0% | 4 | 0.12 |
+| `apps/api/tests/test_log_persist.py` | 8 | 0.11 | 0.0% | 8 | 0.11 |
+| `apps/td/tests/test_td_rpc.py` | 2 | 0.11 | 0.0% | 2 | 0.11 |
+| `apps/sts/tests/test_rpc_loop_survives.py` | 2 | 0.11 | 0.0% | 2 | 0.11 |
+| `packages/common/tests/test_paper_remote_public.py` | 1 | 0.10 | 0.0% | 1 | 0.10 |
+| `apps/td/tests/test_connector_capabilities.py` | 6 | 0.09 | 0.0% | 6 | 0.09 |
+| `apps/td/tests/test_backfill_reader.py` | 38 | 0.09 | 0.0% | 38 | 0.08 |
+| `packages/common/tests/test_cli_init.py` | 11 | 0.09 | 0.0% | 11 | 0.10 |
+| `packages/common/tests/test_cli_push.py` | 9 | 0.08 | 0.0% | 9 | 0.08 |
+| `apps/sts/tests/test_macd_dollar.py` | 39 | 0.08 | 0.0% | 38 | 0.07 |
+| `apps/sts/tests/test_oco.py` | 53 | 0.08 | 0.0% | 53 | 0.11 |
+| `packages/common/tests/test_deribit_private.py` | 20 | 0.08 | 0.0% | 20 | 0.08 |
+| `apps/td/tests/test_venue_factory.py` | 17 | 0.08 | 0.0% | 17 | 0.08 |
+| `packages/common/tests/test_artifacts.py` | 22 | 0.07 | 0.0% | 22 | 0.08 |
+| `packages/common/tests/test_cli_app.py` | 11 | 0.07 | 0.0% | 11 | 0.07 |
+| `apps/sts/tests/test_sts_cid.py` | 4 | 0.07 | 0.0% | — | — |
+| `packages/common/tests/test_registry_migrate.py` | 22 | 0.07 | 0.0% | 22 | 0.07 |
+| `packages/common/tests/test_bitget_private_stream.py` | 2 | 0.07 | 0.0% | 2 | 0.07 |
+| `apps/sts/tests/test_cross_arb.py` | 40 | 0.07 | 0.0% | 39 | 0.07 |
+| `packages/common/tests/test_registry_sync.py` | 11 | 0.06 | 0.0% | 11 | 0.06 |
+| `apps/sts/tests/test_sts_registry_sync.py` | 14 | 0.06 | 0.0% | 14 | 0.06 |
+| `apps/sts/tests/test_attach_refused.py` | 3 | 0.06 | 0.0% | — | — |
+| `packages/common/tests/test_bybit_trade.py` | 8 | 0.05 | 0.0% | 8 | 0.05 |
+| `packages/common/tests/test_runtime_supervision.py` | 3 | 0.05 | 0.0% | 3 | 0.06 |
+| `apps/md/tests/test_md_tape.py` | 10 | 0.05 | 0.0% | 8 | 0.42 |
+| `packages/common/tests/test_envapply.py` | 20 | 0.05 | 0.0% | 20 | 0.05 |
+| `apps/md/tests/test_md_venue_factory.py` | 13 | 0.05 | 0.0% | — | — |
+| `packages/common/tests/test_okx_feed.py` | 7 | 0.05 | 0.0% | 7 | 0.05 |
+| `apps/api/tests/test_registry_delete.py` | 11 | 0.05 | 0.0% | 11 | 0.05 |
+| `packages/common/tests/test_cli_artifact.py` | 6 | 0.05 | 0.0% | 6 | 0.05 |
+| `packages/common/tests/test_strategy_yml.py` | 35 | 0.04 | 0.0% | 36 | 0.05 |
+| `packages/common/tests/test_environment.py` | 26 | 0.04 | 0.0% | 26 | 0.05 |
+| `apps/api/tests/test_environment_import.py` | 9 | 0.04 | 0.0% | 9 | 0.05 |
+| `packages/common/tests/test_cli_rm.py` | 6 | 0.04 | 0.0% | 6 | 0.04 |
+| `apps/sts/tests/test_twap.py` | 23 | 0.04 | 0.0% | 23 | 0.04 |
+| `packages/common/tests/test_deribit_setup_context.py` | 2 | 0.04 | 0.0% | 2 | 0.04 |
+| `packages/common/tests/test_cli_connect.py` | 19 | 0.04 | 0.0% | 19 | 0.04 |
+| `packages/common/tests/test_bybit_rest.py` | 15 | 0.04 | 0.0% | 15 | 0.04 |
+| `packages/common/tests/test_binance_delivery_rest.py` | 12 | 0.04 | 0.0% | 12 | 0.03 |
+| `apps/md/tests/test_md_binance_reads.py` | 18 | 0.04 | 0.0% | 18 | 0.03 |
+| `packages/common/tests/test_cli_sessions.py` | 5 | 0.03 | 0.0% | 5 | 0.04 |
+| `packages/common/tests/test_bitget_private.py` | 16 | 0.03 | 0.0% | 16 | 0.04 |
+| `packages/common/tests/test_okx_rest.py` | 11 | 0.03 | 0.0% | 11 | 0.03 |
+| `packages/db/tests/test_0034_strategy_type_key.py` | 3 | 0.03 | 0.0% | 3 | 0.02 |
+| `apps/md/tests/test_md_bybit_reads.py` | 13 | 0.03 | 0.0% | 13 | 0.03 |
+| `apps/api/tests/test_alert_match.py` | 8 | 0.03 | 0.0% | 8 | 0.03 |
+| `apps/api/tests/test_logs_route.py` | 10 | 0.03 | 0.0% | 10 | 0.03 |
+| `apps/md/tests/test_md_okx_reads.py` | 14 | 0.03 | 0.0% | 14 | 0.03 |
+| `apps/sts/tests/test_sts_registry_load.py` | 7 | 0.03 | 0.0% | 7 | 0.03 |
+| `apps/td/tests/test_session_leverage.py` | 8 | 0.02 | 0.0% | 8 | 0.03 |
+| `packages/common/tests/test_cli_config.py` | 23 | 0.02 | 0.0% | 23 | 0.02 |
+| `apps/md/tests/test_md_deribit_reads.py` | 17 | 0.02 | 0.0% | 17 | 0.03 |
+| `packages/common/tests/test_registry_remotes.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `packages/common/tests/test_binance_spot_rest.py` | 13 | 0.02 | 0.0% | 13 | 0.03 |
+| `apps/api/tests/test_sym_routes.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `packages/common/tests/test_gate_future_private.py` | 6 | 0.02 | 0.0% | 6 | 0.02 |
+| `apps/sts/tests/test_orphan_reaper.py` | 6 | 0.02 | 0.0% | — | — |
+| `apps/md/tests/test_md_binance_future_reads.py` | 10 | 0.02 | 0.0% | 10 | 0.02 |
+| `apps/sts/tests/test_sts_registry_reload.py` | 6 | 0.02 | 0.0% | 6 | 0.02 |
+| `packages/db/tests/test_schema_revision.py` | 7 | 0.02 | 0.0% | 7 | 0.02 |
+| `apps/api/tests/test_artifact_route.py` | 5 | 0.02 | 0.0% | 5 | 0.02 |
+| `packages/common/tests/test_okx_private.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `apps/api/tests/test_alert_eval.py` | 9 | 0.02 | 0.0% | 9 | 0.02 |
+| `apps/sts/tests/test_oms_view.py` | 4 | 0.02 | 0.0% | 4 | 0.02 |
+| `apps/md/tests/test_md_binance_delivery_reads.py` | 8 | 0.02 | 0.0% | 8 | 0.02 |
+| `apps/sts/tests/test_noop_strategy.py` | 19 | 0.02 | 0.0% | 19 | 0.03 |
+| `apps/sts/tests/test_strategy_catalog.py` | 19 | 0.02 | 0.0% | 19 | 0.02 |
+| `packages/common/tests/test_registry_load_reload.py` | 6 | 0.02 | 0.0% | 6 | 0.02 |
+| `apps/td/tests/test_error_normalization.py` | 143 | 0.02 | 0.0% | 143 | 0.02 |
+| `packages/common/tests/test_registry_remove.py` | 6 | 0.02 | 0.0% | 6 | 0.01 |
+| `apps/api/tests/test_apis_venue.py` | 8 | 0.02 | 0.0% | 8 | 0.02 |
+| `packages/common/tests/test_registry_load.py` | 5 | 0.02 | 0.0% | 5 | 0.02 |
+| `apps/api/tests/test_apis_rename.py` | 5 | 0.01 | 0.0% | 5 | 0.01 |
+| `packages/common/tests/test_binance_future_rest.py` | 7 | 0.01 | 0.0% | 7 | 0.02 |
+| `apps/md/tests/test_md_bitget_reads.py` | 9 | 0.01 | 0.0% | 9 | 0.02 |
+| `apps/md/tests/test_md_gate_future_reads.py` | 5 | 0.01 | 0.0% | 5 | 0.01 |
+| `packages/common/tests/test_socket_close_timeout.py` | 4 | 0.01 | 0.0% | 4 | 0.01 |
+| `apps/api/tests/test_orchestrate_log_type.py` | 4 | 0.01 | 0.0% | 1 | 0.00 |
+| `apps/sts/tests/test_tape_keeper.py` | 6 | 0.01 | 0.0% | 5 | 0.01 |
+| `packages/common/tests/test_instance_name.py` | 25 | 0.01 | 0.0% | 25 | 0.01 |
+| `apps/api/tests/test_deploy_refused.py` | 4 | 0.01 | 0.0% | — | — |
+| `packages/common/tests/test_bybit_models.py` | 48 | 0.01 | 0.0% | 48 | 0.01 |
+| `packages/common/tests/test_bybit_protocol.py` | 24 | 0.01 | 0.0% | 24 | 0.00 |
+| `packages/common/tests/test_gate_future_rest.py` | 3 | 0.01 | 0.0% | 3 | 0.01 |
+| `packages/common/tests/test_binance_future_streams.py` | 20 | 0.01 | 0.0% | 20 | 0.01 |
+| `packages/common/tests/test_binance_spot_protocol.py` | 30 | 0.01 | 0.0% | 30 | 0.01 |
+| `packages/common/tests/test_gate_spot_models.py` | 32 | 0.01 | 0.0% | 32 | 0.01 |
+| `packages/common/tests/test_registry_files.py` | 10 | 0.01 | 0.0% | 10 | 0.01 |
+| `packages/common/tests/test_strategy_oms_inflight.py` | 10 | 0.01 | 0.0% | 10 | 0.00 |
+| `apps/sts/tests/test_strategy_log_type.py` | 3 | 0.01 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_registry_gate.py` | 25 | 0.01 | 0.0% | 25 | 0.00 |
+| `apps/api/tests/test_sts_strategy_yaml.py` | 3 | 0.00 | 0.0% | 3 | 0.01 |
+| `packages/common/tests/test_binance_delivery_listing.py` | 8 | 0.00 | 0.0% | 8 | 0.01 |
+| `packages/common/tests/test_binance_spot_models.py` | 54 | 0.00 | 0.0% | 54 | 0.00 |
+| `packages/common/tests/test_deribit_protocol.py` | 17 | 0.00 | 0.0% | 17 | 0.01 |
+| `packages/common/tests/test_gate_future_models.py` | 16 | 0.00 | 0.0% | 16 | 0.00 |
+| `packages/common/tests/test_okx_private_stream.py` | 1 | 0.00 | 0.0% | 1 | 0.00 |
+| `packages/common/tests/test_query_codes.py` | 36 | 0.00 | 0.0% | 36 | 0.00 |
+| `packages/db/tests/test_0027_sts_td_mapping.py` | 5 | 0.00 | 0.0% | 5 | 0.01 |
+| `packages/db/tests/test_engine_pool.py` | 5 | 0.00 | 0.0% | 5 | 0.00 |
+| `apps/td/tests/test_ledger.py` | 12 | 0.00 | 0.0% | 12 | 0.00 |
+| `packages/common/tests/test_event_stream.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_okx_models.py` | 43 | 0.00 | 0.0% | 43 | 0.00 |
+| `packages/common/tests/test_registry_protocol.py` | 8 | 0.00 | 0.0% | 8 | 0.00 |
+| `packages/common/tests/test_session_log.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_binance_future_models.py` | 27 | 0.00 | 0.0% | 27 | 0.00 |
+| `packages/common/tests/test_binance_merged_feed.py` | 2 | 0.00 | 0.0% | 2 | 0.00 |
+| `packages/common/tests/test_order_check.py` | 14 | 0.00 | 0.0% | 14 | 0.00 |
+| `packages/common/tests/test_registry_qualify.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_venues.py` | 30 | 0.00 | 0.0% | 30 | 0.00 |
+| `apps/api/tests/test_decimals.py` | 15 | 0.00 | 0.0% | 15 | 0.01 |
+| `apps/api/tests/test_stats_status_coverage.py` | 4 | 0.00 | 0.0% | 4 | 0.00 |
+| `apps/sts/tests/test_client_order_id.py` | 12 | 0.00 | 0.0% | 12 | 0.00 |
+| `packages/common/tests/test_bitget_models.py` | 5 | 0.00 | 0.0% | 5 | 0.00 |
+| `packages/common/tests/test_bitget_protocol.py` | 12 | 0.00 | 0.0% | 12 | 0.00 |
+| `packages/common/tests/test_bitget_socket.py` | 4 | 0.00 | 0.0% | 4 | 0.00 |
+| `packages/common/tests/test_instance_role.py` | 15 | 0.00 | 0.0% | 15 | 0.00 |
+| `packages/common/tests/test_okx_protocol.py` | 16 | 0.00 | 0.0% | 16 | 0.00 |
+| `packages/common/tests/test_order_status.py` | 30 | 0.00 | 0.0% | 30 | 0.00 |
+| `packages/common/tests/test_reservations.py` | 17 | 0.00 | 0.0% | 17 | 0.00 |
+| `packages/common/tests/test_strategy_public_api.py` | 3 | 0.00 | 0.0% | 1 | 0.00 |
+| `packages/common/tests/test_symbol_rounding.py` | 14 | 0.00 | 0.0% | 14 | 0.00 |
+| `packages/common/tests/test_symbols.py` | 41 | 0.00 | 0.0% | 41 | 0.00 |
+| `packages/db/tests/test_models.py` | 7 | 0.00 | 0.0% | 7 | 0.00 |
+| `apps/sts/tests/test_legacy_strategy_paths.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_binance_delivery_streams.py` | 6 | 0.00 | 0.0% | 6 | 0.00 |
+| `packages/common/tests/test_envelope.py` | 6 | 0.00 | 0.0% | 6 | 0.00 |
+| `packages/common/tests/test_envimport.py` | 10 | 0.00 | 0.0% | 10 | 0.00 |
+| `packages/common/tests/test_instrument_identity.py` | 14 | 0.00 | 0.0% | 14 | 0.00 |
+| `packages/common/tests/test_intervals.py` | 34 | 0.00 | 0.0% | 34 | 0.00 |
+| `packages/common/tests/test_redacted_url.py` | 10 | 0.00 | 0.0% | 10 | 0.00 |
+| `packages/common/tests/test_registry_digest.py` | 3 | 0.00 | 0.0% | 3 | 0.00 |
+| `packages/common/tests/test_tickers.py` | 35 | 0.00 | 0.0% | 35 | 0.00 |
+| `packages/common/tests/test_topic_patterns.py` | 5 | 0.00 | 0.0% | 5 | 0.00 |
+
+### C.6 這份量測對計畫的修正
+
+1. **F30 的 120 秒不是拿來跟基線的 428 秒比的 —— 而且按定稿的附錄 A 算，預算比看起來寬。** F30 說的是「`just test`（unit 加 component，`pytest -n auto`）」那一步。現況沒有 tier、沒有 `pytest-xdist`，428 秒是「單進程、三個 tier 混在一起、每個 DB 測試再跑一趟 Postgres」的數字。把附錄 A（B0-05 定稿）套到這次的量測上：
+
+   | 步驟 | 秒 |
+   |---|---|
+   | 基線 | 411.3 |
+   | 減去整檔刪除的 42 個模組 | −156.6 |
+   | 減去部分刪除的 10 個模組裡會刪掉的案例 | −23.1 |
+   | **RM 之後**（3,816 個測試） | **231.8** |
+   | 其中 `database_url=postgres` 那一趟 | 144.0 |
+   | **把 Postgres 移到 integration tier 之後**（§9.1 規則 6） | **87.8** |
+
+   部分刪除的十個模組裡，附錄 A 指名了案例的照名字算；只有 `test_oms_wait_cids`（0.45 秒）依案例數比例估，誤差不到 0.3 秒。RM 幾乎不碰 Postgres 那一趟（148.7 秒裡留下 144.0 秒），因為那些是 repository 與 API 路由測試，不是 session 測試。
+
+   **這一欄是預估；RM-10（#173）量到的實數是 3,776 個測試、255.8 秒，對帳見 C.8.2。** 結論沒變，而且把 Postgres 移出 `just test` 之後實測剩 98.9 秒。
+
+   **結論：預算可行，但關鍵的那一步不是平行化，是把 Postgres 那一趟移出 `just test` —— 只做這一件，RM 之後就已經在 120 秒以內，還沒用到 xdist。** B2-04（#177）的順序應該是先拆 tier、再平行化。
+2. **§9.3 說策略實作測試「真的 sleep 只有一處（`test_chase` 的 0.2 秒）」，F16 說「幾乎沒有真的 sleep」—— 這個描述不準。** 測試本體確實只有一處 `asyncio.sleep(0.2)`（`test_chase.py:565`），但被測的 `chase.py` 自己有兩處真的 sleep：`IOC_SLICE_PAUSE_S = 0.25`（`chase.py:883`，量到 4.5 秒）和 `CANCEL_POLL_S = 0.05`（`chase.py:778`，量到 1.3 秒）。`test_chase.py` 一個模組 5.97 秒，是七個策略模組 6.3 秒裡的 95%。**F16 的結論（不威脅兩分鐘預算）成立 —— 236 個參數化後的測試合計 6.3 秒，1.5% —— 但理由要改成「真的 sleep 在 `chase.py` 裡，不在測試裡」**。這對 B2-02（#175）有實際影響：那個「unit tier 攔截 `asyncio.sleep(x > 0)`」的 conftest 會攔在 `chase.py` 上，不是攔在測試上，所以這批測試遷到 `FakeClock` 必須動 `chase.py`。
+3. **§9.3 的兩個靜態計數，一個差 8、一個吻合。** 「測試裡有 424 處 `asyncio.sleep(>0)`」：我在同一份代碼上數到 432 處（459 處 `asyncio.sleep(...)` 減 27 處 `asyncio.sleep(0)`）。「用到 NATS 的測試 75 個檔案、650 個測試函數」：靜態 grep 是 75 個檔案、649 個 `def test_`，和 B0-05 複查過的數字一致；執行時真正開過連線的是 **73 個檔案、601 個測試**（參數化後），NATS 自己報 606 條連線。差額是幾個 import 了 `a_broker` 但該案例沒用到的檔案。兩個數字都不影響任何結論。
+
+### C.7 量測方法，以及那個一次性 job 的去向
+
+量測用兩趟，都在同一個 job 裡、服務與指令和 `tests.yml` 的 `pytest` job 完全一致：
+
+1. **不加外掛的一趟**，`pytest packages apps -q --durations=0 --junitxml`。C.1、C.4 的「秒」、C.5 的模組表都出自這一趟 —— 量的是現況，不是被外掛影響過的現況。
+2. **加一個 pytest 外掛的一趟**（`scripts/pytest_cost_probe.py`，在 `cbb3f78` 上），把每個測試的時間記到 NATS client、真的 sleep、子進程、`asyncpg.connect` 各桶，並記下每個等待的呼叫位置 —— 只認在測試自己那個 task 的 frame 鏈上的等待，背景 loop 另記。C.2、C.3、C.4 的「依據」出自這一趟。外掛的額外成本可以從兩趟的 junit `testsuite time` 看出來：423.4 對 395.0 秒，也就是加了外掛反而略快 —— 第二趟的 Postgres 是暖的，`[postgres]` 的測試在第二趟普遍快上一截。
+
+**這個 job 量完就移除，不留在 PR 裡。** 三個理由：它要把整套測試跑兩趟，留著等於任何會觸發它的 PR 的 CI 時間翻倍；永久版的耗時閘門是 B2-04（#177）的範圍，兩個並存只會各自漂移；而 run 與 artifact 都是永久的，harness 本身也留在那個 PR 的 commit 歷史裡（`cbb3f78`），要重量一次把那三個檔案挑回來就行。它存在的期間靠 `paths` filter 只對動到 harness 自己的 PR 生效，所以從來沒有拖慢過正常 CI。
+
+### C.8 RM 之後的量測（RM-10，#173）
+
+> **Run：** [Tests #36936410395](https://github.com/lynxlinkage/mftik/actions/runs/36936410395)（job `pytest`，commit `7b7921d`，PR #271），綠。量的是 `tests.yml` 的 `Test` step —— 和 C.1 一樣是 `pytest packages apps -q`，只是暫時加了 `--durations=0 --durations-min=0 --junitxml`，量完就從 workflow 移除（和 C.7 的 `measure` job 同一個理由）。機器、服務版本、Python 版本和 C.1 相同。
+>
+> `7b7921d` 的 `apps/` 和 `packages/` 與 RM-09 合併後的 `refactor/process-planes`（`c42f823`）完全相同（`git diff c42f823 7b7921d -- apps packages` 是空的），唯一的差別就是上面那一行旗標。所以這些數字量的是清場後的基線本身，不含 RM-10 自己的文件改動。
+>
+> **原始資料**是那個 run 的 `rm-durations` artifact 裡的 `junit.xml`；C.5 的「RM 之後」兩欄也出自它。
+
+#### C.8.1 總量
+
+| 項目 | 基線（C.1） | RM 之後 |
+|---|---|---|
+| `just test` 的 wall time | 428 秒 | **266 秒** |
+| 測試數（參數化展開後） | 4,244（4 skip） | **3,776**（4 skip、0 失敗） |
+| 測試模組數 | 281 | **239** |
+| 每個測試耗時加總 | 411.3 秒 | **255.8 秒** |
+| junit 的 `testsuite time` | 423.4 秒 | 266.0 秒 |
+| 單一測試耗時中位數 | 3 毫秒 | 3 毫秒 |
+| ≥ 0.5 秒的測試 | 157 個，212.6 秒（52%） | 113 個，94.6 秒（37%） |
+| < 50 毫秒的測試 | 3,119 個，18.9 秒（4.6%） | 2,898 個，16.5 秒（6.5%） |
+| 最慢的 50 個 | 140.7 秒（34%） | 56.6 秒（22%） |
+| 整個 `Tests` job 的 wall time | 517 秒 | 382 秒 |
+| 第二趟（只有 `packages`，`MFTIK_TEST_LOOP=asyncio`） | 66 秒 | 76 秒（2,109 passed、4 skip） |
+
+依套件分：
+
+| 套件 | 基線 測試數 | 基線 秒 | RM 之後 測試數 | RM 之後 秒 | 占比 |
+|---|---|---|---|---|---|
+| `apps/api` | 743 | 119.9 | 681 | 120.8 | 47.2% |
+| `packages/common` | 1,891 | 36.4 | 1,886 | 35.6 | 13.9% |
+| `packages/db` | 237 | 29.5 | 227 | 30.0 | 11.7% |
+| `apps/td` | 429 | 112.8 | 326 | 24.9 | 9.7% |
+| `apps/sts` | 586 | 70.9 | 397 | 22.5 | 8.8% |
+| `apps/sym` | 117 | 13.5 | 117 | 15.4 | 6.0% |
+| `apps/md` | 235 | 27.6 | 136 | 6.0 | 2.4% |
+| `apps/paper` | 6 | 0.6 | 6 | 0.6 | 0.2% |
+
+`database_url` 的參數化：
+
+| `database_url` | 基線 測試數 | 基線 秒 | RM 之後 測試數 | RM 之後 秒 | 占比 |
+|---|---|---|---|---|---|
+| `postgres` | 437 | 148.7 | 407 | 156.9 | 61.4% |
+| `sqlite` | 437 | 31.8 | 407 | 30.1 | 11.8% |
+| 沒有這個參數 | 3,370 | 230.8 | 2,962 | 68.8 | 26.9% |
+
+#### C.8.2 和 C.6 第 1 點的預估對照
+
+C.6 把定稿的附錄 A 套在基線的量測上，算出 RM 之後是 3,816 個測試、231.8 秒。實測是 **3,776 個、255.8 秒**。逐項對帳（秒數都用 C.5 兩欄相減）：
+
+| 步驟 | 測試數 | 秒 |
+|---|---|---|
+| 基線 | 4,244 | 411.3 |
+| 42 個整檔刪除的模組 | −355 | −156.6 |
+| 22 個部分刪除的模組（扣掉它們自己的漂移） | −113 | −15.5 |
+| 217 個 RM 沒碰的模組，在這台 runner 上的漂移 | 0 | **+16.6** |
+| **實測** | **3,776** | **255.8** |
+
+兩個差額都有解釋，而且都不影響 C.6 的結論：
+
+1. **測試數少 40 個，全部出在「部分刪除」那一欄。** C.6 的 3,816 = 4,244 − 355（整檔）− 73（部分）；整檔那 355 個一個不差，部分刪除實際是 113 個而不是 73 個。多出來的 40 個有兩個來源，而且都不是漏算：
+   - **RM 在附錄 A 之外刪掉的、主題已經不存在的案例**：`apps/api/tests/test_sts_strategies.py` 的 9 個 stop / force-stop 路由案例（參數化後 18 個，隨 RM-04 走）、`apps/api/tests/test_environment_api.py` 的 5 個 live-session 守衛案例（RM-08 之後守衛是 no-op）、`apps/sts/tests/test_eventlog_rpc.py:test_info_flags_a_session_still_running`（`live` 旗標恆為 false）、`packages/db/tests/test_sts_session_repository.py` 的 10 個 `remember` / `rebuild_count` 案例（在 RM-01 的範圍裡，但附錄 A 的表沒有 `packages/db/tests` 這一節）、RM-06 依補正多刪的 3 個 `test_order_rpc` 案例、RM-08 多刪的 2 個 `test_environment_flow` 案例。
+   - **反方向的 18 個**：RM-04 留下 `test_eventlog` 的 14 個與 `test_oms_wait_cids` 的 3 個 `StsSession` 案例（附錄 A 列的是刪除），RM-09 在 `test_strategy_yml` 多加 1 個。
+   - 剩下的差額是**附錄 A 數的是測試函式、C.5 數的是參數化展開後的測試**，指名刪除的案例裡有一批帶 `database_url` 參數。
+   附錄 A 已加一節逐項記錄這些差異；`docs/baseline/remaining.md` 有同一份清單加上去向。
+2. **秒數多 24 秒**：**不是 RM 留下來的東西變慢，是 RM 沒碰的模組在這台 runner 上跑得比基線那一趟慢**（+16.6 秒），加上部分刪除的模組身上也帶著同樣的漂移。最明顯的三個都和 session 機制無關：`test_backfill_executor.py` 13.31 → 17.59、`test_auth_registry_keys.py` 11.83 → 15.22、`test_plane.py` 13.35 → 15.29，合計就占了 +9.6 秒。`[postgres]` 那一趟 437 → 407 個測試卻從 148.7 秒變 156.9 秒，是同一件事。C.1 記下過同一份代碼在 398–435 秒之間擺動，這個幅度和那個區間同一個數量級。
+
+**C.6 的結論成立，而且數字更好看了。** 把 Postgres 那一趟（156.9 秒）移出 `just test`（§9.1 規則 6），剩下 **98.9 秒**，已經在 F30 的 120 秒預算以內，還沒用到 `pytest-xdist`。B2-04（#177）先拆 tier、再平行化的順序不變。
+
+#### C.8.3 最慢的測試現在長什麼樣
+
+C.4 第 1 名那個 61 秒的 `test_td_orphan_reaper.py::test_a_revived_lease_loop_clears_the_strikes`（基線整套的 15%）隨 RM-06 消失。現在最慢的 15 個：
+
+| # | 測試 | 秒 |
+|---|---|---|
+| 1 | `test_broker_probe.py::test_probing_a_dead_instance_does_not_pile_up` | 4.26 |
+| 2 | `test_chase.py::test_the_sweep_gives_up_rather_than_looping_forever` | 3.06 |
+| 3 | `test_binance_spot_client.py::test_unsubscribe_in_the_reconnect_gap_closes_locally` | 2.01 |
+| 4 | `test_backfill_executor.py::test_a_backwards_walk_still_makes_progress_across_runs[postgres]` | 1.83 |
+| 5 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[postgres]` | 1.73 |
+| 6 | `test_eventlog.py::test_tape_read_records_the_prints_not_just_the_coverage` | 1.57 |
+| 7 | `test_eventlog.py::test_a_spanned_gap_is_written_to_the_log` | 1.56 |
+| 8 | `test_eventlog.py::test_a_capped_tape_read_says_it_was_capped` | 1.56 |
+| 9 | `test_backfill_executor.py::test_a_capped_walk_resumes_where_it_stopped[postgres]` | 1.48 |
+| 10 | `test_td_instance_routing.py::test_the_sweep_posts_each_account_to_its_own_queue[sqlite]` | 1.45 |
+| 11 | `test_auth_registry_keys.py::test_a_registry_key_reads_what_this_node_publishes[postgres]` | 1.26 |
+| 12 | `test_chase.py::test_the_sweep_takes_one_level_at_a_time` | 1.26 |
+| 13 | `test_td_instance_routing.py::test_a_jp_credential_never_reaches_the_us_queue[postgres]` | 1.19 |
+| 14 | `test_dist_version.py::test_unset_is_not_a_release` | 1.07 |
+| 15 | `test_dist_version.py::test_the_tag_is_the_wheel_version` | 1.05 |
+
+**C.4 的四個主因有兩個整批消失。** lease 心跳（基線 8 個測試、14.2 秒）在 RM-02、RM-06、RM-07 之後一個都不剩；子進程那一類只剩 `test_dist_version` 的兩次 `uv build`（`SubprocessSpawner` 隨 RM-04 走）。剩下最慢的仍然是「真的 sleep」（`chase.py` 自己的 `IOC_SLICE_PAUSE_S` 與 `CANCEL_POLL_S`，C.6 第 2 點已記）、「打到沒人服務的 subject」（`test_broker_probe` 量的就是這個行為本身）和 Postgres。這三類分別是 B2-02（#175）、F31 / B2-05（#178）和 §9.1 規則 6 的範圍。
+
+## 附錄 D：預設數值（F42，B3-09）
+
+#286 收容的暫定數值以現值為預設。B3-09（#366）把每個常數的名稱、值、位置、用途填進這裡，並拿掉代碼裡的 `pending Yi Te (#286)` 標記。之後要改值，以量測為依據，不再走決策流程。F42 改值的常數（重啟曲線、TD 帳號與 MD 連線的 heartbeat timeout）由 B3-08、B6-09、B8-02 改，也列在這張表。
+
+| 常數 | 值 | 位置 | 用途 | 依據 |
+| --- | --- | --- | --- | --- |
+| STS |  |  |  |  |
+| `HEARTBEAT_PERIOD_S` | `1.0` | `apps/sts/src/mftik_sts/session_worker/limits.py:HEARTBEAT_PERIOD_S` | session worker 對 shim 的 heartbeat 週期 | 預設值，依量測調整。低於 `SESSION_HB_TIMEOUT_S`（3 秒） |
+| `ALL_QUEUE_CAPACITY` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:ALL_QUEUE_CAPACITY` | 單一 `all` feed 佇列上限；溢位丟最舊 | #296。預設值，依量測調整 |
+| `MUST_DELIVER_CAPACITY` | `8192` | `apps/sts/src/mftik_sts/session_worker/limits.py:MUST_DELIVER_CAPACITY` | 共用 must-deliver FIFO；溢位讓 session fail | #296。與 `all` 佇列分開，行情溢位不能以同一個深度讓 session fail |
+| `TEMP_BUFFER_CAPACITY` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:TEMP_BUFFER_CAPACITY` | `amain` 傳入的 `all_capacity` | 跟隨 `ALL_QUEUE_CAPACITY`，不跟隨 `MUST_DELIVER_CAPACITY`：這是會丟最舊的暫存緩衝 |
+| `DROP_WARN_INTERVAL_S` | `1.0` | `apps/sts/src/mftik_sts/session_worker/limits.py:DROP_WARN_INTERVAL_S` | 同一 feed 丟棄警告的最小間隔 | 預設值，依量測調整。計畫只說 log 要限速，沒有給窗口 |
+| `MARK_RETENTION` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:MARK_RETENTION` | 記憶體內保留的 disposition mark 筆數 | #360。與佇列上限分開。預設值，依量測調整 |
+| `WARNING_RETENTION` | `1024` | `apps/sts/src/mftik_sts/session_worker/limits.py:WARNING_RETENTION` | 記憶體內保留的丟棄警告行數 | 預設值，依量測調整。丟棄計數本身不截斷 |
+| `SESSION_START_TIMEOUT_S` | `10.0` | `apps/sts/src/mftik_sts/controller/defaults.py:SESSION_START_TIMEOUT_S` | session worker 的 procman ready 計時 | 預設值，依量測調整。不是 F12 的 `on_start` 預算 |
+| `SESSION_HB_TIMEOUT_S` | `3.0` | `apps/sts/src/mftik_sts/controller/defaults.py:SESSION_HB_TIMEOUT_S` | session worker heartbeat 靜默後離開 RUNNING | F42 維持 STS 為 3 秒 |
+| `SESSION_STOP_GRACE_S` | `10.0` | `apps/sts/src/mftik_sts/controller/defaults.py:SESSION_STOP_GRACE_S` | stop 等到 kill 的寬限 | 等於 `ON_STOP_TIMEOUT_S`（F15、§5.3） |
+| `STS_CLEANUP_TIMEOUT_S` | `45.0` | `apps/sts/src/mftik_sts/controller/defaults.py:STS_CLEANUP_TIMEOUT_S` | controller 等一次 `cancel_session` | F46 寫的清場預算 45 秒 |
+| `SILENCE_S` | `10.0` | `apps/sts/src/mftik_sts/session_worker/availability.py:SILENCE_S` | 廣播靜默後把 feed 標 down、帳號標 unavailable | §5.6、F14。五次沒收到 2 秒廣播 |
+| `PROBE_TIMEOUT_S` | `8` | `apps/sts/src/mftik_sts/hostdisk/probe.py:PROBE_TIMEOUT_S` | 一次性子進程 import 探測的牆鐘 | 預設值，依量測調整。低於 §9.1 integration 上限 |
+| MD |  |  |  |  |
+| `FETCH_START_TIMEOUT_S` | `8.0` | `apps/md/src/mftik_md/defaults.py:FETCH_START_TIMEOUT_S` | fetch worker 的 ready 計時 | 預設值，依量測調整。留在 10 秒 integration 上限之內 |
+| `FETCH_HB_TIMEOUT_S` | `2.0` | `apps/md/src/mftik_md/defaults.py:FETCH_HB_TIMEOUT_S` | fetch worker heartbeat 靜默 | 預設值，依量測調整。不是 F42 要改的 MD 連線 timeout |
+| `FETCH_STOP_GRACE_S` | `2.0` | `apps/md/src/mftik_md/defaults.py:FETCH_STOP_GRACE_S` | fetch worker 的 SIGTERM 到 SIGKILL | §4.2：shim graceful stop 實測不到 1 秒 |
+| `FETCH_HEARTBEAT_PERIOD_S` | `0.25` | `apps/md/src/mftik_md/defaults.py:FETCH_HEARTBEAT_PERIOD_S` | fetch worker 寫 status pipe 的週期 | 預設值，依量測調整。低於 `FETCH_HB_TIMEOUT_S` |
+| `FETCH_RESTART_MAX` | `5` | `apps/md/src/mftik_md/defaults.py:FETCH_RESTART_MAX` | fetch worker 在窗口內允許的重啟次數 | 現值。F42 改為不設 FATAL（`max_restarts` 無上限），由 B3-08（#365）改 |
+| `FETCH_RESTART_WINDOW_S` | `600.0` | `apps/md/src/mftik_md/defaults.py:FETCH_RESTART_WINDOW_S` | 上面次數的窗口 | 現值。F42 改為連續 RUNNING 600 秒才歸零，由 B3-08（#365）改 |
+| `FETCH_MIN_BACKOFF_S` | `1.0` | `apps/md/src/mftik_md/defaults.py:FETCH_MIN_BACKOFF_S` | fetch 重啟 backoff 的起點 | 現值 1 秒，與 F42 起點相同。上限 60 秒與 ±20% jitter 由 B3-08（#365）改 |
+| `FETCH_RECONCILE_PERIOD_S` | `0.2` | `apps/md/src/mftik_md/defaults.py:FETCH_RECONCILE_PERIOD_S` | MD 進程查看 fetch slot 的週期 | 預設值，依量測調整 |
+| `FETCH_RESTART_INTENSITY` | `{"max_restarts": 5, "window_s": 600.0, "min_backoff_s": 1.0}` | `apps/md/src/mftik_md/fetch_ctl.py:FETCH_RESTART_INTENSITY` | fetch worker 的 `RestartIntensity` | 由上面三個常數組成。F42 曲線由 B3-08（#365）改 |
+| `_BEAT_INTERVAL_S` | `0.2` | `apps/md/src/mftik_md/conn_worker.py:_BEAT_INTERVAL_S` | paper 連線 worker 寫 status pipe 的週期 | 預設值，依量測調整。不是 B8-02 的 heartbeat timeout |
+| `_RESUBSCRIBE_PAUSE_S` | `0.05` | `apps/md/src/mftik_md/conn_worker.py:_RESUBSCRIBE_PAUSE_S` | paper 斷線後再訂閱前的停頓 | 預設值，依量測調整。B8-03 不把這個數字用到真實 venue |
+| MD 連線 heartbeat timeout | （尚無常數） | — | procman 對 MD 連線 worker 的 heartbeat timeout | 現值無（paper 測試傳 `None`）。F42 改為 10 秒，由 B8-02（#239）改 |
+| TD |  |  |  |  |
+| `ACCOUNT_START_TIMEOUT_S` | `8.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_START_TIMEOUT_S` | 帳號 worker 的 ready 計時 | 預設值，依量測調整 |
+| `ACCOUNT_HB_TIMEOUT_S` | `3.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_HB_TIMEOUT_S` | 帳號 worker 的 heartbeat timeout | 現值 3 秒。F42 改為 10 秒，由 B6-09（#367）改 |
+| `ACCOUNT_STOP_GRACE_S` | `2.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_STOP_GRACE_S` | 帳號 worker 的 stop grace | 預設值，依量測調整。§4.2 graceful stop 不到 1 秒 |
+| `ACCOUNT_RECONCILE_PERIOD_S` | `5.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_RECONCILE_PERIOD_S` | TD 進程 reconcile 週期 | 預設值，依量測調整 |
+| `ACCOUNT_MAX_RESTARTS` | `5` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_MAX_RESTARTS` | 帳號 worker 在窗口內允許的重啟次數 | 現值。F42 改為不設 FATAL，由 B3-08（#365）改；B6-09（#367）改用 `INFRA_RESTART` |
+| `ACCOUNT_RESTART_WINDOW_S` | `60.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_RESTART_WINDOW_S` | 上面次數的窗口 | 現值 60 秒。F42 的 stable window 是 600 秒，由 B3-08（#365）改 |
+| `ACCOUNT_MIN_BACKOFF_S` | `1.0` | `apps/td/src/mftik_td/controller/defaults.py:ACCOUNT_MIN_BACKOFF_S` | 帳號重啟 backoff 的起點 | 現值 1 秒，與 F42 起點相同。上限與 jitter 由 B3-08（#365）改 |
+| `DRAIN_TIMEOUT_S` | `30.0` | `apps/td/src/mftik_td/controller/defaults.py:DRAIN_TIMEOUT_S` | drain-replace 等待已在 handler 裡的呼叫 | 預設值，依量測調整。與 `WAIT_TIMEOUT_S` 相同 |
+| `QUIESCE_LEASE_S` | `10.0` | `apps/td/src/mftik_td/controller/defaults.py:QUIESCE_LEASE_S` | quiesce 後等待進程被停的租約 | 預設值，依量測調整。高於 2 秒 stop grace |
+| `BEAT_PERIOD_S` | `1.0` | `apps/td/src/mftik_td/account/heartbeat.py:BEAT_PERIOD_S` | 帳號 worker 寫 status pipe 的週期 | 預設值，依量測調整。短於 `ACCOUNT_HB_TIMEOUT_S` |
+| `BACKFILL_MAX_CONNECTIONS` | `2` | `apps/td/src/mftik_td/account/resident.py:BACKFILL_MAX_CONNECTIONS` | 一個帳號的 backfill 同時佔用的 resident HTTP 連線 | 預設值，依量測調整。低於各 adapter `POOL_LIMITS.max_connections`（100） |
+| `TRADING_PUSH_TIMEOUT_S` | `5.0` | `apps/td/src/mftik_td/supervise.py:TRADING_PUSH_TIMEOUT_S` | 一次 `td.account.trading` 請求的等待 | 等於 `ACCOUNT_RECONCILE_PERIOD_S`。預設值，依量測調整 |
+| API |  |  |  |  |
+| `_END_TIMEOUT_S` | `15.0` | `apps/api/src/mftik_api/orchestrate.py:_END_TIMEOUT_S` | `sts.session.end` 的 RPC 等待 | `ON_STOP_TIMEOUT_S` + `_ACCEPT_TIMEOUT_S`（10 + 5）。要高於 stop grace、低於 CLI 30 秒。預設值，依量測調整 |
+| common / procman |  |  |  |  |
+| `SETTLED_MAX_CONCURRENT` | `8` | `packages/common/src/mftik/broker/handler.py:SETTLED_MAX_CONCURRENT` | `serve` 同時跑的 `Detached` 回覆數 | 預設值，依量測調整 |
+| `_WAIT_POLL_S` | `1.0` | `packages/common/src/mftik/cli/run.py:_WAIT_POLL_S` | `mftik run --wait` 輪詢 session 的間隔 | 預設值，依量測調整。沒有客戶端截止（`on_start` 最長 3600 秒，F12） |
+| `_WAIT_MAX_MISSES` | `30` | `packages/common/src/mftik/cli/run.py:_WAIT_MAX_MISSES` | `--wait` 連續失敗幾次就放棄 | `round(DEFAULT_TIMEOUT_S / _WAIT_POLL_S)`。預設值，依量測調整 |
+| `BACKOFF_RATIO` | `2.0` | `packages/common/src/mftik/procman/decisions.py:BACKOFF_RATIO` | 重啟 backoff 的倍率 | F42 維持 ×2。上限、jitter、`stable_s`、`alert_after` 由 B3-08（#365）改；這一層目前沒有上限 |
+| `KIND_RSS_ESTIMATE_MIB` | `{("sts", "session"): 69, ("md", "conn"): 61, ("md", "fetch"): 60, ("td", "account"): 79}` | `packages/common/src/mftik/procman/spec.py:KIND_RSS_ESTIMATE_MIB` | 准入用的 worker RSS 估計（MiB） | §4.7、B4-09 實測（Pss，向上取整成 MiB） |
+| `SHIM_VMRSS_BYTES` | `14925824` | `packages/common/src/mftik/procman/decisions.py:SHIM_VMRSS_BYTES` | 每個被計入的 worker 另加的 shim RSS | §4.7、B3-01：14576 KiB |
+| exchange REST |  |  |  |  |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/binance/rest.py:KEEPALIVE_INTERVAL_S` | Binance spot／USD-M／COIN-M 共用的帳號 keepalive 間隔 | Binance REST 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/binance/rest.py:KEEPALIVE_EXPIRY_S` | Binance 連線池 keepalive expiry | 長於間隔，避免兩次 tick 之間拆 socket。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/binance/rest.py:POOL_LIMITS` | Binance httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/bybit/rest.py:KEEPALIVE_INTERVAL_S` | Bybit 帳號 keepalive 間隔 | Bybit v5 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/bybit/rest.py:KEEPALIVE_EXPIRY_S` | Bybit 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/bybit/rest.py:POOL_LIMITS` | Bybit httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/okx/rest.py:KEEPALIVE_INTERVAL_S` | OKX 帳號 keepalive 間隔 | OKX REST 文件沒有寫 HTTP idle close；文件裡的 30 秒是 WebSocket。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/okx/rest.py:KEEPALIVE_EXPIRY_S` | OKX 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/okx/rest.py:POOL_LIMITS` | OKX httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/bitget/rest.py:KEEPALIVE_INTERVAL_S` | Bitget 帳號 keepalive 間隔 | Bitget UTA REST 文件沒有寫 HTTP idle close；30 秒是請求新鮮度。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/bitget/rest.py:KEEPALIVE_EXPIRY_S` | Bitget 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/bitget/rest.py:POOL_LIMITS` | Bitget httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `60.0` | `packages/common/src/mftik/exchange/deribit/rest.py:KEEPALIVE_INTERVAL_S` | Deribit 帳號 keepalive 間隔 | Deribit 文件：HTTP 連線閒置 15 分鐘後到期，keep-alive 也在 15 分鐘被切斷。60 秒低於該上限 |
+| `KEEPALIVE_EXPIRY_S` | `180.0` | `packages/common/src/mftik/exchange/deribit/rest.py:KEEPALIVE_EXPIRY_S` | Deribit 連線池 keepalive expiry | 長於間隔，仍低於 Deribit 的 15 分鐘上限 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 180.0}` | `packages/common/src/mftik/exchange/deribit/rest.py:POOL_LIMITS` | Deribit httpx 連線池 | 連線數是 httpx 預設；expiry 跟隨上面的 180 秒。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/gate/spot/rest.py:KEEPALIVE_INTERVAL_S` | Gate spot 帳號 keepalive 間隔 | Gate API v4 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/gate/spot/rest.py:KEEPALIVE_EXPIRY_S` | Gate spot 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/gate/spot/rest.py:POOL_LIMITS` | Gate spot httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |
+| `KEEPALIVE_INTERVAL_S` | `30.0` | `packages/common/src/mftik/exchange/gate/future/rest.py:KEEPALIVE_INTERVAL_S` | Gate futures 帳號 keepalive 間隔 | Gate API v4 文件沒有寫 HTTP idle close。預設值，依量測調整 |
+| `KEEPALIVE_EXPIRY_S` | `90.0` | `packages/common/src/mftik/exchange/gate/future/rest.py:KEEPALIVE_EXPIRY_S` | Gate futures 連線池 keepalive expiry | 長於間隔。預設值，依量測調整 |
+| `POOL_LIMITS` | `{"max_connections": 100, "max_keepalive_connections": 20, "keepalive_expiry": 90.0}` | `packages/common/src/mftik/exchange/gate/future/rest.py:POOL_LIMITS` | Gate futures httpx 連線池 | 連線數是 httpx 預設。預設值，依量測調整 |

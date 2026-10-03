@@ -6,28 +6,19 @@ import asyncio
 import base64
 import logging
 import re
-import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from mftik.broker import Broker
 from mftik.environment import NodeEnv
 from mftik.protocol import (
     DEFAULT_STRATEGY_TYPE,
-    STOP_CONTROL_TIMEOUT_S,
-    STOP_FORCE_RPC_TIMEOUT_S,
     STS_EVENTLOG_INFO,
     STS_EVENTLOG_READ,
-    STS_SESSION_FORCE_STOP,
-    STS_SESSION_LIST,
+    STS_REASON_OPERATOR_STOP,
     STS_SESSION_STATUS,
-    STS_SESSION_STOP,
-    ListSessionsRequest,
-    ListSessionsRequestEnvelope,
-    ListSessionsResult,
     StrategySpec,
     StrategyTemplate,
     StrategyYamlError,
@@ -38,13 +29,8 @@ from mftik.protocol import (
     StsEventLogPart,
     StsEventLogReadRequest,
     StsEventLogReadRequestEnvelope,
-    StsSessionControlRequest,
-    StsSessionControlRequestEnvelope,
-    StsSessionControlResult,
     StsSessionStatus,
     StsSessionStatusEnvelope,
-    TdAccountRef,
-    TdSettings,
     Topics,
     all_templates,
     attached_api_ids,
@@ -56,23 +42,21 @@ from mftik.protocol import (
 from mftik.registry import AddedStrategy, RegistryStore, qualify
 from mftik_db.models.session import SessionDomain, SessionStatus, StsSessionRow
 from mftik_db.repositories import (
-    AccountRepository,
     InstanceRepository,
     StsSessionRepository,
 )
 from mftik_db.session import session_scope
 
 from mftik_api.audit_util import record_audit
-from mftik_api.auth import ANONYMOUS, OwnerId, Principal, PrincipalDep
+from mftik_api.auth import ANONYMOUS, OwnerId, PrincipalDep
 from mftik_api.broker_rpc import DomainRpcError, request_domain
 from mftik_api.deps import DEFAULT_USER_ID, BrokerDep, RegistryStoreDep
-from mftik_api.orchestrate import deploy_strategy
+from mftik_api.orchestrate import end, release_held_intents, start
 from mftik_api.paging import ListOffset
 from mftik_api.schemas import (
     DeployResponse,
     EventLogInfoResponse,
     SessionListResponse,
-    SessionOut,
     StrategyDeployBody,
     StrategyListResponse,
     StrategyOut,
@@ -80,7 +64,6 @@ from mftik_api.schemas import (
     StrategyTypesResponse,
     StrategyYamlResponse,
     StsControlResponse,
-    TdAttachOut,
 )
 from mftik_api.sts_fanout import registry_availability
 
@@ -272,6 +255,25 @@ async def list_strategies(
     )
 
 
+def session_phase(status: str | None, conditions: object) -> str | None:
+    """The v2 phase a poll reads (B4-08).
+
+    ``conditions["phase"]`` when the controller has written one. The
+    status column is ``live`` for every non-terminal phase, so it cannot
+    tell ``starting`` from ``running``. When ``conditions`` is null,
+    empty, or has no phase — the row the controller has not reported
+    yet — a ``live`` row is ``starting`` and a terminal row is the
+    column itself.
+    """
+    if isinstance(conditions, Mapping):
+        raw = conditions.get("phase")
+        if isinstance(raw, str) and raw:
+            return raw
+    if status == SessionStatus.LIVE.value:
+        return "starting"
+    return status
+
+
 def _strategy_out(row: StsSessionRow) -> StrategyOut:
     """Map a ``sts_sessions`` row to the list/detail shape.
 
@@ -284,6 +286,7 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
     done that for ``td`` since it stopped being a list; ``md_feeds_of`` is the
     same job for ``md_ids``.
     """
+    conditions = row.conditions if isinstance(row.conditions, dict) else None
     return StrategyOut(
         type=row.type,
         config=dict(row.st_paras or {}),
@@ -292,6 +295,8 @@ def _strategy_out(row: StsSessionRow) -> StrategyOut:
         session_id=row.session_id,
         status=row.status,
         reason=row.reason,
+        phase=session_phase(row.status, conditions),
+        conditions=conditions,
         td_api_ids=attached_api_ids(row),
         md_ids=md_feeds_of(row.md_ids),
     )
@@ -348,21 +353,19 @@ async def strategy_yaml(session_id: str) -> StrategyYamlResponse:
 async def list_sessions(
     broker: BrokerDep, status: str | None = "live"
 ) -> SessionListResponse:
-    try:
-        result = await request_domain(
-            broker,
-            Topics.STS,
-            ListSessionsRequestEnvelope.wrap(
-                ListSessionsRequest(domain="sts", status=status),
-                type=STS_SESSION_LIST,
-                source="api",
-            ),
-            result_type=ListSessionsResult,
-        )
-    except DomainRpcError as exc:
-        raise HTTPException(status_code=502, detail=exc.message) from exc
-    return SessionListResponse(
-        sessions=[SessionOut.model_validate(s.model_dump()) for s in result.sessions]
+    """Placeholder until IF-04 (#182) gives STS sessions to list again.
+
+    RM-04 (#167) deleted STS's session manager, so ``sts.session.list`` now
+    reaches a handler that raises — the request goes unanswered and the wait
+    turns into a 502 that reads as a broken plane rather than as a route
+    with nothing behind it. ``GET /sts/strategies`` still answers: it reads
+    ``sts_sessions`` and does not ask a process.
+    """
+    del broker, status
+    raise HTTPException(
+        status_code=501,
+        detail="sts session listing is not implemented — waiting for IF-04 "
+        "(#182)",
     )
 
 
@@ -372,15 +375,81 @@ async def stop_session(
     broker: BrokerDep,
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
+    reason: str | None = None,
 ) -> StsControlResponse:
-    return await _control(
-        broker,
-        session_id,
-        STS_SESSION_STOP,
-        "sts.session.stop",
-        owner,
-        principal,
+    """Stop a session via :func:`mftik_api.orchestrate.end` (§8.1).
+
+    A row whose column is already terminal (``done``, ``failed``,
+    ``ack``, ``interrupted``) answers 200 with that status and does not
+    send ``sts.session.end``. After a controller restart the controller
+    no longer holds it and would answer ``unknown_session``. Intents
+    still held on that row are released and their deletes are sent.
+
+    Otherwise :func:`~mftik_api.orchestrate.end` runs and the reply's
+    terminal status is this response. ``reason`` defaults to
+    :data:`STS_REASON_OPERATOR_STOP`.
+
+    ``not_found`` is 404. ``timeout`` is 503 and asks for a retry; the
+    intents stay held. ``unknown_session`` and ``sts_unpinned_ambiguous``
+    are 409. Anything else is 502.
+    """
+    del owner, principal
+    reason_text = (
+        reason.strip()
+        if isinstance(reason, str) and reason.strip()
+        else STS_REASON_OPERATOR_STOP
     )
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"session not found: {session_id}"
+            )
+        status = row.status
+        stored_reason = row.reason
+        strategy = row.type
+        terminal = status in SessionStatus.terminal()
+
+    if terminal:
+        try:
+            await release_held_intents(
+                session_id, stored_reason or reason_text, broker=broker
+            )
+        except DomainRpcError as exc:
+            raise _stop_http(exc) from exc
+        return StsControlResponse(
+            session_id=session_id,
+            status=status,
+            strategy=strategy,
+            reason=stored_reason,
+        )
+    try:
+        result = await end(session_id, reason_text, broker=broker)
+    except DomainRpcError as exc:
+        raise _stop_http(exc) from exc
+    return StsControlResponse(
+        session_id=result.session_id,
+        status=result.status,
+        strategy=strategy,
+        reason=reason_text,
+    )
+
+
+def _stop_http(exc: DomainRpcError) -> HTTPException:
+    """HTTP status for a stop that did not finish (§8.1, B4-08)."""
+    if exc.code == "not_found":
+        return HTTPException(status_code=404, detail=exc.message)
+    if exc.code == "timeout":
+        return HTTPException(
+            status_code=503,
+            detail=(
+                f"{exc.message}; the stop was not confirmed and intents "
+                "were not released — retry"
+            ),
+        )
+    if exc.code in {"unknown_session", "sts_unpinned_ambiguous"}:
+        return HTTPException(status_code=409, detail=exc.message)
+    return HTTPException(status_code=502, detail=exc.message)
 
 
 def _epoch(value: datetime | None) -> float | None:
@@ -705,7 +774,11 @@ def _safe_name(value: str) -> str:
     return cleaned or "session"
 
 
-@router.post("/deploy/{strategy_type}", response_model=DeployResponse)
+@router.post(
+    "/deploy/{strategy_type}",
+    response_model=DeployResponse,
+    status_code=202,
+)
 async def deploy(
     strategy_type: str,
     body: StrategyDeployBody,
@@ -714,81 +787,75 @@ async def deploy(
     owner: OwnerId = DEFAULT_USER_ID,
     principal: PrincipalDep = ANONYMOUS,
 ) -> DeployResponse:
-    """Deploy ``strategy_type`` with the td / md / sts document in ``body``.
+    """Accept a deploy before the session is running (F12, §8.1).
 
-    The type is in the path rather than the document because it decides what
-    ``sts:`` is allowed to contain — keeping them together let a user edit one
-    into disagreement with the other.
+    Progress is null. The STS controller writes status and conditions;
+    the ingress writes hook progress. ``body.timeout`` is not the accept
+    budget — the old synchronous create timeout is gone.
     """
     if _deployable_template(strategy_type, store) is None:
         known = ", ".join(t.type for t in _deployable_templates(store))
         raise HTTPException(
             status_code=404,
-            detail=f"unknown strategy type: {strategy_type}; known: {known}",
+            detail=(
+                f"unknown strategy type: {strategy_type}; known: {known}"
+            ),
         )
     try:
         spec = parse_strategy_yml(body.yaml)
     except StrategyYamlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    created_by = body.created_by if body.created_by is not None else owner
     _refuse_sts_accounts_missing_from_td(spec)
-    td = await _resolve_td(spec.td)
+    created_by = body.created_by if body.created_by is not None else owner
     try:
-        result = await deploy_strategy(
-            broker,
-            strategy_id=strategy_type,
-            td=td,
-            md=dict(spec.md),
-            st_paras=dict(spec.sts),
-            created_by=created_by,
-            timeout=body.timeout,
-            restart=spec.restart,
+        result = await start(
+            spec,
+            broker=broker,
             strategy_type=strategy_type,
             yaml_text=body.yaml,
+            created_by=created_by,
             instance=body.instance,
         )
     except DomainRpcError as exc:
-        code = 404 if exc.code in {"unknown_strategy", "not_found"} else 502
-        if exc.code == "timeout":
-            code = 504
-        if exc.code == "incompatible_environment":
-            code = 409
-        if exc.code == "strategy_refused":
-            # The document is wrong, not the platform. Nothing upstream failed
-            # and retrying will do the same thing, which is what separates this
-            # from the 502 and 504 beside it.
-            code = 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
-
-    session_id = result["session_id"]
+        raise HTTPException(
+            status_code=_deploy_status(exc), detail=exc.message
+        ) from exc
     await record_audit(
         user_id=created_by,
         operation="sts.deploy",
         result=(
-            f"session_id={session_id} type={strategy_type} "
-            f"td_names={list(spec.td)} "
-            f"td={[a['api_id'] for a in result['td']]} md={result['md']}"
+            f"session_id={result.session_id} type={strategy_type} "
+            f"td_names={list(spec.td)}"
         ),
         principal=principal,
     )
-    return DeployResponse(
-        session_id=session_id,
-        type=strategy_type,
-        config=dict(spec.sts),
-        td=[TdAttachOut(**a) for a in result["td"]],
-        md=result["md"],
-        status=result["status"],
-    )
+    return result
+
+
+def _deploy_status(exc: DomainRpcError) -> int:
+    """HTTP status for a domain refusal during accept.
+
+    The same mapping the synchronous deploy used. A miss is 504. An
+    unknown account or strategy is 404. ``capacity_exceeded`` is 503:
+    the node is full now, and the same request may succeed later.
+    Everything else, including a protocol mismatch, is 502 — the plane
+    answered, and the answer was not an accept.
+    """
+    if exc.code in {"unknown_strategy", "not_found", "unknown_api"}:
+        return 404
+    if exc.code == "timeout":
+        return 504
+    if exc.code == "capacity_exceeded":
+        return 503
+    if exc.code == "incompatible_environment":
+        return 409
+    if exc.code == "strategy_refused":
+        return 400
+    return 502
 
 
 def _refuse_sts_accounts_missing_from_td(spec: StrategySpec) -> None:
-    """Refuse ``quote_account`` / ``hedge_account`` that are not td keys.
-
-    Deploy holds both mappings. A name that is not under ``td:`` is a
-    document error (400), the same class as a bad YAML — not a missing
-    account row (404).
-    """
+    """``quote_account`` / ``hedge_account`` must be keys under ``td``."""
     for field in ("quote_account", "hedge_account"):
         name = spec.sts.get(field)
         if not isinstance(name, str) or not name.strip():
@@ -798,288 +865,3 @@ def _refuse_sts_accounts_missing_from_td(spec: StrategySpec) -> None:
                 status_code=400,
                 detail=f"{field} {name!r} is not a key under td",
             )
-
-
-async def _resolve_td(
-    accounts: dict[str, TdSettings],
-) -> dict[str, TdAccountRef]:
-    """Map strategy.yml account names → resolved attaches."""
-    if not accounts:
-        return {}
-    async with session_scope() as db:
-        repo = AccountRepository(db)
-        out: dict[str, TdAccountRef] = {}
-        for name, settings in accounts.items():
-            account = await repo.get_by_name(name)
-            if account is None or account.api is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"unknown td account name: {name!r}",
-                )
-            out[name] = TdAccountRef(api_id=account.api_id, settings=settings)
-        return out
-
-
-async def _control(
-    broker: BrokerDep,
-    session_id: str,
-    type_name: str,
-    audit_op: str,
-    owner: int,
-    principal: Principal | None = None,
-) -> StsControlResponse:
-    # Answered from the table when the table already knows. Stop and fail go
-    # to a subject only the process holding the session serves, so a request
-    # for a session that has ended waits in a list nobody is reading — the
-    # caller would get a timeout where it used to get an immediate 404. The
-    # row is the thing that can say "already over" without asking anyone.
-    async with session_scope() as db:
-        row = await StsSessionRepository(db).get_by_session_id(session_id)
-    if row is None:
-        raise HTTPException(
-            status_code=404, detail=f"unknown sts session: {session_id}"
-        )
-    if row.status in SessionStatus.terminal():
-        raise HTTPException(
-            status_code=404,
-            detail=f"no active sts session: {session_id} is {row.status}",
-        )
-
-    # Stop waits out ``on_stop`` and the rest of ``close``. Fail and the
-    # other control calls are not that walk, and keep the short timeout.
-    timeout = (
-        STOP_CONTROL_TIMEOUT_S if type_name == STS_SESSION_STOP else 10.0
-    )
-    try:
-        result = await request_domain(
-            broker,
-            Topics.sts_control(session_id),
-            StsSessionControlRequestEnvelope.wrap(
-                StsSessionControlRequest(session_id=session_id),
-                type=type_name,
-                source="api",
-                session_id=session_id,
-            ),
-            result_type=StsSessionControlResult,
-            timeout=timeout,
-        )
-    except DomainRpcError as exc:
-        # A full wait means the worker was subscribed and did not answer:
-        # kill it. No responders means the stop was never delivered. Ask
-        # the supervisor anyway, but only kill a started worker whose
-        # beat has gone silent — a worker still starting, or still
-        # beating, is not stuck, and the caller gets the 502 to retry.
-        if (
-            exc.code == "timeout"
-            and type_name == STS_SESSION_STOP
-            and not exc.no_responders
-        ):
-            result = await _force_stop_after_timeout(
-                broker, session_id, only_if_silent=False
-            )
-        elif (
-            exc.code == "timeout"
-            and type_name == STS_SESSION_STOP
-            and exc.no_responders
-        ):
-            result = await _force_stop_after_timeout(
-                broker, session_id, only_if_silent=True
-            )
-        elif exc.code == "timeout":
-            # The row says live and nobody answered for it. That is the
-            # orphan case — the STS holding it died without closing the row —
-            # and it is a different problem from "no such session", so it gets
-            # a different code and a sentence that says where to look.
-            # Stop does not land here: an unanswered stop is escalated above.
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"the STS running {session_id} did not answer; the row "
-                    f"says live, so it may have died — the orphan reaper "
-                    f"closes rows like this"
-                ),
-            ) from exc
-        else:
-            code = 404 if exc.code == "not_found" else 502
-            raise HTTPException(status_code=code, detail=exc.message) from exc
-
-    await record_audit(
-        user_id=owner,
-        operation=audit_op,
-        result=f"session_id={result.session_id} status={result.status}",
-        principal=principal,
-    )
-    return StsControlResponse.model_validate(result.model_dump())
-
-
-async def _load_sts_row(session_id: str) -> StsSessionRow | None:
-    async with session_scope() as db:
-        return await StsSessionRepository(db).get_by_session_id(session_id)
-
-
-def _control_from_row(row: StsSessionRow) -> StsSessionControlResult:
-    return StsSessionControlResult(
-        session_id=row.session_id,
-        status=row.status,
-        strategy=row.type,
-        reason=row.reason,
-    )
-
-
-def _stop_not_delivered(session_id: str) -> str:
-    return (
-        f"stop was not delivered to {session_id}; nobody is "
-        f"subscribed on its control subject"
-    )
-
-
-async def _force_stop_targets(row: StsSessionRow) -> list[str]:
-    """Who might hold this worker.
-
-    A name on the row is that STS alone. Null is not derived from the
-    TD region: draining that STS, adding a second one, or editing the
-    region would send the kill nowhere, or to the wrong process.
-    Every declared STS is asked, disabled included. Only the holder
-    answers with anything but ``not_found``.
-    """
-    if row.instance:
-        return [row.instance]
-    async with session_scope() as db:
-        rows = await InstanceRepository(db).list_all(
-            domain=SessionDomain.STS.value
-        )
-    return [item.name for item in rows]
-
-
-async def _ask_force_stop(
-    broker: Broker,
-    owner: str,
-    session_id: str,
-    *,
-    only_if_silent: bool,
-) -> StsSessionControlResult:
-    return await request_domain(
-        broker,
-        Topics.sts(owner),
-        StsSessionControlRequestEnvelope.wrap(
-            StsSessionControlRequest(
-                session_id=session_id,
-                deadline=time.time() + STOP_FORCE_RPC_TIMEOUT_S,
-                only_if_silent=only_if_silent,
-            ),
-            type=STS_SESSION_FORCE_STOP,
-            source="api",
-            session_id=session_id,
-        ),
-        result_type=StsSessionControlResult,
-        timeout=STOP_FORCE_RPC_TIMEOUT_S,
-    )
-
-
-async def _force_stop_after_timeout(
-    broker: Broker, session_id: str, *, only_if_silent: bool
-) -> StsSessionControlResult:
-    """The worker did not answer stop. Ask the supervisor to kill it.
-
-    Re-read first. The reply can lose the race with ``close`` finishing,
-    and killing a session that already wrote its row would replace that
-    reason.
-    """
-    row = await _load_sts_row(session_id)
-    if row is None:
-        raise HTTPException(
-            status_code=404, detail=f"unknown sts session: {session_id}"
-        )
-    if row.status in SessionStatus.terminal():
-        return _control_from_row(row)
-
-    targets = await _force_stop_targets(row)
-    if not targets:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"stop was not answered for {session_id}, and the row "
-                f"is not pinned to one STS"
-            ),
-        )
-
-    async def one(owner: str) -> StsSessionControlResult | DomainRpcError:
-        try:
-            return await _ask_force_stop(
-                broker,
-                owner,
-                session_id,
-                only_if_silent=only_if_silent,
-            )
-        except DomainRpcError as exc:
-            return exc
-
-    replies = await asyncio.gather(*(one(owner) for owner in targets))
-    return await _finish_force_stop(session_id, targets, list(replies))
-
-
-async def _finish_force_stop(
-    session_id: str,
-    targets: list[str],
-    replies: list[StsSessionControlResult | DomainRpcError],
-) -> StsSessionControlResult:
-    """One holder's answer. The others are ``not_found``."""
-    results = [item for item in replies if isinstance(item, StsSessionControlResult)]
-    if results:
-        for result in results:
-            if result.status in SessionStatus.terminal():
-                return result
-        return results[0]
-    errors = [item for item in replies if isinstance(item, DomainRpcError)]
-    if any(exc.code == "not_stuck" for exc in errors):
-        raise HTTPException(
-            status_code=502, detail=_stop_not_delivered(session_id)
-        )
-    if any(exc.code == "expired" for exc in errors):
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"the force-stop for {session_id} arrived after its "
-                f"deadline and was not applied"
-            ),
-        )
-    if any(exc.code == "timeout" for exc in errors):
-        owner = targets[0] if len(targets) == 1 else "an STS"
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"the STS instance {owner!r} did not kill {session_id} "
-                f"after stop went unanswered"
-            ),
-        )
-    if errors and all(exc.code == "not_found" for exc in errors):
-        label = targets[0] if len(targets) == 1 else "any STS"
-        return await _stop_when_supervisor_has_no_worker(session_id, label)
-    message = errors[0].message if errors else "force-stop failed"
-    raise HTTPException(status_code=502, detail=message)
-
-
-async def _stop_when_supervisor_has_no_worker(
-    session_id: str, owner: str
-) -> StsSessionControlResult:
-    """``force_stop`` was ``not_found``. The row may have finished since.
-
-    Still live means this STS has no process to signal: the session is
-    in-process, so a blocked loop took the whole STS with it, or this
-    instance is not the one holding the worker. That is not "unknown
-    session" — the row exists and was live when stop was asked.
-    """
-    row = await _load_sts_row(session_id)
-    if row is None:
-        raise HTTPException(
-            status_code=404, detail=f"unknown sts session: {session_id}"
-        )
-    if row.status in SessionStatus.terminal():
-        return _control_from_row(row)
-    raise HTTPException(
-        status_code=502,
-        detail=(
-            f"session {session_id} is still live and {owner} has no "
-            f"worker to kill"
-        ),
-    )

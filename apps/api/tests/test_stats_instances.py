@@ -9,7 +9,7 @@ vanish from the page, with nothing anywhere remembering it should be there.
 from __future__ import annotations
 
 import asyncio
-import time
+from datetime import UTC, datetime
 
 import pytest
 from auth_harness import a_client
@@ -20,11 +20,8 @@ from mftik.protocol import Envelope, HealthStatus, Topics, UntypedEnvelope
 from mftik_api.routes import stats as stats_routes
 from mftik_api.routes.stats import router as stats_router
 from mftik_db.models.api import Api, ApiType
-from mftik_db.repositories import (
-    MdSessionRepository,
-    StsSessionRepository,
-    TdSessionRepository,
-)
+from mftik_db.models.session import MdSessionRow, SessionStatus, TdSessionRow
+from mftik_db.repositories import StsSessionRepository
 
 
 class _Answering:
@@ -43,7 +40,12 @@ class _Answering:
         self.peak = max(self.peak, self.concurrent)
         try:
             if self._delay:
-                await asyncio.sleep(self._delay)
+                # A yield, not a wait. The delay is only a flag that this
+                # probe should overlap its sibling: a positive sleep is
+                # forbidden in this tier, and the assertion is the overlap,
+                # not a duration. FakeClock does not fit — the request waits
+                # on the probes, and the probes would wait on advance().
+                await asyncio.sleep(0)
             status = self._up.get(subject)
             if status is None:
                 raise RequestTimeoutError(subject, envelope.id, timeout or 0)
@@ -140,13 +142,12 @@ async def test_probes_run_concurrently_so_the_page_costs_one_timeout(
     threshold is the kind of test that fails on a loaded machine for no reason.
     """
     broker = _Answering(up={}, delay=0.06)
-    started = time.monotonic()
     async with a_client(_app(broker)) as client:
         await client.get("/stats")
-    elapsed = time.monotonic() - started
 
+    # The overlap is the proof. A wall-clock bound here also timed app startup
+    # and the DB round trips, and failed on a loaded CI runner.
     assert broker.peak == 2, "both probes were in flight at once"
-    assert elapsed < 0.12, "two 60ms probes did not run back to back"
 
 
 async def test_session_counts_belong_to_the_instance_that_ran_them(db) -> None:
@@ -173,12 +174,14 @@ async def test_session_counts_belong_to_the_instance_that_ran_them(db) -> None:
             session_id="s-retired", created_by=1, instance="sts-retired"
         )
 
-        md = MdSessionRepository(session)
-        await md.create_live(
-            instance="md-jp-2",
-            venue="Bybit",
-            session_id="s-md",
-            created_by=1,
+        session.add(
+            MdSessionRow(
+                instance="md-jp-2",
+                venue="Bybit",
+                session_id="s-md",
+                created_by=1,
+                status=SessionStatus.LIVE.value,
+            )
         )
 
         api_tw = Api(
@@ -201,14 +204,23 @@ async def test_session_counts_belong_to_the_instance_that_ran_them(db) -> None:
         session.add(api_jp)
         await session.flush()
 
-        td = TdSessionRepository(session)
-        await td.create_live(
-            session_id="s-td-tw", created_by=1, api_id=api_tw.id
+        session.add(
+            TdSessionRow(
+                session_id="s-td-tw",
+                created_by=1,
+                api_id=api_tw.id,
+                status=SessionStatus.LIVE.value,
+            )
         )
-        await td.create_live(
-            session_id="s-td-jp", created_by=1, api_id=api_jp.id
+        session.add(
+            TdSessionRow(
+                session_id="s-td-jp",
+                created_by=1,
+                api_id=api_jp.id,
+                status=SessionStatus.DONE.value,
+                finished_at=datetime.now(UTC),
+            )
         )
-        await td.mark_done(session_id="s-td-jp", api_id=api_jp.id)
 
     broker = _Answering(up={})
     async with a_client(_app(broker)) as client:

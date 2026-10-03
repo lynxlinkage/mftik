@@ -1601,6 +1601,7 @@
           "sts"
         ],
         "summary": "List Sessions",
+        "description": "Placeholder until IF-04 (#182) gives STS sessions to list again.\n\nRM-04 (#167) deleted STS's session manager, so ``sts.session.list`` now\nreaches a handler that raises \u2014 the request goes unanswered and the wait\nturns into a 502 that reads as a broken plane rather than as a route\nwith nothing behind it. ``GET /sts/strategies`` still answers: it reads\n``sts_sessions`` and does not ask a process.",
         "operationId": "list_sessions_sts_sessions_get",
         "parameters": [
           {
@@ -1651,6 +1652,7 @@
           "sts"
         ],
         "summary": "Stop Session",
+        "description": "Stop a session via :func:`mftik_api.orchestrate.end` (\u00a78.1).\n\nA row whose column is already terminal (``done``, ``failed``,\n``ack``, ``interrupted``) answers 200 with that status and does not\nsend ``sts.session.end``. After a controller restart the controller\nno longer holds it and would answer ``unknown_session``. Intents\nstill held on that row are released and their deletes are sent.\n\nOtherwise :func:`~mftik_api.orchestrate.end` runs and the reply's\nterminal status is this response. ``reason`` defaults to\n:data:`STS_REASON_OPERATOR_STOP`.\n\n``not_found`` is 404. ``timeout`` is 503 and asks for a retry; the\nintents stay held. ``unknown_session`` and ``sts_unpinned_ambiguous``\nare 409. Anything else is 502.",
         "operationId": "stop_session_sts_sessions__session_id__stop_post",
         "parameters": [
           {
@@ -1660,6 +1662,22 @@
             "schema": {
               "type": "string",
               "title": "Session Id"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reason"
             }
           }
         ],
@@ -1820,7 +1838,7 @@
           "sts"
         ],
         "summary": "Deploy",
-        "description": "Deploy ``strategy_type`` with the td / md / sts document in ``body``.\n\nThe type is in the path rather than the document because it decides what\n``sts:`` is allowed to contain \u2014 keeping them together let a user edit one\ninto disagreement with the other.",
+        "description": "Accept a deploy before the session is running (F12, \u00a78.1).\n\nProgress is null. The STS controller writes status and conditions;\nthe ingress writes hook progress. ``body.timeout`` is not the accept\nbudget \u2014 the old synchronous create timeout is gone.",
         "operationId": "deploy_sts_deploy__strategy_type__post",
         "parameters": [
           {
@@ -1844,7 +1862,7 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -2148,12 +2166,56 @@
         }
       }
     },
+    "/td/accounts/{api_id}/drain": {
+      "post": {
+        "tags": [
+          "td"
+        ],
+        "summary": "Drain Account",
+        "description": "Drain-replace one account on the TD instance that holds it (F27).\n\nSame auth as the other operator routes: the middleware default-denies,\nand this path is not public. An unknown ``api_id`` is 404. Every\ncredential row names an instance, so there is no separate unbound\nstate. The TD process refuses an id it does not serve with\n``ok`` false and ``reason`` ``not_bound``.",
+        "operationId": "drain_account_td_accounts__api_id__drain_post",
+        "parameters": [
+          {
+            "name": "api_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Api Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDrainResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/md/sessions": {
       "get": {
         "tags": [
           "md"
         ],
         "summary": "List Sessions",
+        "description": "Placeholder until IF-09 (#187) gives MD a desired set to list again.\n\nRM-05 (#168) deleted MD's session RPCs, so ``md.session.list`` comes back\nas ``unknown_type`` \u2014 a 502 that reads as a broken plane rather than as a\nroute with nothing behind it.",
         "operationId": "list_sessions_md_sessions_get",
         "parameters": [
           {
@@ -3657,10 +3719,67 @@
           }
         }
       }
+    },
+    "/workers": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "List Workers",
+        "description": "Every worker in the latest ``procman.report`` of each plane instance.\n\n``age_s`` is how long ago that instance's report arrived. An instance\nthat stops publishing stays, and the age grows. The list is not a\nreason to reclaim intents (F32).",
+        "operationId": "list_workers_workers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AccountDrainResponse": {
+        "properties": {
+          "api_id": {
+            "type": "integer",
+            "title": "Api Id"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "incarnation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incarnation"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "api_id",
+          "ok"
+        ],
+        "title": "AccountDrainResponse",
+        "description": "What ``POST /td/accounts/{api_id}/drain`` returns.\n\n``ok`` false is a finished refusal, not a transport failure. The\nCLI prints ``reason`` and exits non-zero. A missing account is 404\nbefore this body. No TD answering the instance is 503."
+      },
       "AlertCreateBody": {
         "properties": {
           "name": {
@@ -4911,7 +5030,17 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "default": "live"
+            "default": "starting"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StsStatusProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -4919,7 +5048,8 @@
           "session_id",
           "type"
         ],
-        "title": "DeployResponse"
+        "title": "DeployResponse",
+        "description": "Accepted deploy (F12, \u00a78.1).\n\n``status`` is ``starting``. The session row's phase is a different\nfield, and the STS controller writes it. ``progress`` is the\ningress's hook report. It is null at accept: ``on_start`` has not\nrun. ``td`` and ``md`` stay empty here \u2014 those lists used to be the\nattach results, and the accept does not wait for them."
       },
       "DomainStats": {
         "properties": {
@@ -6975,6 +7105,29 @@
             ],
             "title": "Reason"
           },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "conditions": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conditions"
+          },
           "td_api_ids": {
             "items": {
               "type": "integer"
@@ -7158,6 +7311,40 @@
           "status"
         ],
         "title": "StsControlResponse"
+      },
+      "StsStatusProgress": {
+        "properties": {
+          "hook": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hook"
+          },
+          "elapsed_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed S"
+          },
+          "dropped": {
+            "type": "integer",
+            "title": "Dropped",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "StsStatusProgress",
+        "description": "What the ingress puts on a status snapshot while a hook runs (\u00a75.2).\n\nAuthority for the numbers is the session worker's ingress (\u00a73.3,\n\"hook \u9032\u5ea6\u3001offload \u9032\u5ea6\u3001\u4ea4\u4ed8\u7684\u4e1f\u68c4\u8a08\u6578\"). ``hook`` is the hook it is\ninside, ``elapsed_s`` how long that hook has been on the clock, and\n``dropped`` how many delivered events the ingress has discarded."
       },
       "SymSymbolListResponse": {
         "properties": {
@@ -7456,6 +7643,79 @@
         ],
         "title": "VenueOut",
         "description": "A venue credentials can be registered against."
+      },
+      "WorkerListResponse": {
+        "properties": {
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerOut"
+            },
+            "type": "array",
+            "title": "Workers"
+          }
+        },
+        "type": "object",
+        "title": "WorkerListResponse"
+      },
+      "WorkerOut": {
+        "properties": {
+          "plane": {
+            "type": "string",
+            "title": "Plane"
+          },
+          "instance": {
+            "type": "string",
+            "title": "Instance"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "incarnation": {
+            "type": "integer",
+            "title": "Incarnation"
+          },
+          "phase": {
+            "type": "string",
+            "title": "Phase"
+          },
+          "ready": {
+            "type": "boolean",
+            "title": "Ready"
+          },
+          "code_ref": {
+            "type": "string",
+            "title": "Code Ref"
+          },
+          "rss_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rss Bytes"
+          },
+          "age_s": {
+            "type": "number",
+            "title": "Age S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "plane",
+          "instance",
+          "id",
+          "incarnation",
+          "phase",
+          "ready",
+          "code_ref",
+          "age_s"
+        ],
+        "title": "WorkerOut",
+        "description": "One worker from the latest ``procman.report`` of one plane instance.\n\n``age_s`` is seconds since that report arrived. A plane that stops\npublishing stays in the list; the age grows instead of the row\ndisappearing (F32). ``code_ref`` is the platform release the worker\nwas spawned from. B10-03 builds the MD and TD pages from this row."
       }
     }
   }

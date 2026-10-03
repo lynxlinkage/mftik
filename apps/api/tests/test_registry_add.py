@@ -18,8 +18,6 @@ from mftik.protocol import (
     StsRegistrySyncResultEnvelope,
 )
 from mftik.registry import RegistryStore, qualify
-from mftik_api import orchestrate
-from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import registry as registry_routes
 from mftik_api.routes.registry import (
     add_strategy,
@@ -30,8 +28,8 @@ from mftik_api.routes.registry import (
     list_published,
     remote_diff,
 )
-from mftik_api.routes.sts import deploy, list_strategy_types, strategy_type_template
-from mftik_api.schemas import RegistryAddBody, StrategyDeployBody
+from mftik_api.routes.sts import list_strategy_types, strategy_type_template
+from mftik_api.schemas import RegistryAddBody
 from mftik_api.sts_fanout import reconcile_instance
 from mftik_db.repositories import StsSessionRepository
 
@@ -48,24 +46,6 @@ _YML = "td: {}\nmd: []\nsts:\n  qty: 1\n"
 @pytest.fixture(autouse=True)
 def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_authoritative_anycast(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _named_sts_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These tests are about registry add and deploy errors, not placement."""
-
-    async def _target(instance, td):  # noqa: ANN001
-        return instance or "sts"
-
-    async def _ok(broker, instance):  # noqa: ANN001
-        return None
-
-    async def _mint() -> str:
-        return "aabb01"
-
-    monkeypatch.setattr(orchestrate, "_sts_target", _target)
-    monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
-    monkeypatch.setattr(orchestrate, "mint_session_id", _mint)
 
 
 class ReloadingBroker:
@@ -252,86 +232,6 @@ async def test_picker_marks_a_tree_that_needs_extras(
     assert noop.requires == []
 
 
-async def test_incompatible_environment_deploy_is_409(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(registry_routes, "_applied_extras", lambda: {"numpy": "1.0"})
-    store = RegistryStore(tmp_path)
-    await add_strategy(
-        RegistryAddBody(files={"strategy.py": _NUMPY}),
-        store=store,
-        broker=_broker(store),
-    )
-
-    class Boom:
-        async def publish_log(self, *args: object, **kwargs: object) -> int:
-            return 1
-
-        async def publish(self, *args: object, **kwargs: object) -> int:
-            return 1
-
-        async def request(self, *args: object, **kwargs: object) -> None:
-            raise DomainRpcError(
-                "incompatible_environment",
-                "private::Tiny requires numpy which this node does not have",
-            )
-
-    with pytest.raises(HTTPException) as caught:
-        await deploy(
-            "private::Tiny",
-            body=StrategyDeployBody(yaml="sts: {}\n"),
-            broker=Boom(),  # type: ignore[arg-type]
-            store=store,
-        )
-    assert caught.value.status_code == 409
-    assert "numpy" in str(caught.value.detail)
-
-
-async def test_unknown_strategy_deploy_is_still_404(tmp_path: Path) -> None:
-    store = RegistryStore(tmp_path)
-    with pytest.raises(HTTPException) as caught:
-        await deploy(
-            "private::Gone",
-            body=StrategyDeployBody(yaml="sts: {}\n"),
-            broker=_broker(store),
-            store=store,
-        )
-    assert caught.value.status_code == 404
-
-
-async def test_cross_arb_deploy_refuses_sts_account_not_in_td(
-    tmp_path: Path,
-) -> None:
-    """quote_account / hedge_account must name a key under td:."""
-    store = RegistryStore(tmp_path)
-    with pytest.raises(HTTPException) as caught:
-        await deploy(
-            "CrossArb",
-            body=StrategyDeployBody(
-                yaml="""\
-td:
-  binance quoter:
-  gate hedger:
-md: []
-sts:
-  quote_account: not-a-td-name
-  hedge_account: gate hedger
-  quote_ticker: Binance_Spot_BTCUSDT
-  hedge_ticker: Gate_Spot_BTCUSDT
-  side: [buy]
-  qty: 0.001
-  x_lo_bps: 5
-  x_hi_bps: 15
-"""
-            ),
-            broker=_broker(store),
-            store=store,
-        )
-    assert caught.value.status_code == 400
-    assert "quote_account" in str(caught.value.detail)
-    assert "not-a-td-name" in str(caught.value.detail)
-
-
 async def test_add_keeps_strategy_yml_as_the_template(tmp_path: Path) -> None:
     store = RegistryStore(tmp_path)
     out = await add_strategy(
@@ -504,6 +404,11 @@ async def test_an_oversized_tree_still_rescans_a_shared_disk(
     assert (tmp_path / "registry" / "private" / "Tiny" / "strategy.py").is_file()
 
 
+# fake broker plus wall-clock sleep; over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_reconcile_cannot_prune_an_oversized_push(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

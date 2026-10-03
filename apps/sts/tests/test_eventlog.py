@@ -16,14 +16,12 @@ from mftik.exchange.oms import LedgerView, OmsView
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_TICKER,
-    TD_LEASE_ACK,
     TD_LEDGER_VIEW,
     TD_LEVERAGE_ACK,
     TD_OMS_ORDER,
     TD_OMS_VIEW,
     TD_ORDER_ACK,
     Envelope,
-    LeaseAck,
     LeverageAck,
     LeverageAckEnvelope,
     OrderAck,
@@ -39,6 +37,11 @@ from mftik.strategy.eventlog import DIR_ENV, EventLog
 from mftik_md.tape_store import TapeStore
 from mftik_sts.session.session import StsSession
 from tape_rpc import serve_tape
+
+# B2-05: the session cases borrow NATS to test event-log recording. Direct
+# handler call: B5-02 (#211). File-format cases that never open NATS stay
+# on this mark; B5-02 rewrites the module as one piece.
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
@@ -275,12 +278,14 @@ def _session(
         broker=broker,
         created_by=1,
         strategy=strategy,
-        heartbeat_interval=0.1,
         event_log=EventLog(session_id, directory=tmp_path),
         **kwargs,
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_session_records_lifecycle_and_market_data(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -319,6 +324,9 @@ async def test_session_records_lifecycle_and_market_data(
     assert start["md"] == ["ticker.Paper_Spot_BTCUSDT"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_hook_failure_is_recorded_against_the_event(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -364,6 +372,9 @@ async def test_hook_failure_is_recorded_against_the_event(
     assert md[0]["env_id"] == failures[0]["env_id"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_unhandled_message_is_recorded(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -396,36 +407,9 @@ async def test_unhandled_message_is_recorded(
     assert unhandled[0]["peer"] == "md"
 
 
-async def test_lease_ack_is_recorded(broker: Broker, tmp_path: Path) -> None:
-    """The nearest thing to a login: TD has accepted this session's lease."""
-    sts = _session(broker, tmp_path, ProbeStrategy(), td_api_ids=[11],
-                   session_id="ev-lease")
-    await sts.start()
-    await asyncio.sleep(0.05)
-
-    await broker.publish(
-        Topics.td_session(11, "ev-lease"),
-        UntypedEnvelope.wrap(
-            LeaseAck(session_id="ev-lease", api_id=11, token=1).model_dump(
-                mode="json"
-            ),
-            type=TD_LEASE_ACK,
-            source="td",
-        ),
-    )
-    await _wait_until(
-        lambda: (tmp_path / "ev-lease.jsonl").exists()
-        and any(
-            r["kind"] == "lease" for r in _read(tmp_path / "ev-lease.jsonl")
-        )
-    )
-    await sts.stop()
-
-    lease = _events(_read(tmp_path / "ev-lease.jsonl"), "lease")
-    assert lease[0]["event"] == TD_LEASE_ACK
-    assert lease[0]["api_id"] == 11
-
-
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_order_submit_and_ack_are_both_recorded(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -481,6 +465,9 @@ async def test_order_submit_and_ack_are_both_recorded(
     assert orders[1]["cid"] == cid
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_order_with_no_td_records_the_refusal(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -514,6 +501,9 @@ async def test_order_with_no_td_records_the_refusal(
 # so without a record of the answer the log cannot say what the strategy knew.
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_oms_view_records_the_book_it_was_given(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -551,6 +541,9 @@ async def test_oms_view_records_the_book_it_was_given(
     assert reads[0]["payload"]["orders"]["555"]["price"] == "99"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_oms_order_records_a_miss_as_a_miss(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -576,6 +569,9 @@ async def test_oms_order_records_a_miss_as_a_miss(
     assert "payload" not in reads[0]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_ledger_view_records_the_balances(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -613,6 +609,9 @@ async def test_ledger_view_records_the_balances(
     assert reads[0]["payload"]["balances"]["USDT"]["prelock"] == "400"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_leverage_cache_hit_is_recorded_too(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -720,6 +719,9 @@ async def _a_store() -> TapeStore:
     return TapeStore(fakeredis.aioredis.FakeRedis(decode_responses=True))
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_tape_read_records_the_prints_not_just_the_coverage(
     broker: Broker, tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001
@@ -773,6 +775,9 @@ async def test_tape_read_records_the_prints_not_just_the_coverage(
     assert prices == ["68000", "68001", "68002"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_spanned_gap_is_written_to_the_log(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -823,6 +828,9 @@ async def test_a_spanned_gap_is_written_to_the_log(
     assert summary["max_gap_ms"] == 30_000
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_capped_tape_read_says_it_was_capped(
     broker: Broker, tmp_path: Path, monkeypatch
 ) -> None:  # noqa: ANN001
@@ -876,6 +884,9 @@ async def test_a_capped_tape_read_says_it_was_capped(
     assert sum(c["count"] for c in chunks) == 2
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_timer_ticks_are_recorded_under_their_label(
     broker: Broker, tmp_path: Path
 ) -> None:

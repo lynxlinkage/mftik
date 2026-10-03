@@ -23,4 +23,6 @@ async def serve_tape(
     async for req in broker.serve(Topics.md(instance), stop=stop):
         if req.envelope.type != MD_TAPE_TAIL:
             continue
-        await handle_tape_tail(req, store=store, **kwargs)
+        await req.reply(
+            await handle_tape_tail(req.envelope, store=store, **kwargs)
+        )

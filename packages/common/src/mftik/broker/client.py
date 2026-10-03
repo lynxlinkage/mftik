@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 from mftik.broker.config import BrokerConfig
-from mftik.broker.link import LeasedSessionLink
 from mftik.broker.request import IncomingRequest
 from mftik.broker.transport import build as build_transport
 from mftik.broker.transport.base import BrokerTransport
@@ -29,8 +28,8 @@ class Broker:
     """Async IPC client — the whole of what a plane may say.
 
     Six processes, none of which import each other, and this is what they
-    share. Fan-out is best effort, a request nobody serves fails at once,
-    and a session link expires after three missed heartbeats.
+    share. Fan-out is best effort, and a request nobody serves fails at
+    once.
 
     The store underneath is a :class:`~mftik.broker.transport.base.BrokerTransport`
     from :func:`mftik.broker.transport.build`. Nothing above this class may
@@ -60,6 +59,25 @@ class Broker:
         await self._transport.connect()
         logger.info("Connected to %s", self._transport.describe())
 
+    def set_reconnect_handlers(
+        self,
+        *,
+        disconnected: Callable[[], Awaitable[None]] | None = None,
+        reconnected: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Tell the transport when its connection drops and comes back.
+
+        A transport without this hook ignores the call. The callbacks run
+        on the connection's loop. They must not wait on a request on that
+        same connection: schedule the work and return. The session ingress
+        uses this to hear its own NATS reconnect (F13) without reaching
+        into the client.
+        """
+        method = getattr(self._transport, "set_reconnect_handlers", None)
+        if method is None:
+            return
+        method(disconnected=disconnected, reconnected=reconnected)
+
     async def close(self) -> None:
         await self._transport.close()
 
@@ -78,6 +96,71 @@ class Broker:
         replay is the session list.
         """
         await self._transport.publish(topic, envelope.to_json())
+
+    async def publish_with_reply(
+        self,
+        subject: str,
+        envelope: Envelope[Any],
+        *,
+        reply: str,
+    ) -> None:
+        """Publish ``envelope`` on an RPC subject with ``reply`` as the inbox.
+
+        The NATS transport writes the message and flushes before this
+        returns. A transport without that method cannot host the session
+        worker's order path: the ack would be waited for on the same
+        connection the hook is blocking.
+        """
+        method = getattr(self._transport, "publish_with_reply", None)
+        if method is None:
+            raise NotImplementedError(
+                "this transport has no cross-connection publish-with-reply"
+            )
+        await method(subject, envelope.to_json(), reply=reply)
+
+    async def flush(self) -> None:
+        """Force buffered publishes out, when the transport can."""
+        method = getattr(self._transport, "flush", None)
+        if method is not None:
+            await method()
+
+    async def iter_raw(
+        self,
+        topics: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(topic, raw)`` from fan-out topics, without parsing.
+
+        The session ingress logs the bytes it was given and decodes them
+        on the strategy thread (I4). :meth:`subscribe` parses first.
+        """
+        topic_list = (topics,) if isinstance(topics, str) else tuple(topics)
+        if not topic_list:
+            raise ValueError("iter_raw requires at least one topic")
+        async for item in self._transport.subscribe(
+            topic_list, stop=stop, ready=ready
+        ):
+            yield item
+
+    async def iter_core(
+        self,
+        subjects: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(subject, raw)`` for core subjects with no ``ps`` prefix.
+
+        Reply inboxes are this. Fan-out topics are :meth:`iter_raw`.
+        """
+        method = getattr(self._transport, "subscribe_core", None)
+        if method is None:
+            raise NotImplementedError("this transport has no core subscription")
+        subject_list = (subjects,) if isinstance(subjects, str) else tuple(subjects)
+        async for item in method(subject_list, stop=stop, ready=ready):
+            yield item
 
     async def publish_log(
         self,
@@ -126,12 +209,32 @@ class Broker:
         pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
         if not pattern_list:
             raise ValueError("psubscribe requires at least one pattern")
-        async for topic, raw in self._transport.psubscribe(pattern_list, stop=stop):
+        async for topic, raw in self._transport.psubscribe(
+            pattern_list, stop=stop
+        ):
             yield topic, UntypedEnvelope.from_json(raw)
 
-    def leased_link(self, **kwargs: Any) -> LeasedSessionLink:
-        """A fenced session link. See :class:`LeasedSessionLink`."""
-        return LeasedSessionLink(self, **kwargs)
+    async def iter_patterns(
+        self,
+        patterns: str | Sequence[str],
+        *,
+        stop: asyncio.Event | None = None,
+        ready: asyncio.Event | None = None,
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(topic, raw)`` for fan-out patterns, without parsing.
+
+        Same bytes as :meth:`iter_raw`. Patterns are the one place a
+        subject may contain ``*`` — one wildcard per segment, as in
+        ``md.w.*.*``. A plain topic still goes through :meth:`iter_raw`,
+        which refuses a wildcard.
+        """
+        pattern_list = (patterns,) if isinstance(patterns, str) else tuple(patterns)
+        if not pattern_list:
+            raise ValueError("iter_patterns requires at least one pattern")
+        async for item in self._transport.psubscribe(
+            pattern_list, stop=stop, ready=ready
+        ):
+            yield item
 
     async def request(
         self,

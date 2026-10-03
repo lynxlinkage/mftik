@@ -25,6 +25,10 @@ from mftik.exchange.gate.spot import channels as ch
 from mftik.exchange.models import OrderStatus, OrderType, Side
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Gate_Spot_BTCUSDT")
 
@@ -245,6 +249,9 @@ async def test_subscribe_before_connect_raises(gate: FakeGate) -> None:
         await ws.subscribe_trades("BTC_USDT")
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_ping_gets_pong(gate: FakeGate) -> None:
     ws = GateSpotWebSocket(url=gate.url, ping_interval=0.05)  # type: ignore[attr-defined]
     async with ws:
@@ -262,6 +269,9 @@ async def test_overlapping_ticker_calls_subscribe_the_new_pair_only(
         assert payloads == [["BTC_USDT"], ["ETH_USDT"]]
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_replays_each_order_book_payload(gate: FakeGate) -> None:
     """Structured channels cannot share a restore frame — each book is one payload."""
     ws = GateSpotWebSocket(url=gate.url, ping_interval=0, retry_backoff=0.05)  # type: ignore[attr-defined]
@@ -283,6 +293,9 @@ async def test_reconnect_replays_each_order_book_payload(gate: FakeGate) -> None
         assert payloads.count(("ETH_USDT", "20", "1000ms")) == 2
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_replays_each_ticker_contract_once(gate: FakeGate) -> None:
     ws = GateSpotWebSocket(url=gate.url, ping_interval=0, retry_backoff=0.05)  # type: ignore[attr-defined]
     async with ws:
@@ -306,6 +319,9 @@ async def test_reconnect_replays_each_ticker_contract_once(gate: FakeGate) -> No
         assert flat.count("ETH_USDT") == 2
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_partial_unsubscribe_of_a_multi_item_sub_raises(gate: FakeGate) -> None:
     async with await _client(gate) as ws:
         await ws.subscribe_tickers("BTC_USDT", "ETH_USDT")
@@ -314,6 +330,9 @@ async def test_partial_unsubscribe_of_a_multi_item_sub_raises(gate: FakeGate) ->
         await ws.unsubscribe(ch.TICKERS, ["BTC_USDT", "ETH_USDT"])
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_unsubscribe_closes_the_stream(gate: FakeGate) -> None:
     async with await _client(gate) as ws:
         trades = await ws.subscribe_trades("BTC_USDT")
@@ -324,6 +343,9 @@ async def test_unsubscribe_closes_the_stream(gate: FakeGate) -> None:
             await asyncio.wait_for(anext(trades), timeout=2.0)
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_replays_subscriptions(gate: FakeGate) -> None:
     ws = GateSpotWebSocket(  # type: ignore[attr-defined]
         url=gate.url,

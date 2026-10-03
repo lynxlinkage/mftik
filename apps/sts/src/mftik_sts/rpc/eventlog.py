@@ -24,7 +24,6 @@ import base64
 import gzip
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.protocol import (
@@ -43,9 +42,6 @@ from mftik.protocol import (
 )
 from mftik.strategy.eventlog import eventlog_dir, log_parts, part_path
 
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
-
 logger = logging.getLogger(__name__)
 
 #: Ceiling on one read, whatever was asked for. Bounds the reply the broker has to
@@ -62,7 +58,7 @@ GZIP_LEVEL = 4
 async def handle_eventlog_info(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
     """Answer what this process holds for one session.
 
@@ -76,7 +72,7 @@ async def handle_eventlog_info(
     :attr:`StsEventLogPart.instance`. Assembling a whole log from several is
     the caller's job: ``mftik_api.routes.sts`` asks every declared STS and
     merges, because a session's log can span two volumes and neither of them
-    is *the* right one to ask. See ``docs/Instances.md``.
+    is *the* right one to ask. See ``docs/archive/Instances.md``.
     """
     try:
         payload = StsEventLogInfoRequest.model_validate(req.envelope.payload)
@@ -86,9 +82,14 @@ async def handle_eventlog_info(
 
     enabled = eventlog_dir() is not None
     parts = await asyncio.to_thread(log_parts, payload.session_id)
-    here = sessions.instance if sessions is not None else None
-    stats = await asyncio.to_thread(_stat_all, parts, here)
-    live = sessions is not None and sessions.get(payload.session_id) is not None
+    stats = await asyncio.to_thread(_stat_all, parts, instance)
+    # Always false since RM-04. ``live`` used to be "this process holds the
+    # session", read off the in-process session table that went with the
+    # session manager. Nothing in this plane holds a session now, so the
+    # honest answer is that none of them is running here. B4-02 gives the
+    # question a new owner, and the field stays so the wire shape does not
+    # move twice.
+    live = False
 
     await req.reply(
         StsEventLogInfoEnvelope.wrap(
@@ -110,10 +111,10 @@ async def handle_eventlog_info(
 async def handle_eventlog_read(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
     """Return one slice of one part, gzipped."""
-    del sessions
+    del instance
     try:
         payload = StsEventLogReadRequest.model_validate(req.envelope.payload)
     except Exception as exc:

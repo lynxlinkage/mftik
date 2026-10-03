@@ -1,222 +1,67 @@
-"""STS session create / list / control RPC handlers."""
+"""STS session RPC placeholders that the controller does not replace.
+
+Start, end and list are :mod:`mftik_sts.controller`. The functions below
+for those types stay in this module and are not registered: a caller that
+still imports them gets ``NotImplementedError("IF-04")`` rather than a
+second implementation. Fail and force-stop stay registered on
+``sts.{instance}`` and still raise. ``sts.ctl.{session_id}`` is not
+registered; that subject stays the worker's (B4-03).
+"""
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
-
 from mftik.broker import IncomingRequest
-from mftik.protocol import (
-    STS_ERROR,
-    STS_SESSION_CREATE,
-    STS_SESSION_FAIL,
-    STS_SESSION_FORCE_STOP,
-    STS_SESSION_LIST,
-    STS_SESSION_STOP,
-    ListSessionsRequest,
-    ListSessionsResult,
-    ListSessionsResultEnvelope,
-    RpcError,
-    RpcErrorEnvelope,
-    StsCreateSessionRequest,
-    StsCreateSessionResultEnvelope,
-    StsSessionControlRequest,
-    StsSessionControlResultEnvelope,
-)
 
-from mftik_sts.runtime_env import IncompatibleEnvironment
-from mftik_sts.session.manager import ForceStopExpired, WorkerNotStuck
-
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
-
-logger = logging.getLogger(__name__)
+#: The ticket that defines what goes here. Raised rather than replied: a
+#: 501-shaped answer is an interface decision, and IF-04 is where it is made.
+_IF = "IF-04"
 
 
 async def handle_session_create(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    if sessions is None:
-        await _error(req, "unavailable", "session manager not configured")
-        return
-    try:
-        payload = StsCreateSessionRequest.model_validate(req.envelope.payload)
-    except Exception as exc:
-        await _error(req, "invalid_payload", str(exc))
-        return
-    try:
-        result = await sessions.create_session(payload)
-    except IncompatibleEnvironment as exc:
-        await _error(req, "incompatible_environment", str(exc))
-        return
-    except KeyError as exc:
-        await _error(req, "unknown_strategy", str(exc))
-        return
-    except Exception as exc:
-        logger.exception("sts.session.create failed")
-        await _error(req, "create_failed", str(exc))
-        return
-    await req.reply(
-        StsCreateSessionResultEnvelope.wrap(
-            result,
-            type=STS_SESSION_CREATE,
-            source="sts",
-            session_id=result.session_id,
-        )
-    )
+    """``sts.session.start`` — the handler is IF-04. The wire type is IF-01."""
+    del req, instance
+    raise NotImplementedError(_IF)
 
 
 async def handle_session_list(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    if sessions is None:
-        await _error(req, "unavailable", "session manager not configured")
-        return
-    try:
-        raw = req.envelope.payload or {"domain": "sts"}
-        if "domain" not in raw:
-            raw = {**raw, "domain": "sts"}
-        payload = ListSessionsRequest.model_validate(raw)
-    except Exception as exc:
-        await _error(req, "invalid_payload", str(exc))
-        return
-    items = await sessions.list_sessions(payload)
-    await req.reply(
-        ListSessionsResultEnvelope.wrap(
-            ListSessionsResult(sessions=items),
-            type=STS_SESSION_LIST,
-            source="sts",
-            session_id=req.envelope.session_id,
-        )
-    )
+    """``sts.session.list`` — the list is a DB read from B4-02 on."""
+    del req, instance
+    raise NotImplementedError(_IF)
 
 
 async def handle_session_stop(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    await _control(req, sessions=sessions, action="stop", reply_type=STS_SESSION_STOP)
+    """``sts.session.end`` — the handler is IF-04. The wire type is IF-01."""
+    del req, instance
+    raise NotImplementedError(_IF)
 
 
 async def handle_session_force_stop(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    await _control(
-        req,
-        sessions=sessions,
-        action="force_stop",
-        reply_type=STS_SESSION_FORCE_STOP,
-    )
+    """``sts.session.force_stop`` — the Supervisor's job from B3-02 on."""
+    del req, instance
+    raise NotImplementedError(_IF)
 
 
 async def handle_session_fail(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    if sessions is None:
-        await _error(req, "unavailable", "session manager not configured")
-        return
-    try:
-        payload = StsSessionControlRequest.model_validate(req.envelope.payload)
-    except Exception as exc:
-        await _error(req, "invalid_payload", str(exc))
-        return
-    try:
-        result = await sessions.fail_session(
-            payload.session_id,
-            reason=payload.reason or "failed",
-        )
-    except KeyError as exc:
-        await _error(req, "not_found", str(exc))
-        return
-    except Exception as exc:
-        logger.exception("sts.session.fail failed")
-        await _error(req, "fail_failed", str(exc))
-        return
-    await req.reply(
-        StsSessionControlResultEnvelope.wrap(
-            result,
-            type=STS_SESSION_FAIL,
-            source="sts",
-            session_id=result.session_id,
-        )
-    )
-
-
-async def _control(
-    req: IncomingRequest,
-    *,
-    sessions: SessionManager | None,
-    action: str,
-    reply_type: str,
-) -> None:
-    if sessions is None:
-        await _error(req, "unavailable", "session manager not configured")
-        return
-    try:
-        payload = StsSessionControlRequest.model_validate(req.envelope.payload)
-    except Exception as exc:
-        await _error(req, "invalid_payload", str(exc))
-        return
-
-    try:
-        if action == "stop":
-            result = await sessions.stop_session(payload.session_id)
-        elif action == "force_stop":
-            result = await sessions.escalate_stop(
-                payload.session_id,
-                deadline=payload.deadline,
-                only_if_silent=payload.only_if_silent,
-            )
-        else:
-            await _error(req, "unknown_action", action)
-            return
-    except KeyError as exc:
-        await _error(req, "not_found", str(exc))
-        return
-    except WorkerNotStuck:
-        await _error(
-            req,
-            "not_stuck",
-            "worker is still starting or its heartbeat is fresh",
-        )
-        return
-    except ForceStopExpired:
-        await _error(
-            req,
-            "expired",
-            "force-stop arrived after its deadline",
-        )
-        return
-    except Exception as exc:
-        logger.exception("sts.session.%s failed", action)
-        await _error(req, f"{action}_failed", str(exc))
-        return
-
-    await req.reply(
-        StsSessionControlResultEnvelope.wrap(
-            result,
-            type=reply_type,
-            source="sts",
-            session_id=result.session_id,
-        )
-    )
-
-
-async def _error(req: IncomingRequest, code: str, message: str) -> None:
-    await req.reply(
-        RpcErrorEnvelope.wrap(
-            RpcError(code=code, message=message),
-            type=STS_ERROR,
-            source="sts",
-            session_id=req.envelope.session_id,
-        )
-    )
+    """``sts.session.fail`` — served on the session's own subject in IF-04."""
+    del req, instance
+    raise NotImplementedError(_IF)

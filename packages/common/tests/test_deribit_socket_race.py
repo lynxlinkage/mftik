@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from deribit_stub import FakeDeribit
 from mftik.exchange.deribit import channels as ch
 from mftik.exchange.deribit.public import DeribitPublicClient
@@ -11,12 +12,19 @@ from mftik.exchange.deribit.rest import DeribitPublicRest
 from mftik.exchange.tickers import UniversalTicker
 from test_deribit_public import BASE, FakeApi, StubSymbols, _wire
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 STRIKES = [60000 + 1000 * i for i in range(11)]
 TICKERS = [
     UniversalTicker.parse(f"Deribit_Option_BTCUSD-261030-{k}-C") for k in STRIKES
 ]
 
 
+@pytest.mark.real_sleep(
+    reason="WireLedger still sleeps on the wall clock"
+)
 async def test_eleven_feeds_attaching_at_once_open_one_socket(
     deribit_public: FakeDeribit,
 ) -> None:
@@ -46,6 +54,9 @@ async def test_eleven_feeds_attaching_at_once_open_one_socket(
     assert reconnects == 0
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_subscribes_during_a_reconnect_wait_for_the_read_loop(
     deribit_public: FakeDeribit,
 ) -> None:

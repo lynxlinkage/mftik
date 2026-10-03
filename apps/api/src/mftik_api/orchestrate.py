@@ -1,54 +1,120 @@
-"""Deploy orchestrator — API sequences STS then MD then TD."""
+"""API start / end (IF-13, §8.1, F12, F38).
+
+The synchronous create → MD attach → TD attach sequence and its rollback
+(``_detach_md``, ``_fail_sts``) are gone (RM-08). :func:`start` validates,
+writes the session spec, registers intents, and asks STS to accept. A
+refusal before that accept marks the row failed and releases the intents
+(§8.1). :func:`end` asks a session that was accepted to stop, and then
+releases intents.
+
+**State authority (§3.3).**
+
+* The session spec — strategy, parameters, ``restart``, the submitted
+  document — is this module's. It is written with
+  :meth:`StsSessionRepository.create_live`. ``restart`` defaults to
+  ``never`` there (F11).
+* Session status after an accept — phase, conditions, incarnation,
+  ``restart_count``, the failure reason — is the STS controller's.
+  ``create_live`` stores ``live``, the column's historical insert.
+  A refusal before the accept is this module's to record: the
+  supervisor never received the session, and a ``live`` row would
+  have no one to clear it. The accept body says ``starting``.
+  Progress on that body is null: the ingress has not reported a hook.
+* MD and TD intent rows are written here at start, and by the STS
+  controller when it heals. :meth:`IntentRepository.release` sets
+  ``released_at`` and does not delete (F38). A session that exits on
+  its own is released by the B5 STS orchestrator. §8.2 rule 3
+  (B3-04) reclaims from the liveness report as the fallback. This
+  module does not.
+* ``strategy_digest`` and ``env_generation`` are columns (IF-16,
+  migration ``0036``). :func:`resolve_start_pins` reads this process's
+  registry and env stamp at start and :meth:`create_live` stores the
+  pair. A built-in name does not match a qualified registry key.
+  :class:`StsCreateSessionRequest` does not carry either field.
+
+**Invariants.**
+
+* **F12** After the accept (HTTP 202), a failure is the supervisor's
+  to record (§5.2). This module does not roll that back. A refusal
+  before the accept is §8.1: the rollback of a start that was not
+  accepted.   :func:`start` best-effort sends ``sts.session.end`` when
+  the start reply is an unclear timeout or the accept is cancelled
+  while that call is in flight, best-effort deletes the
+  intents it already put, then ``mark_failed`` and ``release``. The
+  row stays. It is ``failed``, with a reason, so registry delete and
+  the board do not treat it as running. A cancel is shielded so the
+  rollback itself is not cancelled, then raised again (#314).
+* **P-1** Intent puts are idempotent. The repository replaces the set.
+  It does not refcount.
+* **§8.1** End is ``sts.session.end``, then ``md.intent.delete`` and
+  ``td.intent.delete``. The subject of the first call is
+  :func:`end_subject` — ``sts.{instance}`` for the owner instance
+  (B4-02, issue #298) — and nowhere else.
+* A reply is checked with :func:`mftik.protocol.reject_if_pv_mismatch`
+  on the raw frame before it is parsed (F26, B4-01). ``Broker.request``
+  parses first and does not (issue #282), so this module reads the
+  frame from the transport.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
+from collections.abc import Sequence
 from typing import Any
 
 from mftik.broker import Broker
-from mftik.broker.errors import RequestTimeoutError
+from mftik.broker.errors import NoRespondersError, RequestTimeoutError
 from mftik.protocol import (
     ANY_INSTANCE,
-    MD_SESSION_ATTACH,
-    MD_SESSION_DETACH,
-    STS_SESSION_CREATE,
-    STS_SESSION_FAIL,
-    TD_SESSION_ATTACH,
+    MD_ERROR,
+    MD_INTENT_DELETE,
+    MD_INTENT_PUT,
+    ON_STOP_TIMEOUT_S,
+    STS_ERROR,
+    STS_SESSION_END,
+    STS_SESSION_START,
+    TD_ERROR,
+    TD_INTENT_DELETE,
+    TD_INTENT_PUT,
     Envelope,
     HealthCheck,
-    MdAttachRequest,
-    MdAttachRequestEnvelope,
-    MdAttachResult,
-    MdDetachRequest,
-    MdDetachRequestEnvelope,
+    IntentOwner,
+    MdIntentDelete,
+    MdIntentDeleteResult,
+    MdIntentPut,
+    MdIntentPutResult,
+    RpcError,
+    StrategySpec,
     StsCreateSessionRequest,
-    StsCreateSessionRequestEnvelope,
     StsCreateSessionResult,
-    StsSessionControlRequest,
-    StsSessionControlRequestEnvelope,
-    StsSessionControlResult,
+    StsSessionEndRequest,
+    StsSessionEndResult,
     TdAccountRef,
-    TdAttachRequest,
-    TdAttachRequestEnvelope,
-    TdAttachResult,
+    TdIntentDelete,
+    TdIntentDeleteResult,
+    TdIntentPut,
+    TdIntentPutResult,
     Topics,
-    load_md,
-    md_feeds_of,
-    md_instances_of,
-    publish_md_log,
-    publish_sts_log,
+    dump_td,
+    load_td,
+    reject_if_pv_mismatch,
     td_api_ids_of,
 )
-from mftik_db.models.session import SessionDomain, SessionStatus
+from mftik_db.models.session import SessionDomain
 from mftik_db.repositories import (
+    AccountRepository,
     ApiRepository,
     InstanceRepository,
+    IntentRepository,
     StsSessionRepository,
 )
 from mftik_db.session import session_scope
+from pydantic import BaseModel, ValidationError
 
-from mftik_api.broker_rpc import DomainRpcError, request_domain
+from mftik_api.broker_rpc import DomainRpcError
+from mftik_api.schemas import DeployResponse
 
 logger = logging.getLogger(__name__)
 
@@ -65,258 +131,6 @@ async def mint_session_id() -> str:
             if await StsSessionRepository(db).get_by_session_id(session_id) is None:
                 return session_id
     raise RuntimeError("could not mint a free session_id")
-
-
-async def deploy_strategy(
-    broker: Broker,
-    *,
-    strategy_id: str,
-    td: dict[str, TdAccountRef] | None = None,
-    md: dict[str, list[str]] | list[str] | None = None,
-    st_paras: dict[str, Any] | None = None,
-    created_by: int,
-    timeout: float = 30.0,
-    restart: str = "always",
-    strategy_type: str | None = None,
-    yaml_text: str | None = None,
-    instance: str | None = None,
-) -> dict[str, Any]:
-    """Mint session_id, create STS, attach MD then each TD api_id. Fail-closed."""
-    session_id = await mint_session_id()
-    td = dict(td or {})
-    md = load_md(md)
-    st_paras = dict(st_paras or {})
-    attached_td: list[dict[str, Any]] = []
-    attached_md: dict[str, Any] | None = None
-
-    async def sts_log(message: str, *, level: str = "info") -> None:
-        await publish_sts_log(
-            broker,
-            session_id,
-            message,
-            source="api",
-            level=level,
-            type=strategy_type,
-        )
-
-    await sts_log(f"deploy start strategy={strategy_id} td={td} md={md}")
-
-    try:
-        target = await _sts_target(instance, td)
-        await _check_sts_instance(broker, target)
-    except DomainRpcError as exc:
-        await sts_log(
-            f"STS instance check failed: {exc.message}", level="error"
-        )
-        raise
-
-    try:
-        sts = await request_domain(
-            broker,
-            Topics.sts(target),
-            StsCreateSessionRequestEnvelope.wrap(
-                StsCreateSessionRequest(
-                    session_id=session_id,
-                    created_by=created_by,
-                    strategy=strategy_id,
-                    td=td,
-                    md=md,
-                    st_paras=st_paras,
-                    restart=restart,
-                    type=strategy_type,
-                    yaml_text=yaml_text,
-                    instance=instance,
-                ),
-                type=STS_SESSION_CREATE,
-                source="api",
-                session_id=session_id,
-            ),
-            result_type=StsCreateSessionResult,
-            timeout=10.0,
-        )
-        await sts_log(f"STS created strategy={sts.strategy}")
-    except DomainRpcError as exc:
-        await sts_log(f"STS create failed: {exc.message}", level="error")
-        raise
-
-    if sts.status != SessionStatus.LIVE.value:
-        # The strategy read its configuration and refused it. Stop here rather
-        # than attaching feeds to a session that no longer exists: MD would
-        # wait out its whole timeout for a lease heartbeat from a stopped
-        # session, and the operator would be handed that timeout instead of
-        # the sentence the strategy wrote explaining what is wrong.
-        reason = sts.reason or f"session ended during start ({sts.status})"
-        logger.error(
-            "STS session ended during start — not attaching session=%s: %s",
-            session_id,
-            reason,
-        )
-        await sts_log(
-            f"strategy refused this configuration: {reason}", level="error"
-        )
-        raise DomainRpcError("strategy_refused", reason)
-
-    # Resolved before anything is asked to do anything (PI-2). Two checks,
-    # and the two failures are different sentences because they are different
-    # problems: a name nothing declared is a typo to fix in the document, and
-    # a declared name that does not answer is a machine to go and look at.
-    # Neither waits or retries — the node does not make an instance exist.
-    try:
-        await _check_md_instances(broker, md)
-    except DomainRpcError as exc:
-        await sts_log(f"MD instance check failed: {exc.message}", level="error")
-        await _fail_sts(broker, session_id, f"deploy refused: {exc.message}")
-        raise
-
-    attached_instances: list[str] = []
-    try:
-        for instance in md_instances_of(md):
-            feeds = md.get(instance) or []
-            if not feeds:
-                continue
-            where = "any md" if instance == ANY_INSTANCE else instance
-            await sts_log(f"MD attach starting {where} feeds={feeds}")
-            for venue in _md_venues(feeds):
-                await publish_md_log(
-                    broker,
-                    venue,
-                    f"attach starting sts={session_id} feeds={feeds}",
-                    source="api",
-                    instance=(
-                        None if instance == ANY_INSTANCE else instance
-                    ),
-                )
-            md_result = await request_domain(
-                broker,
-                Topics.MD if instance == ANY_INSTANCE else Topics.md(instance),
-                MdAttachRequestEnvelope.wrap(
-                    MdAttachRequest(
-                        session_id=session_id,
-                        created_by=created_by,
-                        subscriptions=feeds,
-                        timeout=timeout,
-                    ),
-                    type=MD_SESSION_ATTACH,
-                    source="api",
-                    session_id=session_id,
-                ),
-                result_type=MdAttachResult,
-                timeout=timeout + 5.0,
-            )
-            attached_instances.append(instance)
-            if attached_md is None:
-                attached_md = {"subscriptions": [], "refcounts": {}}
-            attached_md["subscriptions"].extend(md_result.subscriptions)
-            attached_md["refcounts"].update(md_result.refcounts)
-            await sts_log(
-                f"MD attached {where} feeds={md_result.subscriptions}"
-            )
-            for venue in _md_venues(md_result.subscriptions):
-                await publish_md_log(
-                    broker,
-                    venue,
-                    (
-                        f"attach complete sts={session_id} "
-                        f"feeds={md_result.subscriptions}"
-                    ),
-                    source="api",
-                    instance=(
-                        None if instance == ANY_INSTANCE else instance
-                    ),
-                )
-
-        for name, ref in td.items():
-            instance = await _td_instance(ref.api_id)
-            await sts_log(
-                f"TD attach starting {name} api_id={ref.api_id} "
-                f"instance={instance}"
-            )
-            result = await request_domain(
-                broker,
-                Topics.td(instance),
-                TdAttachRequestEnvelope.wrap(
-                    TdAttachRequest(
-                        api_id=ref.api_id,
-                        session_id=session_id,
-                        created_by=created_by,
-                        timeout=timeout,
-                    ),
-                    type=TD_SESSION_ATTACH,
-                    source="api",
-                    session_id=session_id,
-                ),
-                result_type=TdAttachResult,
-                timeout=timeout + 5.0,
-            )
-            attached_td.append(
-                {
-                    "api_id": result.api_id,
-                    "refcount": result.refcount,
-                }
-            )
-            await sts_log(
-                f"TD attached api_id={result.api_id} refcount={result.refcount}"
-            )
-    except Exception as exc:
-        if isinstance(exc, DomainRpcError):
-            logger.error(
-                "MD/TD attach failed — rolling back STS session=%s: %s",
-                session_id,
-                exc,
-            )
-        else:
-            logger.exception(
-                "MD/TD attach failed — rolling back STS session=%s", session_id
-            )
-        await sts_log(
-            f"attach failed — rolling back STS: {exc}", level="error"
-        )
-        # New with the fan-out: an attach that fails on the third instance
-        # leaves two live, and failing STS alone would leave them pumping
-        # feeds for a session that no longer exists until a reaper noticed —
-        # two scans and up to a minute later.
-        await _detach_md(broker, session_id, attached_instances, sts_log)
-        fail_reason = f"attach failed — rolled back during deploy: {exc}"
-        try:
-            await request_domain(
-                broker,
-                # The session exists by now — the create returned — so the
-                # process holding it is the only one that can fail it.
-                Topics.sts_control(session_id),
-                StsSessionControlRequestEnvelope.wrap(
-                    StsSessionControlRequest(
-                        session_id=session_id, reason=fail_reason
-                    ),
-                    type=STS_SESSION_FAIL,
-                    source="api",
-                    session_id=session_id,
-                ),
-                result_type=StsSessionControlResult,
-                timeout=10.0,
-            )
-            await sts_log("STS failed after rollback", level="warning")
-        except Exception:
-            logger.exception("rollback STS fail failed session=%s", session_id)
-        raise
-
-    # ``md_feeds_of``, not ``list(md)``: the argument is a mapping now, and
-    # iterating one yields the instance names. Reached whenever nothing was
-    # attached — a document naming an instance with an empty feed list, say.
-    md_out = (
-        list(attached_md["subscriptions"])
-        if attached_md is not None
-        else md_feeds_of(md)
-    )
-    await sts_log(
-        f"deploy complete strategy={sts.strategy} td={attached_td} md={md_out}"
-    )
-    return {
-        "session_id": session_id,
-        "strategy": sts.strategy,
-        "td": attached_td,
-        "md": md_out,
-        "status": "live",
-    }
 
 
 async def _check_md_instances(
@@ -443,65 +257,6 @@ async def _answers(
     return True
 
 
-async def _detach_md(
-    broker: Broker,
-    session_id: str,
-    instances: list[str],
-    log: Any,
-) -> None:
-    """Unwind the attaches that did land, before failing the session."""
-    for instance in instances:
-        try:
-            await broker.request(
-                Topics.MD if instance == ANY_INSTANCE else Topics.md(instance),
-                MdDetachRequestEnvelope.wrap(
-                    MdDetachRequest(
-                        session_id=session_id, reason="deploy_rollback"
-                    ),
-                    type=MD_SESSION_DETACH,
-                    source="api",
-                    session_id=session_id,
-                ),
-                timeout=1.5,
-            )
-        except Exception:
-            # The lease covers this: MD tears the attach down when this
-            # session's heartbeat stops, which failing it is about to do.
-            logger.warning(
-                "MD rollback detach failed instance=%s session=%s",
-                instance,
-                session_id,
-                exc_info=True,
-            )
-            continue
-        await log(f"rolled back MD attach on {instance}", level="warning")
-
-
-async def _fail_sts(broker: Broker, session_id: str, reason: str) -> None:
-    """End a session that was created and can no longer be attached.
-
-    Addressed to the session rather than the plane: it exists by the time this
-    runs, so only the process holding it can end it — and on a node with two
-    STS the shared subject would let the other one answer ``not_found`` for a
-    session that is very much running.
-    """
-    try:
-        await request_domain(
-            broker,
-            Topics.sts_control(session_id),
-            StsSessionControlRequestEnvelope.wrap(
-                StsSessionControlRequest(session_id=session_id, reason=reason),
-                type=STS_SESSION_FAIL,
-                source="api",
-                session_id=session_id,
-            ),
-            result_type=StsSessionControlResult,
-            timeout=10.0,
-        )
-    except Exception:
-        logger.exception("rollback STS fail failed session=%s", session_id)
-
-
 async def _td_instance(api_id: int) -> str:
     """Which TD may use this credential.
 
@@ -536,3 +291,774 @@ def _md_venues(feeds: list[str]) -> set[str]:
             continue
         venues.add(ticker.venue)
     return venues
+
+
+#: How long the accept RPCs wait. This is not ``on_start`` and it is not
+#: the old 10 second create (F12, #132). A plane with no subscriber
+#: fails at once; this bound is only the case where someone accepted
+#: the subject and did not answer.
+_ACCEPT_TIMEOUT_S = 5.0
+
+#: How long ``sts.session.end`` may take. The controller waits for the
+#: worker's ``on_stop`` and up to ``SESSION_STOP_GRACE_S`` before it
+#: replies, so :data:`_ACCEPT_TIMEOUT_S` alone times out a stop that
+#: succeeds on the controller. ``SESSION_STOP_GRACE_S`` is
+#: :data:`ON_STOP_TIMEOUT_S`; this sum stays above that grace and under
+#: the CLI's 30s HTTP timeout.
+#: Default; adjust from measurement (Appendix D).
+_END_TIMEOUT_S = ON_STOP_TIMEOUT_S + _ACCEPT_TIMEOUT_S
+
+_ERROR_TYPES = frozenset({STS_ERROR, TD_ERROR, MD_ERROR})
+
+#: One MD declaration: instance, feed keys, select blocks.
+_MdDecl = tuple[str, list[str], list[Any]]
+
+
+class _AcceptSent:
+    """Which accept RPCs were handed to the transport.
+
+    Recorded before the reply, so a timeout still counts as sent.
+    """
+
+    def __init__(self) -> None:
+        self.td: list[tuple[str, list[int]]] = []
+        self.md: list[str] = []
+        self.start: bool = False
+
+
+def end_subject(instance: str) -> str:
+    """Subject :func:`end` publishes :data:`STS_SESSION_END` on.
+
+    The controller's subject, :meth:`~mftik.protocol.Topics.sts`, for
+    the STS instance that owns the session (B4-02, issue #298). The
+    worker's ``sts.ctl.{session_id}`` is not this. Nothing else in this
+    module names the subject.
+    """
+    return Topics.sts(instance)
+
+
+def _md_declarations(spec: StrategySpec) -> list[_MdDecl]:
+    """Instances that have a feed or a selector, in document order."""
+    names = list(dict.fromkeys([*spec.md.keys(), *spec.md_select.keys()]))
+    out: list[_MdDecl] = []
+    for name in names:
+        feeds = list(spec.md.get(name, []))
+        selects = list(spec.md_select.get(name, []))
+        if not feeds and not selects:
+            continue
+        out.append((name, feeds, selects))
+    return out
+
+
+def _md_probe(declarations: Sequence[_MdDecl]) -> dict[str, list[str]]:
+    """Feed lists :func:`_check_md_instances` will not treat as absent.
+
+    An empty list means "this name pinned nothing", so a select-only
+    instance would skip the declared-and-answering check. The
+    placeholder is not stored and not sent.
+    """
+    probed: dict[str, list[str]] = {}
+    for name, feeds, _selects in declarations:
+        probed[name] = list(feeds) if feeds else ["*"]
+    return probed
+
+
+def _md_subject(instance: str) -> str:
+    if instance == ANY_INSTANCE:
+        return Topics.MD
+    return Topics.md(instance)
+
+
+async def _resolve_td(spec: StrategySpec) -> dict[str, TdAccountRef]:
+    """Account name → ``api_id``. A name with no row is ``unknown_api``."""
+    if not spec.td:
+        return {}
+    async with session_scope() as db:
+        repo = AccountRepository(db)
+        out: dict[str, TdAccountRef] = {}
+        for name, settings in spec.td.items():
+            account = await repo.get_by_name(name)
+            if account is None or account.api is None:
+                raise DomainRpcError(
+                    "unknown_api",
+                    f"unknown td account name: {name!r}",
+                )
+            out[name] = TdAccountRef(api_id=account.api_id, settings=settings)
+        return out
+
+
+async def _td_by_instance(
+    td: dict[str, TdAccountRef],
+) -> dict[str, list[int]]:
+    """``api_id``s grouped by the TD instance :func:`_td_instance` names.
+
+    One credential, one instance. Two accounts on the same TD share one
+    ``td.intent.put``.
+    """
+    groups: dict[str, list[int]] = {}
+    seen: set[int] = set()
+    for ref in td.values():
+        if ref.api_id in seen:
+            continue
+        seen.add(ref.api_id)
+        name = await _td_instance(ref.api_id)
+        groups.setdefault(name, []).append(ref.api_id)
+    return groups
+
+
+async def _request_v2[T: BaseModel](
+    broker: Broker,
+    subject: str,
+    envelope: Envelope[Any],
+    *,
+    result_type: type[T],
+    timeout: float = _ACCEPT_TIMEOUT_S,
+) -> T:
+    """Request, then refuse a reply whose ``pv`` is not ours (F26).
+
+    The raw frame is what :func:`reject_if_pv_mismatch` reads. Parsing
+    first would fill in a missing ``pv`` and hide the mismatch
+    (issue #282). The transport is the only place that frame is still
+    a string.
+    """
+    inbox = broker.transport.reply_inbox(envelope.id)
+    if inbox is not None and envelope.reply_to != inbox:
+        envelope = envelope.model_copy(update={"reply_to": inbox})
+    try:
+        raw = await broker.transport.request(
+            subject,
+            envelope.to_json(),
+            request_id=envelope.id,
+            inbox=envelope.reply_to,
+            timeout=timeout,
+        )
+    except NoRespondersError as exc:
+        raise DomainRpcError("timeout", str(exc), no_responders=True) from exc
+    except RequestTimeoutError as exc:
+        raise DomainRpcError("timeout", str(exc)) from exc
+
+    try:
+        mismatch = reject_if_pv_mismatch(raw)
+    except ValueError as exc:
+        raise DomainRpcError("bad_reply", "reply is not a JSON object") from exc
+    if mismatch is not None:
+        raise DomainRpcError(mismatch.code, mismatch.message)
+
+    reply = Envelope[dict[str, Any]].from_json(raw)
+    if reply.type in _ERROR_TYPES:
+        try:
+            err = RpcError.model_validate(reply.payload)
+        except ValidationError as exc:
+            raise DomainRpcError(
+                "bad_reply", "error reply payload did not match"
+            ) from exc
+        raise DomainRpcError(err.code, err.message)
+    try:
+        return result_type.model_validate(reply.payload)
+    except ValidationError as exc:
+        raise DomainRpcError(
+            "bad_reply", "reply payload did not match"
+        ) from exc
+
+
+def resolve_start_pins(strategy_type: str) -> tuple[str | None, int | None]:
+    """The digest and env generation to store on a new session row.
+
+    The digest is the registry record whose ``origin::type`` equals
+    ``strategy_type``. A built-in name such as ``NoopStrategy`` does
+    not match ``private::NoopStrategy``. No stamp file means no
+    generation pin, including when generation 0 would otherwise be
+    implied. A stamp that exists pins its generation, ``0`` included,
+    and unions that generation into ``pinned-generations.json`` so a
+    later commit does not drop it.
+    """
+    from mftik.environment import NodeEnv
+    from mftik.registry import RegistryStore, qualify
+
+    digest: str | None = None
+    store = RegistryStore.from_env()
+    if store.registry_dir.is_dir():
+        for rec in store.list_all():
+            if qualify(rec.origin, rec.type) == strategy_type:
+                digest = rec.digest
+                break
+    env = NodeEnv.from_env()
+    if not env.stamp_path.is_file():
+        return digest, None
+    generation = env.read_stamp().generation
+    pinned = set(env.read_pinned_generations())
+    pinned.add(generation)
+    env.write_pinned_generations(pinned)
+    return digest, generation
+
+
+async def _persist_start(
+    spec: StrategySpec,
+    *,
+    session_id: str,
+    created_by: int,
+    strategy_type: str,
+    yaml_text: str,
+    instance: str | None,
+    td: dict[str, TdAccountRef],
+    target: str,
+    declarations: Sequence[_MdDecl],
+) -> None:
+    """Write the spec and the intent rows. One transaction. No RPC."""
+    owner = IntentOwner(sts_instance=target, session_id=session_id)
+    strategy_digest, env_generation = resolve_start_pins(strategy_type)
+    async with session_scope() as db:
+        await StsSessionRepository(db).create_live(
+            session_id=session_id,
+            created_by=created_by,
+            type=strategy_type,
+            yaml_text=yaml_text,
+            td=dump_td(td),
+            md_ids=dict(spec.md),
+            st_paras=dict(spec.sts),
+            restart=spec.restart,
+            instance=target,
+            strategy_digest=strategy_digest,
+            env_generation=env_generation,
+        )
+        repo = IntentRepository(db)
+        api_ids = td_api_ids_of(td)
+        if api_ids:
+            await repo.put(
+                TdIntentPut(
+                    session_id=session_id,
+                    owner=owner,
+                    api_ids=api_ids,
+                )
+            )
+        for name, feeds, selects in declarations:
+            await repo.put(
+                MdIntentPut(
+                    session_id=session_id,
+                    owner=owner,
+                    feeds={name: feeds},
+                    selects=selects,
+                )
+            )
+
+
+async def _publish_start(
+    broker: Broker,
+    *,
+    session_id: str,
+    created_by: int,
+    strategy_type: str,
+    yaml_text: str,
+    instance: str | None,
+    td: dict[str, TdAccountRef],
+    target: str,
+    td_groups: dict[str, list[int]],
+    declarations: Sequence[_MdDecl],
+    spec: StrategySpec,
+    sent: _AcceptSent,
+) -> None:
+    """``td.intent.put``, ``md.intent.put``, then ``sts.session.start``.
+
+    The rows are already committed. ``sent`` records each call before
+    it is made, so a refusal knows which planes were asked. Atom maps
+    on the MD reply are MD's to store; this does not write ``atoms``.
+    """
+    owner = IntentOwner(sts_instance=target, session_id=session_id)
+    for td_instance, api_ids in td_groups.items():
+        sent.td.append((td_instance, list(api_ids)))
+        await _request_v2(
+            broker,
+            Topics.td(td_instance),
+            Envelope[TdIntentPut].wrap(
+                TdIntentPut(
+                    session_id=session_id,
+                    owner=owner,
+                    api_ids=api_ids,
+                ),
+                type=TD_INTENT_PUT,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=TdIntentPutResult,
+        )
+    for name, feeds, selects in declarations:
+        sent.md.append(name)
+        await _request_v2(
+            broker,
+            _md_subject(name),
+            Envelope[MdIntentPut].wrap(
+                MdIntentPut(
+                    session_id=session_id,
+                    owner=owner,
+                    feeds={name: list(feeds)},
+                    selects=list(selects),
+                ),
+                type=MD_INTENT_PUT,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=MdIntentPutResult,
+        )
+    sent.start = True
+    await _request_v2(
+        broker,
+        Topics.sts(target),
+        Envelope[StsCreateSessionRequest].wrap(
+            StsCreateSessionRequest(
+                session_id=session_id,
+                created_by=created_by,
+                strategy=strategy_type,
+                td=td,
+                md=dict(spec.md),
+                st_paras=dict(spec.sts),
+                restart=spec.restart,
+                type=strategy_type,
+                yaml_text=yaml_text,
+                instance=instance,
+            ),
+            type=STS_SESSION_START,
+            source="api",
+            session_id=session_id,
+        ),
+        result_type=StsCreateSessionResult,
+    )
+
+
+def _refused_reason(exc: DomainRpcError) -> str:
+    return f"start not accepted: {exc.code}: {exc.message}"
+
+
+async def _best_effort_v2(
+    broker: Broker,
+    subject: str,
+    envelope: Envelope[Any],
+    *,
+    result_type: type[BaseModel],
+    session_id: str,
+) -> None:
+    """One abandon notify. A failure is logged and does not propagate."""
+    try:
+        await _request_v2(
+            broker, subject, envelope, result_type=result_type
+        )
+    except DomainRpcError as exc:
+        logger.error(
+            "unaccepted start notify failed session=%s subject=%s: %s",
+            session_id,
+            subject,
+            exc,
+        )
+
+
+async def _abandon_unaccepted(
+    broker: Broker,
+    *,
+    session_id: str,
+    target: str,
+    sent: _AcceptSent,
+    exc: DomainRpcError,
+) -> None:
+    """§8.1 rollback of a start the planes did not accept.
+
+    An unclear ``sts.session.start`` — timed out, and somebody was
+    subscribed — may have created a worker. That case sends
+    ``sts.session.end`` on :func:`end_subject` of the STS the start was
+    sent to. A ``no_responders`` miss and any definite refusal do not:
+    nothing accepted the start. Deletes go only to instances whose put
+    was sent, MD then TD, the same order as :func:`end`.
+
+    The row is then ``failed`` and every intent is released. Neither
+    is deleted.
+    """
+    reason = _refused_reason(exc)
+    owner = IntentOwner(sts_instance=target, session_id=session_id)
+    # A timeout with a subscriber, or a cancel while the start was in
+    # flight, may already have created a worker. A miss and a definite
+    # refusal have not.
+    unclear = sent.start and (
+        exc.code == "cancelled"
+        or (exc.code == "timeout" and not exc.no_responders)
+    )
+    if unclear:
+        await _best_effort_v2(
+            broker,
+            end_subject(target),
+            Envelope[StsSessionEndRequest].wrap(
+                StsSessionEndRequest(session_id=session_id, reason=reason),
+                type=STS_SESSION_END,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=StsSessionEndResult,
+            session_id=session_id,
+        )
+    for md_instance in sent.md:
+        await _best_effort_v2(
+            broker,
+            _md_subject(md_instance),
+            Envelope[MdIntentDelete].wrap(
+                MdIntentDelete(
+                    session_id=session_id,
+                    owner=owner,
+                    reason=reason,
+                ),
+                type=MD_INTENT_DELETE,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=MdIntentDeleteResult,
+            session_id=session_id,
+        )
+    for td_instance, api_ids in sent.td:
+        await _best_effort_v2(
+            broker,
+            Topics.td(td_instance),
+            Envelope[TdIntentDelete].wrap(
+                TdIntentDelete(
+                    session_id=session_id,
+                    owner=owner,
+                    api_ids=api_ids,
+                    reason=reason,
+                ),
+                type=TD_INTENT_DELETE,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=TdIntentDeleteResult,
+            session_id=session_id,
+        )
+    async with session_scope() as db:
+        await StsSessionRepository(db).mark_failed(session_id, reason)
+        await IntentRepository(db).release(session_id)
+
+
+async def _abandon_recorded(
+    broker: Broker,
+    *,
+    session_id: str,
+    target: str,
+    sent: _AcceptSent,
+    exc: DomainRpcError,
+    shield: bool = False,
+) -> None:
+    """Run :func:`_abandon_unaccepted` and log if that record fails.
+
+    ``shield`` is the cancel path. The task is already cancelled, so a
+    bare await would raise again before the row was marked failed.
+    Uncancelling for the cleanup and restoring the request afterwards
+    is what lets the rollback finish and the cancel still propagate.
+    """
+    task = asyncio.current_task()
+    count = task.cancelling() if shield and task is not None else 0
+    if task is not None and count:
+        while task.cancelling():
+            task.uncancel()
+    try:
+        try:
+            rollback = _abandon_unaccepted(
+                broker,
+                session_id=session_id,
+                target=target,
+                sent=sent,
+                exc=exc,
+            )
+            if shield:
+                await asyncio.shield(rollback)
+            else:
+                await rollback
+        except Exception:
+            logger.exception(
+                "refused start was not fully recorded session=%s",
+                session_id,
+            )
+    finally:
+        if task is not None:
+            for _ in range(count):
+                task.cancel()
+
+
+async def start(
+    spec: StrategySpec,
+    *,
+    broker: Broker,
+    strategy_type: str,
+    yaml_text: str,
+    created_by: int,
+    instance: str | None = None,
+) -> DeployResponse:
+    """Accept a deploy and return before the session is running (§8.1).
+
+    The body is HTTP 202: ``session_id`` and ``status="starting"``.
+    ``progress`` is null. ``td`` and ``md`` are empty — the accept does
+    not wait for attach results.
+
+    Validation (the document is already parsed) resolves account names
+    to ``api_id``, resolves the STS and MD instances, and reuses
+    :func:`_sts_target`, :func:`_check_sts_instance`,
+    :func:`_check_md_instances` and :func:`_td_instance`. It does not
+    dry-run feeds into atoms or check MD capacity. Those need the atom
+    adapters (B7, B8), which are not this ticket. Nothing is written
+    until the checks pass.
+
+    The spec row is :meth:`StsSessionRepository.create_live`. Its
+    ``instance`` is the STS the start is sent to: the name the deploy
+    asked for, or the derived target when the deploy named none. That
+    name is also the owner on the intent messages. The start request
+    still carries the name the deploy asked for.
+    ``strategy_digest`` and ``env_generation`` are written here from
+    this process's registry and env stamp.
+    :class:`StsCreateSessionRequest` does not carry them.
+
+    A plane that refuses the accept does not leave a ``live`` row.
+    :func:`_abandon_unaccepted` notifies what was already sent, marks
+    the row failed, releases the intents, and the original
+    :class:`DomainRpcError` is raised again. The HTTP mapping is that
+    error's.
+    """
+    if not isinstance(spec, StrategySpec):
+        raise TypeError("spec must be a StrategySpec")
+    td = await _resolve_td(spec)
+    target = await _sts_target(instance, td)
+    await _check_sts_instance(broker, target)
+    declarations = _md_declarations(spec)
+    await _check_md_instances(broker, _md_probe(declarations))
+    td_groups = await _td_by_instance(td)
+
+    session_id = await mint_session_id()
+    await _persist_start(
+        spec,
+        session_id=session_id,
+        created_by=created_by,
+        strategy_type=strategy_type,
+        yaml_text=yaml_text,
+        instance=instance,
+        td=td,
+        target=target,
+        declarations=declarations,
+    )
+    sent = _AcceptSent()
+    try:
+        await _publish_start(
+            broker,
+            session_id=session_id,
+            created_by=created_by,
+            strategy_type=strategy_type,
+            yaml_text=yaml_text,
+            instance=instance,
+            td=td,
+            target=target,
+            td_groups=td_groups,
+            declarations=declarations,
+            spec=spec,
+            sent=sent,
+        )
+    except DomainRpcError as exc:
+        logger.error(
+            "start was not accepted session=%s: %s",
+            session_id,
+            exc,
+        )
+        await _abandon_recorded(
+            broker,
+            session_id=session_id,
+            target=target,
+            sent=sent,
+            exc=exc,
+        )
+        raise
+    except asyncio.CancelledError:
+        # The client hung up before the accept reply (#314). The same
+        # rollback as a refusal, shielded so the cancel does not skip
+        # the failed row. The cancel is raised again.
+        await _abandon_recorded(
+            broker,
+            session_id=session_id,
+            target=target,
+            sent=sent,
+            exc=DomainRpcError(
+                "cancelled",
+                "accept cancelled before the reply",
+            ),
+            shield=True,
+        )
+        raise
+
+    return DeployResponse(
+        session_id=session_id,
+        type=strategy_type,
+        config=dict(spec.sts),
+        status="starting",
+        progress=None,
+    )
+
+
+async def _owner_instance(session_id: str) -> str:
+    """The STS instance :func:`end` addresses. Raises before any send.
+
+    The row's ``instance`` when the deploy named one, otherwise
+    :func:`_sts_target` on the row's accounts — the same derivation the
+    deletes already use. A missing row, or a row that still cannot name
+    an instance, raises and the caller does not release.
+    """
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        asked = None if row is None else row.instance
+        td_map = load_td(row.td) if row is not None else {}
+    if row is None:
+        raise DomainRpcError(
+            "not_found",
+            f"session {session_id} does not exist",
+        )
+    owner = asked
+    if owner is None and td_map:
+        owner = await _sts_target(None, td_map)
+    if owner is None:
+        raise DomainRpcError(
+            "sts_unpinned_ambiguous",
+            "this session does not name an STS instance and its accounts "
+            "do not derive to exactly one enabled STS",
+        )
+    return owner
+
+
+async def end(
+    session_id: str, reason: str, *, broker: Broker
+) -> StsSessionEndResult:
+    """Stop a session, then release its intents (§8.1).
+
+    The first call is :data:`STS_SESSION_END` on :func:`end_subject` of
+    the owner instance: the row's ``instance`` when it is set, otherwise
+    :func:`_sts_target` on the row's accounts. That is computed before
+    the send. An owner that cannot be named raises
+    :class:`~mftik_api.broker_rpc.DomainRpcError` and does not send and
+    does not release. Only a successful reply releases rows. Release
+    sets ``released_at`` and does not delete (F38). The MD and TD
+    deletes are the same fact told to those planes; a notify that fails
+    is not undone.
+
+    The end request waits :data:`_END_TIMEOUT_S`, not the accept budget.
+    The controller does not reply until the worker has exited or the
+    stop grace has run out.
+
+    Returns the controller's :class:`StsSessionEndResult`. The terminal
+    status on that reply is what the stop route answers with.
+
+    There is no spec column for desired ``stopped``. An ``end`` whose
+    reply never comes is an error for the caller to retry. This
+    function does not add a column, and it does not write the derived
+    owner back onto the row (issue #328).
+
+    A session that exits on its own does not pass through here. The
+    B5 STS orchestrator writes ``released_at`` for that exit. §8.2
+    rule 3 (B3-04) reclaims an owner from the liveness report as the
+    fallback.
+
+    A create stores the resolved STS on the row. An older row can
+    still be null. The owner used for the deletes is that column when
+    it is set, and otherwise :func:`_sts_target` on the row's accounts.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a str")
+
+    owner_instance = await _owner_instance(session_id)
+    result = await _request_v2(
+        broker,
+        end_subject(owner_instance),
+        Envelope[StsSessionEndRequest].wrap(
+            StsSessionEndRequest(session_id=session_id, reason=reason),
+            type=STS_SESSION_END,
+            source="api",
+            session_id=session_id,
+        ),
+        result_type=StsSessionEndResult,
+        timeout=_END_TIMEOUT_S,
+    )
+    await release_held_intents(session_id, reason, broker=broker)
+    return result
+
+
+async def release_held_intents(
+    session_id: str, reason: str, *, broker: Broker
+) -> None:
+    """Release intent rows and tell MD and TD. No ``sts.session.end``.
+
+    The stop route calls this for a row whose column is already
+    terminal. After a controller restart that process no longer holds
+    the session and would answer ``unknown_session``, so the end RPC
+    is not sent. Nothing is sent when no intent is still held.
+
+    The same sequence follows a successful :func:`end`.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a str")
+
+    async with session_scope() as db:
+        row = await StsSessionRepository(db).get_by_session_id(session_id)
+        repo = IntentRepository(db)
+        md_instances = [
+            held.instance
+            for held in await repo.md_for(session_id)
+            if held.released_at is None
+        ]
+        td_ids = [
+            held.api_id
+            for held in await repo.td_for(session_id)
+            if held.released_at is None
+        ]
+        asked = None if row is None else row.instance
+        td_map = load_td(row.td) if row is not None else {}
+        await repo.release(session_id)
+
+    owner_instance = asked
+    if owner_instance is None and td_map:
+        owner_instance = await _sts_target(None, td_map)
+    if owner_instance is None:
+        if md_instances or td_ids:
+            logger.error(
+                "end released intents but could not name an STS owner "
+                "to notify session=%s",
+                session_id,
+            )
+        return
+
+    owner = IntentOwner(sts_instance=owner_instance, session_id=session_id)
+    for md_instance in md_instances:
+        await _request_v2(
+            broker,
+            _md_subject(md_instance),
+            Envelope[MdIntentDelete].wrap(
+                MdIntentDelete(
+                    session_id=session_id,
+                    owner=owner,
+                    reason=reason,
+                ),
+                type=MD_INTENT_DELETE,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=MdIntentDeleteResult,
+        )
+    groups: dict[str, list[int]] = {}
+    for api_id in td_ids:
+        groups.setdefault(await _td_instance(api_id), []).append(api_id)
+    for td_instance, api_ids in groups.items():
+        await _request_v2(
+            broker,
+            Topics.td(td_instance),
+            Envelope[TdIntentDelete].wrap(
+                TdIntentDelete(
+                    session_id=session_id,
+                    owner=owner,
+                    api_ids=api_ids,
+                    reason=reason,
+                ),
+                type=TD_INTENT_DELETE,
+                source="api",
+                session_id=session_id,
+            ),
+            result_type=TdIntentDeleteResult,
+        )

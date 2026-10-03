@@ -811,48 +811,68 @@ class HistoryReaderFactory:
     def __init__(self, symbols: SymbolClient) -> None:
         self._symbols = symbols
 
-    async def create(self, venue: str, row: Any) -> TradeHistoryReader:
-        """Build a reader for ``venue`` from an ``apis`` row's credential."""
+    async def create(
+        self, venue: str, row: Any, client: Any = None
+    ) -> TradeHistoryReader:
+        """Build a reader for ``venue`` from an ``apis`` row's credential.
+
+        ``client`` is the account worker's pooled HTTP client. The
+        reader does not close a client it did not open. ``None`` leaves
+        the REST client to open its own, which is the TD-process
+        fallback.
+        """
         if venue == venues.BINANCE.name:
             return BinanceSpotHistoryReader(
                 symbols=self._symbols,
                 rest=BinanceSpotRest(
-                    api_key=row.api_key, api_secret=row.api_secret
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    client=client,
                 ),
             )
         if venue == venues.BINANCE_UM.name:
             return BinanceFutureHistoryReader(
                 symbols=self._symbols,
                 rest=BinanceFutureRest(
-                    api_key=row.api_key, api_secret=row.api_secret
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    client=client,
                 ),
             )
         if venue == venues.BINANCE_CM.name:
             return BinanceDeliveryHistoryReader(
                 symbols=self._symbols,
                 rest=BinanceDeliveryRest(
-                    api_key=row.api_key, api_secret=row.api_secret
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    client=client,
                 ),
             )
         if venue == venues.BYBIT.name:
             return BybitHistoryReader(
                 symbols=self._symbols,
                 rest=BybitRest(
-                    api_key=row.api_key, api_secret=row.api_secret
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    client=client,
                 ),
             )
         if venue == venues.GATE.name:
             return GateSpotHistoryReader(
                 symbols=self._symbols,
                 rest=GateSpotRest(
-                    api_key=row.api_key, api_secret=row.api_secret
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    client=client,
                 ),
             )
         if venue == venues.GATE_FUTURES.name:
             return GateFuturesHistoryReader(
                 symbols=self._symbols,
                 rest=GateFuturesRest(
-                    api_key=row.api_key, api_secret=row.api_secret
+                    api_key=row.api_key,
+                    api_secret=row.api_secret,
+                    client=client,
                 ),
             )
         if venue == venues.OKX.name:
@@ -862,12 +882,15 @@ class HistoryReaderFactory:
                     api_key=row.api_key,
                     api_secret=row.api_secret,
                     passphrase=row.passphrase or "",
+                    client=client,
                 ),
             )
         # Paper lands here, and should: its book is invented tick by tick in
         # another process and there is no venue to re-read it from. A paper
         # account's record is whatever TD caught, and calling it provisional
         # forever is the honest answer rather than a gap to close.
+        # Deribit and Bitget land here too. B6-05 does not add readers
+        # for them; the record stays provisional.
         raise NoHistoryReaderError(
             f"no history reader for venue {venue!r}; its record stays provisional"
         )

@@ -25,6 +25,10 @@ from mftik.protocol import (
 )
 from mftik.strategy.oms import StrategyOms
 
+# B2-05: borrows NATS to test strategy OMS reads. Direct handler call:
+# B6-02 (#220).
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def broker() -> Broker:

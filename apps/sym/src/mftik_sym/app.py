@@ -148,7 +148,7 @@ def main() -> None:
     # policy is what puts the process back, and an exit code is what
     # tells anyone reading ``docker ps`` that SYM did not just stop.
     #
-    # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
+    # ``uvloop.run`` rather than ``asyncio.run`` — docs/archive/EventLoop.md has the
     # measurements. It builds the loop for this one call and leaves the global
     # policy alone, so the loop this process runs is stated here rather than
     # inherited from whatever an import happened to install.

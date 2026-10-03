@@ -3,29 +3,24 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import session_loop
 from mftik.broker import (
     Broker,
     IncomingRequest,
-    LeasedSessionLink,
     RequestTimeoutError,
 )
 from mftik.protocol import (
-    STS_LEASE_HEARTBEAT,
     Envelope,
-    LeaseHeartbeat,
     Topics,
     UntypedEnvelope,
 )
 
-
-@pytest.fixture
-async def broker() -> Broker:
-    async with a_broker() as client:
-        yield client
+pytestmark = [session_loop, pytest.mark.component]
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_pubsub_roundtrip(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -57,7 +52,9 @@ async def test_pubsub_roundtrip(broker: Broker) -> None:
     assert got.id == sent.id
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
     """Late replay left the broker. ``publish_log`` is ``publish``."""
     topic = "log.sts.late"
@@ -87,7 +84,9 @@ async def test_publish_log_is_live_fan_out(broker: Broker) -> None:
     assert got.payload == {"level": "info", "message": "live"}
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_request_reply(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -124,7 +123,9 @@ async def test_request_reply(broker: Broker) -> None:
     }
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_request_timeout(broker: Broker) -> None:
     with pytest.raises(RequestTimeoutError):
         await broker.request(
@@ -134,7 +135,9 @@ async def test_request_timeout(broker: Broker) -> None:
         )
 
 
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_serve_handler(broker: Broker) -> None:
     stop = asyncio.Event()
 
@@ -161,92 +164,9 @@ async def test_serve_handler(broker: Broker) -> None:
     assert response.payload == {"pong": True}
 
 
-@pytest.mark.asyncio
-async def test_leased_link_acks_and_expires(broker: Broker) -> None:
-    stop = asyncio.Event()
-    ready = asyncio.Event()
-    expired = asyncio.Event()
-    acks: list[int] = []
-
-    def ack(hb: LeaseHeartbeat) -> Envelope[dict]:
-        acks.append(hb.token)
-        return Envelope[dict].wrap(
-            {"token": hb.token}, type="lease.ack", source="md"
-        )
-
-    async def on_expired() -> None:
-        expired.set()
-
-    link = LeasedSessionLink(
-        broker,
-        rx="sts.md.e1",
-        tx="md.e1",
-        stop=stop,
-        ready=ready,
-        ack=ack,
-        on_expired=on_expired,
-        watch_interval=0.1,
-        grace=0.4,
-        name="test-lease",
-    )
-    task = asyncio.create_task(link.run())
-    await asyncio.sleep(0.05)
-    await broker.publish(
-        "sts.md.e1",
-        Envelope[LeaseHeartbeat].wrap(
-            LeaseHeartbeat(session_id="e1", token=7, interval=0.1),
-            type=STS_LEASE_HEARTBEAT,
-            source="sts",
-        ),
-    )
-    await asyncio.wait_for(ready.wait(), timeout=2)
-    assert link.last_token == 7
-    await asyncio.wait_for(expired.wait(), timeout=2)
-    stop.set()
-    await asyncio.gather(task, return_exceptions=True)
-    assert acks == [7]
-
-
-@pytest.mark.asyncio
-async def test_leased_link_does_not_expire_before_first_heartbeat(
-    broker: Broker,
-) -> None:
-    """Counting from start would fail every deploy."""
-    stop = asyncio.Event()
-    ready = asyncio.Event()
-    expired = asyncio.Event()
-
-    def ack(hb: LeaseHeartbeat) -> Envelope[dict]:
-        return Envelope[dict].wrap(
-            {"token": hb.token}, type="lease.ack", source="md"
-        )
-
-    async def on_expired() -> None:
-        expired.set()
-
-    link = LeasedSessionLink(
-        broker,
-        rx="sts.md.e2",
-        tx="md.e2",
-        stop=stop,
-        ready=ready,
-        ack=ack,
-        on_expired=on_expired,
-        watch_interval=0.05,
-        grace=0.15,
-        name="test-lease-unarmed",
-    )
-    task = asyncio.create_task(link.run())
-    try:
-        await asyncio.sleep(0.4)
-        assert not expired.is_set()
-        assert not ready.is_set()
-    finally:
-        stop.set()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_psubscribe_receives_channel_and_envelope(broker: Broker) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

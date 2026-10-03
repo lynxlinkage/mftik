@@ -12,6 +12,9 @@ from mftik.protocol import parse_strategy_yml, strategy_catalog
 from mftik_sts.impl import resolve, resolve_class
 from mftik_sts.impl.tape_keeper import TapeKeeper
 
+# strategy catalog; over the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 TICKER = "BinanceUM_Perp_BTCUSDT"
 
 
@@ -79,11 +82,6 @@ async def test_it_counts_prints_and_places_nothing() -> None:
     )
 
     assert strat._prints == 1
-
-
-def test_it_is_rebuildable() -> None:
-    """The one strategy for which coming back really is starting."""
-    assert TapeKeeper.rebuildable is True
 
 
 def test_report_interval_must_be_positive() -> None:

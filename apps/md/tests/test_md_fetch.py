@@ -1,14 +1,18 @@
-"""MD fetch plane — one subject for everyone, answers to the caller's channel."""
+"""MD fetch handler — one decoded query, an ack back, the answer published.
+
+Direct calls, no bus. The serve loop is :func:`mftik.broker.handler.serve`
+and is tested with that layer. A controller roll is
+``test_md_fetch_roll``.
+"""
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
-import pytest
-from broker_harness import a_broker
-from mftik.broker import Broker
 from mftik.exchange.errors import ExchangeError
 from mftik.exchange.intervals import InvalidIntervalError
 from mftik.exchange.models import (
@@ -21,16 +25,11 @@ from mftik.exchange.models import (
 )
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
-    MD_BESTQUOTE_RESULT,
     MD_FETCH_BESTQUOTE,
     MD_FETCH_FUNDING_HISTORY,
     MD_FETCH_KLINES,
     MD_FETCH_OPEN_INTEREST,
     MD_FETCH_ORDERBOOK,
-    MD_FUNDING_HISTORY_RESULT,
-    MD_KLINES_RESULT,
-    MD_OPEN_INTEREST_RESULT,
-    MD_ORDERBOOK_RESULT,
     Envelope,
     MdBestQuoteResult,
     MdFetchBestQuote,
@@ -45,14 +44,16 @@ from mftik.protocol import (
     MdQueryAck,
     QueryCode,
     Topics,
+    UntypedEnvelope,
 )
-from mftik_md.fetch import FetchSession, NoReaderError
+from mftik_md.fetch import FetchHandler, NoReaderError
 from mftik_md.fetch.readers import BinanceSpotReader, GateSpotReader
 
 VENUE = "Gate"
 SYMBOL = "BTCUSDT"
 TICKER = UniversalTicker.of(VENUE, "Spot", SYMBOL)
 REPLY = Topics.md_fetch_reply("caller-1")
+_FETCH_SRC = Path(__file__).resolve().parents[1] / "src" / "mftik_md"
 
 
 def _kline() -> Kline:
@@ -93,51 +94,40 @@ class FakeReader:
     async def close(self) -> None:
         self.closes += 1
 
-    async def fetch_klines(
-        self, ticker: UniversalTicker, interval: str, *, limit: int
-    ) -> list[Kline]:
-        self.calls.append((ticker.symbol, interval, limit))
+    async def _wait(self) -> None:
         if self.gate is not None:
             await self.gate.wait()
         if self.raises is not None:
             raise self.raises
+
+    async def fetch_klines(
+        self, ticker: UniversalTicker, interval: str, *, limit: int
+    ) -> list[Kline]:
+        self.calls.append((ticker.symbol, interval, limit))
+        await self._wait()
         return list(self.klines)
 
     async def fetch_order_book(
         self, ticker: UniversalTicker, *, depth: int
     ) -> OrderBook:
         self.book_calls.append((ticker.symbol, depth))
-        if self.gate is not None:
-            await self.gate.wait()
-        if self.raises is not None:
-            raise self.raises
+        await self._wait()
         return self.book or OrderBook(universal_ticker=str(ticker), bids=[], asks=[])
 
     async def fetch_best_quote(self, ticker: UniversalTicker) -> BestQuote | None:
-        if self.gate is not None:
-            await self.gate.wait()
-        if self.raises is not None:
-            raise self.raises
+        await self._wait()
         return self.quote
 
     async def fetch_funding_history(
         self, ticker: UniversalTicker, *, limit: int
     ) -> list[FundingRate]:
         self.rate_calls.append((ticker.symbol, limit))
-        if self.gate is not None:
-            await self.gate.wait()
-        if self.raises is not None:
-            raise self.raises
+        await self._wait()
         return list(self.rates)
 
-    async def fetch_open_interest(
-        self, ticker: UniversalTicker
-    ) -> OpenInterest:
+    async def fetch_open_interest(self, ticker: UniversalTicker) -> OpenInterest:
         self.interest_calls.append(ticker.symbol)
-        if self.gate is not None:
-            await self.gate.wait()
-        if self.raises is not None:
-            raise self.raises
+        await self._wait()
         return self.interest or OpenInterest(
             universal_ticker=str(ticker),
             qty=Decimal("1000"),
@@ -167,671 +157,44 @@ class GateStyleError(ExchangeError):
         super().__init__(f"{label}: {message}")
 
 
-@pytest.fixture
-async def broker() -> Broker:
-    async with a_broker("test-fetch") as client:
-        yield client
+class Sink:
+    """The publisher the handler was given instead of a broker."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, Envelope[Any]]] = []
+
+    async def __call__(self, topic: str, envelope: Envelope[Any]) -> None:
+        self.sent.append((topic, envelope))
 
 
-@pytest.fixture
-def reader() -> FakeReader:
-    return FakeReader()
+def _message(type: str, payload: Any) -> UntypedEnvelope:
+    wrapped = Envelope[Any].wrap(payload, type=type, source="test")
+    return UntypedEnvelope.model_validate_json(wrapped.to_json())
 
 
-class Caller:
-    """Sends queries and collects whatever lands on its own reply channel."""
-
-    def __init__(self, broker: Broker, channel: str = REPLY) -> None:
-        self.broker = broker
-        self.channel = channel
-        self.results: list[Any] = []
-        self._stop = asyncio.Event()
-        self._task: asyncio.Task[Any] | None = None
-
-    async def listen(self) -> None:
-        models = {
-            MD_KLINES_RESULT: MdKlinesResult,
-            MD_ORDERBOOK_RESULT: MdOrderBookResult,
-            MD_BESTQUOTE_RESULT: MdBestQuoteResult,
-            MD_FUNDING_HISTORY_RESULT: MdFundingHistoryResult,
-            MD_OPEN_INTEREST_RESULT: MdOpenInterestResult,
-        }
-
-        async def _pump() -> None:
-            async for env in self.broker.subscribe(self.channel, stop=self._stop):
-                model = models.get(env.type)
-                if model is not None:
-                    self.results.append(model.model_validate(env.payload))
-
-        self._task = asyncio.create_task(_pump())
-        await asyncio.sleep(0.05)
-
-    async def close(self) -> None:
-        self._stop.set()
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-
-    async def ask(
-        self,
-        *,
-        ticker: str = str(TICKER),
-        interval: str = "1h",
-        limit: int = 100,
-        query_id: str = "q1",
-        reply_channel: str | None = None,
-        type: str = MD_FETCH_KLINES,
-        payload: Any = None,
-        timeout: float = 2.0,
-    ) -> MdQueryAck:
-        body = (
-            payload
-            if payload is not None
-            else MdFetchKlines(
-                reply_channel=self.channel if reply_channel is None else reply_channel,
-                query_id=query_id,
-                ticker=ticker,
-                interval=interval,
-                limit=limit,
-            )
-        )
-        reply = await self.broker.request(
-            Topics.md_fetch(),
-            Envelope[Any].wrap(body, type=type, source="test"),
-            timeout=timeout,
-        )
-        return MdQueryAck.model_validate(reply.payload)
-
-    async def next_result(self, timeout: float = 2.0, model: Any = None) -> Any:
-        deadline = asyncio.get_running_loop().time() + timeout
-        while not self.results:
-            if asyncio.get_running_loop().time() > deadline:
-                raise AssertionError("no result arrived")
-            await asyncio.sleep(0.02)
-        result = self.results.pop(0)
-        if model is not None:
-            assert isinstance(result, model), type(result)
-        return result
+def _ack(reply: Envelope[Any] | None) -> MdQueryAck:
+    assert reply is not None
+    payload = reply.payload
+    if isinstance(payload, MdQueryAck):
+        return payload
+    return MdQueryAck.model_validate(payload)
 
 
-@pytest.fixture
-async def fetch(broker: Broker, reader: FakeReader):
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-    yield session
-    await session.stop()
-
-
-@pytest.fixture
-async def caller(broker: Broker):
-    c = Caller(broker)
-    await c.listen()
-    yield c
-    await c.close()
-
-
-# --- the loop itself -------------------------------------------------------
-
-
-async def test_the_serve_loop_rebuilds_itself_rather_than_giving_up(
-    broker: Broker, reader: FakeReader, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """It used to log one line and stop serving, for the life of the process.
-
-    On 2026-08-18 that is what it did: MD stayed up with its feeds running,
-    every query after that line sat until its caller timed out, and the one
-    log line saying so was six hours old by the time anyone read it.
-    """
-    monkeypatch.setattr(
-        "mftik_md.fetch.session.SERVE_RESTART_DELAY_SECONDS", 0.0
+def _klines(
+    *,
+    query_id: str = "q1",
+    interval: str = "1h",
+    limit: int = 100,
+    ticker: str = str(TICKER),
+    reply_channel: str = REPLY,
+) -> MdFetchKlines:
+    return MdFetchKlines(
+        reply_channel=reply_channel,
+        query_id=query_id,
+        ticker=ticker,
+        interval=interval,
+        limit=limit,
     )
-    real_serve = broker.serve
-    failures: list[str] = []
-
-    def flaky(*args: Any, **kwargs: Any) -> Any:
-        if not failures:
-            failures.append("boom")
-            raise RuntimeError("something serve does not handle")
-        return real_serve(*args, **kwargs)
-
-    monkeypatch.setattr(broker, "serve", flaky)
-
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    caller = Caller(broker)
-    await caller.listen()
-    try:
-        ack = await caller.ask(interval="1h", limit=3)
-        assert failures == ["boom"]
-        assert ack.accepted is True
-        assert (await caller.next_result()).ok is True
-    finally:
-        await caller.close()
-        await session.stop()
-
-
-# --- the happy path --------------------------------------------------------
-
-
-async def test_a_query_is_acked_then_answered_on_the_callers_channel(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    ack = await caller.ask(interval="1h", limit=3)
-
-    assert ack.accepted is True
-    assert ack.error_code == QueryCode.NONE
-    assert ack.query_id == "q1"
-
-    result = await caller.next_result()
-    assert result.ok is True
-    assert result.query_id == "q1"
-    assert result.klines[0].close == Decimal("60500")
-    assert reader.calls == [(SYMBOL, "1h", 3)]
-
-
-async def test_no_feed_subscription_is_needed(
-    fetch: FetchSession, caller: Caller
-) -> None:
-    """The point of the plane: nothing was ever attached or subscribed, and
-    the venue still answers."""
-    assert fetch.venues == []
-
-    await caller.ask()
-    result = await caller.next_result()
-
-    assert result.ok is True
-    assert fetch.venues == [VENUE]
-
-
-async def test_the_answer_follows_the_request_not_the_caller(
-    broker: Broker, fetch: FetchSession
-) -> None:
-    """Routing rides on the request, so the session needs no idea who asked."""
-    elsewhere = Caller(broker, channel=Topics.md_fetch_reply("somewhere-else"))
-    await elsewhere.listen()
-    unrelated = Caller(broker, channel=Topics.md_fetch_reply("unrelated"))
-    await unrelated.listen()
-
-    await unrelated.ask(reply_channel=elsewhere.channel, query_id="routed")
-
-    result = await elsewhere.next_result()
-    assert result.query_id == "routed"
-    assert unrelated.results == []
-
-    await elsewhere.close()
-    await unrelated.close()
-
-
-async def test_the_ack_lands_before_the_venue_answers(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    reader.gate = asyncio.Event()
-
-    ack = await caller.ask()
-    assert ack.accepted is True
-    await asyncio.sleep(0.05)
-    assert reader.calls
-    assert caller.results == []
-
-    reader.gate.set()
-    assert (await caller.next_result()).ok is True
-
-
-async def test_a_slow_query_does_not_block_the_next_one(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    reader.gate = asyncio.Event()
-
-    assert (await caller.ask(query_id="slow")).accepted is True
-    assert (await caller.ask(query_id="fast", timeout=1.0)).accepted is True
-
-    reader.gate.set()
-    ids = {(await caller.next_result()).query_id for _ in range(2)}
-    assert ids == {"slow", "fast"}
-
-
-async def test_a_venue_reader_is_built_once_and_kept(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    """Built on first use and held for the process, so later queries do not
-    pay for a connect."""
-    for i in range(3):
-        await caller.ask(query_id=f"q{i}")
-        await caller.next_result()
-
-    assert reader.connects == 1
-
-
-async def test_concurrent_first_queries_build_one_reader(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    """Without the per-venue lock each would build a client and one would be
-    dropped still holding an open connection."""
-    reader.gate = asyncio.Event()
-    for i in range(4):
-        await caller.ask(query_id=f"c{i}")
-    reader.gate.set()
-    for _ in range(4):
-        await caller.next_result()
-
-    assert reader.connects == 1
-
-
-# --- refusals at the ack ---------------------------------------------------
-
-
-async def test_unsupported_request_type_is_refused(
-    fetch: FetchSession, caller: Caller
-) -> None:
-    ack = await caller.ask(type="md.fetch.something_else")
-    assert ack.accepted is False
-    assert ack.error_code == QueryCode.MD_UNSUPPORTED_REQUEST
-
-
-async def test_unreadable_payload_is_refused(
-    fetch: FetchSession, caller: Caller
-) -> None:
-    ack = await caller.ask(payload={"nonsense": True})
-    assert ack.accepted is False
-    assert ack.error_code == QueryCode.MD_INVALID_REQUEST
-
-
-async def test_a_query_with_nowhere_to_answer_is_refused(
-    fetch: FetchSession, caller: Caller
-) -> None:
-    """Taking a query whose answer cannot be delivered would be a lie."""
-    ack = await caller.ask(reply_channel="")
-    assert ack.accepted is False
-    assert ack.error_code == QueryCode.MD_INVALID_REQUEST
-
-
-async def test_too_many_in_flight_is_refused_at_the_ack(
-    broker: Broker, reader: FakeReader, caller: Caller
-) -> None:
-    session = FetchSession(broker, FakeFactory(reader), max_in_flight=2)
-    await session.start()
-    await asyncio.sleep(0.05)
-    reader.gate = asyncio.Event()
-
-    assert (await caller.ask(query_id="a")).accepted is True
-    assert (await caller.ask(query_id="b")).accepted is True
-    overflow = await caller.ask(query_id="c")
-
-    assert overflow.accepted is False
-    assert overflow.error_code == QueryCode.MD_TOO_MANY_IN_FLIGHT
-
-    reader.gate.set()
-    await session.stop()
-
-
-# --- failures after the ack ------------------------------------------------
-
-
-async def test_a_venue_that_serves_no_reads_says_so(
-    fetch: FetchSession, caller: Caller
-) -> None:
-    """Distinct from an empty answer, and settled before any call."""
-    await caller.ask(ticker="Paper_Spot_BTCUSDT")
-    result = await caller.next_result()
-
-    assert result.ok is False
-    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
-
-
-async def test_a_venue_failure_still_produces_a_result(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    reader.raises = GateStyleError("TOO_MANY_REQUESTS", "slow down")
-
-    assert (await caller.ask()).accepted is True
-    result = await caller.next_result()
-
-    assert result.ok is False
-    assert result.klines == []
-    assert result.error_code == QueryCode.VENUE_RATE_LIMITED
-    assert "slow down" in result.reason
-
-
-async def test_an_unsupported_interval_maps_to_its_own_code(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    reader.raises = InvalidIntervalError("Gate serves no 2w candles")
-
-    await caller.ask(interval="2w")
-    result = await caller.next_result()
-
-    assert result.ok is False
-    assert result.error_code == QueryCode.MD_INTERVAL_NOT_SUPPORTED
-
-
-async def test_an_empty_answer_is_a_success(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    reader.klines = []
-
-    await caller.ask()
-    result = await caller.next_result()
-
-    assert result.ok is True
-    assert result.klines == []
-    assert result.error_code == QueryCode.NONE
-
-
-async def test_an_unmapped_venue_label_passes_through(
-    fetch: FetchSession, caller: Caller, reader: FakeReader
-) -> None:
-    reader.raises = GateStyleError("SOME_NEW_LABEL", "who knows")
-
-    await caller.ask()
-    result = await caller.next_result()
-
-    assert result.error_code == "SOME_NEW_LABEL"
-
-
-# --- lifecycle -------------------------------------------------------------
-
-
-async def test_stopping_closes_every_reader(
-    broker: Broker, reader: FakeReader, caller: Caller
-) -> None:
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-    await caller.ask()
-    await caller.next_result()
-
-    await session.stop()
-
-    assert reader.closes == 1
-    assert session.venues == []
-
-
-# --- end to end ------------------------------------------------------------
-
-
-async def test_a_strategy_with_no_market_data_gets_its_candles(
-    broker: Broker, reader: FakeReader
-) -> None:
-    """The real STS session and the real fetch session, only the venue faked.
-
-    No md_ids, no MD attach, no lease anywhere in the picture. That is the
-    whole claim of this plane, and it only holds if both halves agree on the
-    subject, the reply channel and the query id.
-    """
-    from mftik_sts.session.session import StsSession
-    from mftik_sts.strategy import Strategy
-
-    class Recording(Strategy):
-        name = "fetch-e2e"
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.results: list[MdKlinesResult] = []
-
-        async def on_fetch_klines(self, result: MdKlinesResult) -> None:
-            self.results.append(result)
-
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    strategy = Recording()
-    sts = StsSession(
-        session_id="sts-fetch-e2e",
-        broker=broker,
-        created_by=1,
-        strategy=strategy,
-        md_ids=[],
-        heartbeat_interval=0.1,
-    )
-    await sts.start()
-    await asyncio.sleep(0.05)
-
-    query_id = await strategy.mds.fetch_klines(TICKER, " 1MO ", limit=5)
-    assert query_id is not None, strategy.mds.last_reject_reason
-
-    deadline = asyncio.get_running_loop().time() + 3.0
-    while not strategy.results:
-        if asyncio.get_running_loop().time() > deadline:
-            raise AssertionError("no result reached the strategy")
-        await asyncio.sleep(0.02)
-
-    result = strategy.results[0]
-    assert result.query_id == query_id
-    assert result.ok is True
-    assert result.klines[0].close == Decimal("60500")
-    # Normalized on the way out, and the venue saw the canonical spelling.
-    assert reader.calls == [(SYMBOL, "1mo", 5)]
-
-    await sts.stop()
-    await session.stop()
-
-
-# --- other reads -----------------------------------------------------------
-
-
-async def test_an_order_book_query_comes_back_as_a_book(
-    broker: Broker, caller: Caller
-) -> None:
-    reader = FakeReader()
-    reader.book = OrderBook(
-        universal_ticker=f"Paper_Spot_{SYMBOL}",
-        bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
-        asks=[BookLevel(price=Decimal("60001"), qty=Decimal("1"))],
-    )
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    ack = await caller.ask(type=MD_FETCH_ORDERBOOK, payload=_book_req(depth=5))
-    assert ack.accepted is True
-
-    result = await caller.next_result(model=MdOrderBookResult)
-    assert result.ok is True
-    assert result.book.bids[0].price == Decimal("59999")
-    assert reader.book_calls == [(SYMBOL, 5)]
-
-    await session.stop()
-
-
-async def test_a_best_quote_query_comes_back_as_a_quote(
-    broker: Broker, caller: Caller
-) -> None:
-    reader = FakeReader()
-    reader.quote = BestQuote(
-        universal_ticker=f"Paper_Spot_{SYMBOL}",
-        bid=Decimal("59999"),
-        bid_qty=Decimal("3"),
-        ask=Decimal("60001"),
-        ask_qty=Decimal("1"),
-    )
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(type=MD_FETCH_BESTQUOTE, payload=_quote_req())
-    result = await caller.next_result(model=MdBestQuoteResult)
-
-    assert result.ok is True
-    assert result.quote.bid == Decimal("59999")
-    assert result.quote.ask_qty == Decimal("1")
-
-    await session.stop()
-
-
-async def test_a_one_sided_book_is_a_success_with_no_quote(
-    broker: Broker, caller: Caller
-) -> None:
-    """Not an error, and not a quote either — there is nothing to rest against,
-    and zeros would answer that question wrongly rather than decline it."""
-    reader = FakeReader()
-    reader.quote = None
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(type=MD_FETCH_BESTQUOTE, payload=_quote_req())
-    result = await caller.next_result(model=MdBestQuoteResult)
-
-    assert result.ok is True
-    assert result.quote is None
-    assert result.error_code == QueryCode.NONE
-
-    await session.stop()
-
-
-async def test_a_one_sided_option_quote_arrives_with_its_zero_side(
-    broker: Broker, caller: Caller
-) -> None:
-    """Option answers carry the zero side over the wire rather than None."""
-    reader = FakeReader()
-    reader.quote = BestQuote(
-        universal_ticker="Deribit_Option_BTCUSD-260928-93000-C",
-        bid=Decimal("0"),
-        bid_qty=Decimal("0"),
-        ask=Decimal("0.0001"),
-        ask_qty=Decimal("30.2"),
-    )
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(type=MD_FETCH_BESTQUOTE, payload=_quote_req())
-    result = await caller.next_result(model=MdBestQuoteResult)
-
-    assert result.ok is True
-    assert result.quote is not None
-    assert (result.quote.bid, result.quote.bid_qty) == (0, 0)
-    assert result.quote.ask == Decimal("0.0001")
-
-    await session.stop()
-
-
-async def test_a_read_the_venue_does_not_serve_is_refused_by_name(
-    broker: Broker, caller: Caller
-) -> None:
-    """A reader without the method is the same answer as no reader at all."""
-
-    class KlinesOnly(FakeReader):
-        fetch_order_book = None
-
-    session = FetchSession(broker, FakeFactory(KlinesOnly()))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(type=MD_FETCH_ORDERBOOK, payload=_book_req())
-    result = await caller.next_result(model=MdOrderBookResult)
-
-    assert result.ok is False
-    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
-    assert "fetch_order_book" in result.reason
-
-    await session.stop()
-
-
-async def test_funding_history_arrives_oldest_first(
-    broker: Broker, caller: Caller
-) -> None:
-    older = FundingRate(
-        universal_ticker=str(TICKER),
-        rate=Decimal("0.0001"),
-        ts=1_700_000_000.0,
-    )
-    newer = FundingRate(
-        universal_ticker=str(TICKER),
-        rate=Decimal("0.0002"),
-        ts=1_700_028_800.0,
-    )
-    reader = FakeReader()
-    reader.rates = [older, newer]
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(
-        type=MD_FETCH_FUNDING_HISTORY,
-        payload=_funding_req(limit=5),
-    )
-    result = await caller.next_result(model=MdFundingHistoryResult)
-
-    assert result.ok is True
-    assert [row.ts for row in result.rates] == [older.ts, newer.ts]
-    assert reader.rate_calls == [(SYMBOL, 5)]
-
-    await session.stop()
-
-
-async def test_a_venue_without_funding_history_is_refused_by_name(
-    broker: Broker, caller: Caller
-) -> None:
-    class NoHistory(FakeReader):
-        fetch_funding_history = None
-
-    session = FetchSession(broker, FakeFactory(NoHistory()))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(
-        type=MD_FETCH_FUNDING_HISTORY, payload=_funding_req()
-    )
-    result = await caller.next_result(model=MdFundingHistoryResult)
-
-    assert result.ok is False
-    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
-    assert "fetch_funding_history" in result.reason
-
-    await session.stop()
-
-
-async def test_open_interest_arrives_as_one_print(
-    broker: Broker, caller: Caller
-) -> None:
-    reader = FakeReader()
-    reader.interest = OpenInterest(
-        universal_ticker=str(TICKER),
-        qty=Decimal("1234.5"),
-        ts=1_700_000_000.0,
-    )
-    session = FetchSession(broker, FakeFactory(reader))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(type=MD_FETCH_OPEN_INTEREST, payload=_oi_req())
-    result = await caller.next_result(model=MdOpenInterestResult)
-
-    assert result.ok is True
-    assert result.open_interest is not None
-    assert result.open_interest.qty == Decimal("1234.5")
-    assert reader.interest_calls == [SYMBOL]
-
-    await session.stop()
-
-
-async def test_a_venue_without_open_interest_is_refused_by_name(
-    broker: Broker, caller: Caller
-) -> None:
-    class NoOpenInterest(FakeReader):
-        fetch_open_interest = None
-
-    session = FetchSession(broker, FakeFactory(NoOpenInterest()))
-    await session.start()
-    await asyncio.sleep(0.05)
-
-    await caller.ask(type=MD_FETCH_OPEN_INTEREST, payload=_oi_req())
-    result = await caller.next_result(model=MdOpenInterestResult)
-
-    assert result.ok is False
-    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
-    assert result.open_interest is None
-    assert "fetch_open_interest" in result.reason
-
-    await session.stop()
-
-
-def test_spot_readers_have_no_open_interest_method() -> None:
-    assert not hasattr(BinanceSpotReader, "fetch_open_interest")
-    assert not hasattr(GateSpotReader, "fetch_open_interest")
 
 
 def _book_req(depth: int = 10) -> MdFetchOrderBook:
@@ -856,3 +219,472 @@ def _oi_req() -> MdFetchOpenInterest:
     return MdFetchOpenInterest(
         reply_channel=REPLY, query_id="q1", ticker=str(TICKER)
     )
+
+
+def _handler(
+    reader: FakeReader, sink: Sink, *, max_in_flight: int = 32
+) -> FetchHandler:
+    return FetchHandler(sink, FakeFactory(reader), max_in_flight=max_in_flight)
+
+
+async def _yield_until(predicate) -> None:
+    for _ in range(8):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    assert predicate()
+
+
+def test_the_fetch_worker_does_not_own_the_serve_loop() -> None:
+    """``serve`` is called by name. The handler never sees a request handle."""
+    for name in ("worker.py", "session.py"):
+        path = _FETCH_SRC / "fetch" / name
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "serve"
+            ):
+                raise AssertionError(f"{name}:{node.lineno} calls .serve")
+            if isinstance(node, ast.ImportFrom) and any(
+                alias.name == "IncomingRequest" for alias in node.names
+            ):
+                raise AssertionError(f"{name}:{node.lineno} imports IncomingRequest")
+
+
+async def test_a_query_is_acked_then_answered_on_the_callers_channel() -> None:
+    reader = FakeReader()
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    ack = _ack(await handler(_message(MD_FETCH_KLINES, _klines(limit=3))))
+
+    assert ack.accepted is True
+    assert ack.error_code == QueryCode.NONE
+    assert ack.query_id == "q1"
+    await handler.wait_idle()
+    topic, envelope = sink.sent[0]
+    result = envelope.payload
+    assert isinstance(result, MdKlinesResult)
+    assert topic == REPLY
+    assert result.ok is True
+    assert result.query_id == "q1"
+    assert result.klines[0].close == Decimal("60500")
+    assert reader.calls == [(SYMBOL, "1h", 3)]
+
+
+async def test_no_feed_subscription_is_needed() -> None:
+    """Nothing was attached or subscribed, and the venue still answers."""
+    reader = FakeReader()
+    sink = Sink()
+    handler = _handler(reader, sink)
+    assert handler.venues == []
+
+    await handler(_message(MD_FETCH_KLINES, _klines()))
+    await handler.wait_idle()
+
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.ok is True
+    assert handler.venues == [VENUE]
+
+
+async def test_the_answer_follows_the_request_not_the_caller() -> None:
+    """Routing rides on the request, so the handler needs no idea who asked."""
+    elsewhere = Topics.md_fetch_reply("somewhere-else")
+    sink = Sink()
+    handler = _handler(FakeReader(), sink)
+
+    await handler(
+        _message(
+            MD_FETCH_KLINES,
+            _klines(query_id="routed", reply_channel=elsewhere),
+        )
+    )
+    await handler.wait_idle()
+
+    assert [topic for topic, _envelope in sink.sent] == [elsewhere]
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.query_id == "routed"
+
+
+async def test_the_ack_lands_before_the_venue_answers() -> None:
+    reader = FakeReader()
+    reader.gate = asyncio.Event()
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    ack = _ack(await handler(_message(MD_FETCH_KLINES, _klines())))
+    assert ack.accepted is True
+    await _yield_until(lambda: bool(reader.calls))
+    assert sink.sent == []
+
+    reader.gate.set()
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.ok is True
+
+
+async def test_a_slow_query_does_not_block_the_next_one() -> None:
+    reader = FakeReader()
+    reader.gate = asyncio.Event()
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    slow = _ack(
+        await handler(_message(MD_FETCH_KLINES, _klines(query_id="slow")))
+    )
+    fast = _ack(
+        await handler(_message(MD_FETCH_KLINES, _klines(query_id="fast")))
+    )
+    assert slow.accepted is True
+    assert fast.accepted is True
+    assert sink.sent == []
+
+    reader.gate.set()
+    await handler.wait_idle()
+    ids = set()
+    for _topic, envelope in sink.sent:
+        assert isinstance(envelope.payload, MdKlinesResult)
+        ids.add(envelope.payload.query_id)
+    assert ids == {"slow", "fast"}
+
+
+async def test_a_venue_reader_is_built_once_and_kept() -> None:
+    reader = FakeReader()
+    handler = _handler(reader, Sink())
+
+    for i in range(3):
+        await handler(_message(MD_FETCH_KLINES, _klines(query_id=f"q{i}")))
+        await handler.wait_idle()
+
+    assert reader.connects == 1
+
+
+async def test_concurrent_first_queries_build_one_reader() -> None:
+    """Without the per-venue lock each would build a client."""
+    reader = FakeReader()
+    reader.gate = asyncio.Event()
+    handler = _handler(reader, Sink())
+
+    for i in range(4):
+        ack = _ack(
+            await handler(_message(MD_FETCH_KLINES, _klines(query_id=f"c{i}")))
+        )
+        assert ack.accepted is True
+    await _yield_until(lambda: reader.connects == 1)
+    assert reader.connects == 1
+
+    reader.gate.set()
+    await handler.wait_idle()
+    assert reader.connects == 1
+
+
+async def test_unsupported_request_type_is_refused() -> None:
+    handler = _handler(FakeReader(), Sink())
+    ack = _ack(await handler(_message("md.fetch.something_else", {})))
+    assert ack.accepted is False
+    assert ack.error_code == QueryCode.MD_UNSUPPORTED_REQUEST
+
+
+async def test_unreadable_payload_is_refused() -> None:
+    handler = _handler(FakeReader(), Sink())
+    ack = _ack(await handler(_message(MD_FETCH_KLINES, {"nonsense": True})))
+    assert ack.accepted is False
+    assert ack.error_code == QueryCode.MD_INVALID_REQUEST
+
+
+async def test_a_query_with_nowhere_to_answer_is_refused() -> None:
+    handler = _handler(FakeReader(), Sink())
+    ack = _ack(
+        await handler(_message(MD_FETCH_KLINES, _klines(reply_channel="")))
+    )
+    assert ack.accepted is False
+    assert ack.error_code == QueryCode.MD_INVALID_REQUEST
+
+
+async def test_too_many_in_flight_is_refused_at_the_ack() -> None:
+    reader = FakeReader()
+    reader.gate = asyncio.Event()
+    handler = _handler(reader, Sink(), max_in_flight=2)
+
+    assert _ack(
+        await handler(_message(MD_FETCH_KLINES, _klines(query_id="a")))
+    ).accepted
+    assert _ack(
+        await handler(_message(MD_FETCH_KLINES, _klines(query_id="b")))
+    ).accepted
+    overflow = _ack(
+        await handler(_message(MD_FETCH_KLINES, _klines(query_id="c")))
+    )
+
+    assert overflow.accepted is False
+    assert overflow.error_code == QueryCode.MD_TOO_MANY_IN_FLIGHT
+
+    reader.gate.set()
+    await handler.aclose()
+
+
+async def test_a_venue_that_serves_no_reads_says_so() -> None:
+    sink = Sink()
+    handler = _handler(FakeReader(), sink)
+    ack = _ack(
+        await handler(
+            _message(MD_FETCH_KLINES, _klines(ticker="Paper_Spot_BTCUSDT"))
+        )
+    )
+    assert ack.accepted is True
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+
+
+async def test_a_venue_failure_still_produces_a_result() -> None:
+    reader = FakeReader()
+    reader.raises = GateStyleError("TOO_MANY_REQUESTS", "slow down")
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    assert _ack(await handler(_message(MD_FETCH_KLINES, _klines()))).accepted
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.ok is False
+    assert result.klines == []
+    assert result.error_code == QueryCode.VENUE_RATE_LIMITED
+    assert "slow down" in result.reason
+
+
+async def test_an_unsupported_interval_maps_to_its_own_code() -> None:
+    reader = FakeReader()
+    reader.raises = InvalidIntervalError("Gate serves no 2w candles")
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_KLINES, _klines(interval="2w")))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_INTERVAL_NOT_SUPPORTED
+
+
+async def test_an_empty_answer_is_a_success() -> None:
+    reader = FakeReader()
+    reader.klines = []
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_KLINES, _klines()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.ok is True
+    assert result.klines == []
+    assert result.error_code == QueryCode.NONE
+
+
+async def test_an_unmapped_venue_label_passes_through() -> None:
+    reader = FakeReader()
+    reader.raises = GateStyleError("SOME_NEW_LABEL", "who knows")
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_KLINES, _klines()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdKlinesResult)
+    assert result.error_code == "SOME_NEW_LABEL"
+
+
+async def test_stopping_closes_every_reader() -> None:
+    reader = FakeReader()
+    handler = _handler(reader, Sink())
+    await handler(_message(MD_FETCH_KLINES, _klines()))
+    await handler.wait_idle()
+
+    await handler.aclose()
+
+    assert reader.closes == 1
+    assert handler.venues == []
+
+
+async def test_an_order_book_query_comes_back_as_a_book() -> None:
+    reader = FakeReader()
+    reader.book = OrderBook(
+        universal_ticker=f"Paper_Spot_{SYMBOL}",
+        bids=[BookLevel(price=Decimal("59999"), qty=Decimal("3"))],
+        asks=[BookLevel(price=Decimal("60001"), qty=Decimal("1"))],
+    )
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    ack = _ack(await handler(_message(MD_FETCH_ORDERBOOK, _book_req(depth=5))))
+    assert ack.accepted is True
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdOrderBookResult)
+    assert result.ok is True
+    assert result.book is not None
+    assert result.book.bids[0].price == Decimal("59999")
+    assert reader.book_calls == [(SYMBOL, 5)]
+
+
+async def test_a_best_quote_query_comes_back_as_a_quote() -> None:
+    reader = FakeReader()
+    reader.quote = BestQuote(
+        universal_ticker=f"Paper_Spot_{SYMBOL}",
+        bid=Decimal("59999"),
+        bid_qty=Decimal("3"),
+        ask=Decimal("60001"),
+        ask_qty=Decimal("1"),
+    )
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_BESTQUOTE, _quote_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdBestQuoteResult)
+    assert result.ok is True
+    assert result.quote is not None
+    assert result.quote.bid == Decimal("59999")
+    assert result.quote.ask_qty == Decimal("1")
+
+
+async def test_a_one_sided_book_is_a_success_with_no_quote() -> None:
+    reader = FakeReader()
+    reader.quote = None
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_BESTQUOTE, _quote_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdBestQuoteResult)
+    assert result.ok is True
+    assert result.quote is None
+    assert result.error_code == QueryCode.NONE
+
+
+async def test_a_one_sided_option_quote_arrives_with_its_zero_side() -> None:
+    reader = FakeReader()
+    reader.quote = BestQuote(
+        universal_ticker="Deribit_Option_BTCUSD-260928-93000-C",
+        bid=Decimal("0"),
+        bid_qty=Decimal("0"),
+        ask=Decimal("0.0001"),
+        ask_qty=Decimal("30.2"),
+    )
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_BESTQUOTE, _quote_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdBestQuoteResult)
+    assert result.ok is True
+    assert result.quote is not None
+    assert (result.quote.bid, result.quote.bid_qty) == (0, 0)
+    assert result.quote.ask == Decimal("0.0001")
+
+
+async def test_a_read_the_venue_does_not_serve_is_refused_by_name() -> None:
+    class KlinesOnly(FakeReader):
+        fetch_order_book = None  # type: ignore[assignment]
+
+    sink = Sink()
+    handler = _handler(KlinesOnly(), sink)
+    await handler(_message(MD_FETCH_ORDERBOOK, _book_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdOrderBookResult)
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert "fetch_order_book" in result.reason
+
+
+async def test_funding_history_arrives_oldest_first() -> None:
+    older = FundingRate(
+        universal_ticker=str(TICKER),
+        rate=Decimal("0.0001"),
+        ts=1_700_000_000.0,
+    )
+    newer = FundingRate(
+        universal_ticker=str(TICKER),
+        rate=Decimal("0.0002"),
+        ts=1_700_028_800.0,
+    )
+    reader = FakeReader()
+    reader.rates = [older, newer]
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_FUNDING_HISTORY, _funding_req(limit=5)))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdFundingHistoryResult)
+    assert result.ok is True
+    assert [row.ts for row in result.rates] == [older.ts, newer.ts]
+    assert reader.rate_calls == [(SYMBOL, 5)]
+
+
+async def test_a_venue_without_funding_history_is_refused_by_name() -> None:
+    class NoHistory(FakeReader):
+        fetch_funding_history = None  # type: ignore[assignment]
+
+    sink = Sink()
+    handler = _handler(NoHistory(), sink)
+    await handler(_message(MD_FETCH_FUNDING_HISTORY, _funding_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdFundingHistoryResult)
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert "fetch_funding_history" in result.reason
+
+
+async def test_open_interest_arrives_as_one_print() -> None:
+    reader = FakeReader()
+    reader.interest = OpenInterest(
+        universal_ticker=str(TICKER),
+        qty=Decimal("1234.5"),
+        ts=1_700_000_000.0,
+    )
+    sink = Sink()
+    handler = _handler(reader, sink)
+
+    await handler(_message(MD_FETCH_OPEN_INTEREST, _oi_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdOpenInterestResult)
+    assert result.ok is True
+    assert result.open_interest is not None
+    assert result.open_interest.qty == Decimal("1234.5")
+    assert reader.interest_calls == [SYMBOL]
+
+
+async def test_a_venue_without_open_interest_is_refused_by_name() -> None:
+    class NoOpenInterest(FakeReader):
+        fetch_open_interest = None  # type: ignore[assignment]
+
+    sink = Sink()
+    handler = _handler(NoOpenInterest(), sink)
+    await handler(_message(MD_FETCH_OPEN_INTEREST, _oi_req()))
+    await handler.wait_idle()
+    result = sink.sent[0][1].payload
+    assert isinstance(result, MdOpenInterestResult)
+    assert result.ok is False
+    assert result.error_code == QueryCode.MD_VENUE_UNSUPPORTED_READ
+    assert result.open_interest is None
+    assert "fetch_open_interest" in result.reason
+
+
+def test_spot_readers_have_no_open_interest_method() -> None:
+    assert not hasattr(BinanceSpotReader, "fetch_open_interest")
+    assert not hasattr(GateSpotReader, "fetch_open_interest")

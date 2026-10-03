@@ -13,6 +13,9 @@ from mftik.cli.app import EXIT_ERROR, main
 from mftik.cli.client import Client
 from mftik.cli.config import Profile
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 _REAL_HTTPX = httpx.Client
 
 

@@ -66,6 +66,27 @@ from mftik.symbols.listed import ListedInstrument
 MAX_KLINES = 300
 MAX_HISTORY = 100
 
+#: How often an account worker reads public server time. OKX's REST
+#: guide does not state an HTTP idle close. The 30s figure in that
+#: guide is the WebSocket idle close, not REST.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_INTERVAL_S = 30.0
+#: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
+#: the socket between ticks. httpx's own default is 5s.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_EXPIRY_S = 90.0
+#: ``GET /api/v5/public/time``. Public. No key. Same path as
+#: :meth:`OkxPublicRest.server_time`.
+KEEPALIVE_PATH = ch.MARKET_TIME
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
+POOL_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+    keepalive_expiry=KEEPALIVE_EXPIRY_S,
+)
+
 
 class _OkxRestTransport:
     """httpx lifecycle and envelope decoding, shared by the signed/public pair."""
@@ -87,7 +108,9 @@ class _OkxRestTransport:
     async def connect(self) -> None:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout
+                base_url=self.base_url,
+                timeout=self.timeout,
+                limits=POOL_LIMITS,
             )
             self._owns_client = True
 
@@ -280,6 +303,11 @@ class OkxPublicRest(_OkxRestTransport):
         if not rows:
             return 0.0
         return float(rows[0].get("ts") or 0) / 1000.0
+
+
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await OkxPublicRest(client=client).server_time()
 
 
 class OkxRest(_OkxRestTransport):
@@ -489,10 +517,15 @@ class OkxRest(_OkxRestTransport):
 
 
 __all__ = [
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
     "LINEAR",
     "LIVE",
     "MAX_HISTORY",
     "MAX_KLINES",
+    "POOL_LIMITS",
     "OkxPublicRest",
     "OkxRest",
+    "keepalive",
 ]

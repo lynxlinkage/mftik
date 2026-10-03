@@ -41,7 +41,7 @@ PROBE_TIMEOUT_S = 1.5
 #: go and look at, and it is only knowable because a row says the instance
 #: should be here — collapsing it back into "not healthy" is how a dead plane
 #: goes back to being invisible, which is what the declared table exists to
-#: prevent. See ``docs/Instances.md``.
+#: prevent. See ``docs/archive/Instances.md``.
 STATE_CONNECTED = "connected"
 STATE_DOWN = "down"
 

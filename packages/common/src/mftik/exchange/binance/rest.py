@@ -36,6 +36,24 @@ from mftik.exchange.binance.protocol import (
 )
 from mftik.exchange.errors import ExchangeError
 
+#: How often an account worker reads public server time on this host.
+#: Binance's spot, USD-M and COIN-M REST docs do not state an HTTP idle
+#: close. The same gap covers all three hosts.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_INTERVAL_S = 30.0
+#: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
+#: the socket between ticks. httpx's own default is 5s.
+#: Default; adjust from measurement (Appendix D).
+KEEPALIVE_EXPIRY_S = 90.0
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
+POOL_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+    keepalive_expiry=KEEPALIVE_EXPIRY_S,
+)
+
 
 class BinanceRestError(ExchangeError):
     """A non-2xx answer from a Binance REST API.
@@ -62,6 +80,9 @@ class BinanceRestTransport:
     default_base_url: ClassVar[str] = ""
     #: Raised on a 4xx/5xx, so a traceback names the product.
     error_type: ClassVar[type[BinanceRestError]] = BinanceRestError
+    #: Warm-pool limits for this host. Products inherit the shared
+    #: Binance numbers; a product with its own expiry overrides this.
+    pool_limits: ClassVar[httpx.Limits] = POOL_LIMITS
 
     def __init__(
         self,
@@ -78,7 +99,9 @@ class BinanceRestTransport:
     async def connect(self) -> None:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout
+                base_url=self.base_url,
+                timeout=self.timeout,
+                limits=type(self).pool_limits,
             )
             self._owns_client = True
 
@@ -166,6 +189,9 @@ class BinanceSignedRest(BinanceRestTransport):
 
 
 __all__ = [
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "POOL_LIMITS",
     "BinanceRestError",
     "BinanceRestTransport",
     "BinanceSignedRest",

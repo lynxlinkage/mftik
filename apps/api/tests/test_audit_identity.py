@@ -1,6 +1,6 @@
 """Audit rows name the proof, not the Owner.
 
-See docs/AuditIdentity.md. The auth harness stubs ``record_audit`` so the
+See docs/archive/AuditIdentity.md. The auth harness stubs ``record_audit`` so the
 other files do not have to carry the audits table; this one puts it back
 and reads ``GET /audits``.
 """

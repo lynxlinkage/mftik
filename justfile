@@ -9,10 +9,36 @@ sync:
     uv sync --all-packages
     cd frontend && npm install
 
-# Run all Python tests (sqlite only — fast, and what most changes need).
-# Needs the broker up: `just up nats`. There is no fake to fall back on.
+# Unit + component, in parallel (§9.1, F30). Integration and e2e are
+# `just test-int`. Postgres is not in this set. Needs the broker up:
+# `just up nats`. There is no fake to fall back on. On CI the recipe
+# fails when this step's wall time exceeds 120s — that clock does not
+# include `uv sync` or service startup. CI is `tier_budget.on_ci`
+# (empty, 0, false, no, off are not CI). A unit or component call over
+# its cap warns on CI and still fails locally.
 test:
-    uv run --all-packages pytest packages apps -q
+    #!/usr/bin/env bash
+    set -euo pipefail
+    start=$(date +%s.%N)
+    set +e
+    uv run --all-packages pytest packages apps -q -n auto -m "not integration and not e2e"
+    code=$?
+    set -e
+    end=$(date +%s.%N)
+    elapsed=$(python3 -c "print(${end} - ${start})")
+    # check_wall_budget asks on_ci(); off CI it exits 0 without gating.
+    wall=0
+    uv run --all-packages python scripts/check_wall_budget.py "$elapsed" || wall=$?
+    if [ "$code" -ne 0 ]; then
+      exit "$code"
+    fi
+    exit "$wall"
+
+# Integration and e2e (§9.1). When TEST_POSTGRES_URL is set, the Postgres
+# dialect of the database tests is part of this set. Serial on purpose:
+# those tests share one database and truncate it between cases.
+test-int:
+    uv run --all-packages pytest packages apps -q -m "integration or e2e"
 
 # Run them again on Postgres too, which is what CI does and what production is.
 # sqlite ignores VARCHAR length and has no decimal type, so it cannot show you
@@ -33,12 +59,17 @@ test-pg *args="packages apps":
 lint:
     uv run --all-packages ruff check packages apps conftest.py
 
+# Fail if apps/ or packages/ still say `pending Yi Te` (B3-09). docs/ is
+# not scanned: the plan and the tickets quote the phrase.
+check-pending:
+    uv run --all-packages python scripts/check_pending_markers.py
+
 # Sign a real history read with a stored credential and print what came back.
 # Read-only: every call is a GET on a history endpoint and nothing is written.
 backfill-check *args:
     uv run --all-packages python scripts/backfill_check.py {{args}}
 
-# Time this node's hot paths on asyncio vs uvloop — evidence for docs/EventLoop.md.
+# Time this node's hot paths on asyncio vs uvloop — evidence for docs/archive/EventLoop.md.
 # Wants a broker nobody else is using: it publishes thousands of messages and
 # writes a tape. `--probe` reports behaviour differences instead.
 loop-bench *args:

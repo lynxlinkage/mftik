@@ -98,9 +98,18 @@ def test_rewrite_json_walks_keys_and_values() -> None:
 
 
 def _upgrade(conn: sa.Connection) -> None:
+    # 0030 rewrites ``st_facts``. The model no longer has that column
+    # (B10-01). It exists only while this upgrade runs.
     ops = Operations(MigrationContext.configure(conn))
     with Operations.context(ops.migration_context):
+        ops.add_column(
+            "sts_sessions",
+            sa.Column(
+                "st_facts", sa.JSON(), nullable=False, server_default="{}"
+            ),
+        )
         _migration().upgrade()
+        ops.drop_column("sts_sessions", "st_facts")
 
 
 @pytest.fixture

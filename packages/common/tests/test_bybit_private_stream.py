@@ -18,6 +18,10 @@ from mftik.exchange.errors import ExchangeNotConnectedError
 from mftik.exchange.models import OrderStatus, Side
 from mftik.exchange.tickers import UniversalTicker
 
+# §9.1 component (loopback venue stub). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
+
 #: The instrument every payload in this module is stamped with.
 TICKER = UniversalTicker.parse("Bybit_Spot_BTCUSDT")
 
@@ -167,6 +171,9 @@ async def test_concurrent_consumers_share_one_venue_subscription(
         assert (await asyncio.wait_for(second.__anext__(), 2)).order_id == "ord-1"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_reconnect_resubscribes_a_shared_topic_once(
     bybit: FakeBybit,
 ) -> None:
@@ -270,6 +277,9 @@ async def test_a_row_that_will_not_parse_does_not_kill_the_stream(
 # --- reconnect -------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_a_dropped_socket_reauthenticates_and_resubscribes(
     bybit: FakeBybit,
 ) -> None:
@@ -304,6 +314,9 @@ async def test_a_dropped_socket_reauthenticates_and_resubscribes(
         assert row.order_id == "ord-9"
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_nothing_is_replayed_for_a_topic_no_one_reads(
     bybit: FakeBybit,
 ) -> None:
@@ -325,6 +338,9 @@ async def test_nothing_is_replayed_for_a_topic_no_one_reads(
 # --- heartbeat -------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="the venue socket still sleeps on the wall clock"
+)
 async def test_the_heartbeat_goes_out_and_the_socket_survives_it(
     bybit: FakeBybit,
 ) -> None:

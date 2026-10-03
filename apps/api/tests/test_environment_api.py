@@ -13,10 +13,6 @@ from mftik.protocol import (
     STS_ENV_SYNC,
     STS_REGISTRY_GENERATION,
     STS_REGISTRY_RELOAD,
-    STS_SESSION_LIST,
-    ListSessionsResult,
-    ListSessionsResultEnvelope,
-    SessionInfo,
     StsEnvPackagePin,
     StsEnvSyncRequest,
     StsEnvSyncResult,
@@ -61,36 +57,24 @@ def _write_pkg(dest: Path, packages: dict[str, ApplySpec]) -> None:
         (pkg / "__init__.py").write_text("ok\n")
 
 
-def _session(session_id: str) -> SessionInfo:
-    return SessionInfo(
-        session_id=session_id,
-        domain="sts",
-        created_by=1,
-        created_at=0.0,
-        status="live",
-    )
-
-
 class EnvBroker:
-    """Answers session list, registry reload, and the read-only generation RPC."""
+    """Answers env sync, registry reload, and the read-only generation RPC.
+
+    It used to answer ``sts.session.list`` too, for the live-session gate in
+    front of a disruptive apply. RM-04 (#167) left that gate with nothing to
+    ask, so a list arriving here now is a bug rather than a fixture option.
+    """
 
     def __init__(
         self,
         *,
-        live: list[str] | None = None,
-        live_after: list[str] | None = None,
-        list_silent: bool = False,
         reload_silent: bool = False,
         generation_silent: bool = False,
         generation: int | None = None,
     ) -> None:
-        self.live = list(live or [])
-        self.live_after = live_after
-        self.list_silent = list_silent
         self.reload_silent = reload_silent
         self.generation_silent = generation_silent
         self.generation = generation
-        self.list_calls = 0
         self.reload_calls = 0
         self.sync_calls = 0
         self.generation_calls = 0
@@ -126,18 +110,6 @@ class EnvBroker:
 
     async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
         self.subjects.append(subject)
-        if envelope.type == STS_SESSION_LIST:
-            self.list_calls += 1
-            if self.list_silent:
-                raise DomainRpcError("timeout", "no reply from sts")
-            ids = self.live
-            if self.live_after is not None and self.list_calls > 1:
-                ids = self.live_after
-            return ListSessionsResultEnvelope.wrap(
-                ListSessionsResult(sessions=[_session(i) for i in ids]),
-                type=STS_SESSION_LIST,
-                source="sts",
-            )
         if envelope.type == STS_ENV_SYNC:
             self.sync_calls += 1
             self.sync_allow_disruptive.append(
@@ -315,55 +287,6 @@ async def test_put_commit_ok_sts_silent(env_dir: Path) -> None:
     assert NodeEnv(env_dir).read_stamp().generation == 1
 
 
-async def test_change_with_live_session_does_not_install(env_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    calls: list[str] = []
-
-    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
-        calls.append("ran")
-        _write_pkg(dest, packages)
-
-    environment_routes.installer_for_apply = record
-    broker = EnvBroker(live=["sess-1"])
-    with pytest.raises(HTTPException) as exc:
-        await _put({"numpy": ("2.0", "numpy")}, broker)
-    assert exc.value.status_code == 409
-    assert "sess-1" in str(exc.value.detail)
-    assert calls == []
-    assert NodeEnv(env_dir).read_stamp().packages["numpy"].version == "1.0"
-
-
-async def test_change_when_sts_list_is_silent_is_409(env_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    calls: list[str] = []
-
-    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
-        calls.append("ran")
-        _write_pkg(dest, packages)
-
-    environment_routes.installer_for_apply = record
-    broker = EnvBroker(list_silent=True)
-    with pytest.raises(HTTPException) as exc:
-        await _put({"numpy": ("2.0", "numpy")}, broker)
-    assert exc.value.status_code == 409
-    assert "did not answer" in str(exc.value.detail)
-    assert calls == []
-    assert NodeEnv(env_dir).read_stamp().generation == 1
-
-
-async def test_session_appearing_during_install_aborts(env_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    broker = EnvBroker(live=[], live_after=["sess-late"])
-    with pytest.raises(HTTPException) as exc:
-        await _put({"numpy": ("2.0", "numpy")}, broker)
-    assert exc.value.status_code == 409
-    assert "sess-late" in str(exc.value.detail)
-    stamp = NodeEnv(env_dir).read_stamp()
-    assert stamp.generation == 1
-    assert stamp.packages["numpy"].version == "1.0"
-    assert not (env_dir / "env" / "gen-2").exists()
-
-
 async def test_change_without_sessions_applies(env_dir: Path) -> None:
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
     out = await _put({"numpy": ("2.0", "numpy")}, EnvBroker())
@@ -374,12 +297,10 @@ async def test_change_without_sessions_applies(env_dir: Path) -> None:
 
 async def test_force_change_sets_restart_required(env_dir: Path) -> None:
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    broker = EnvBroker(live=["sess-1"])
-    out = await _put({"numpy": ("2.0", "numpy")}, broker, force=True)
+    out = await _put({"numpy": ("2.0", "numpy")}, EnvBroker(), force=True)
     assert out.generation == 2
     assert out.restart_required is True
     assert out.packages["numpy"].version == "2.0"
-    assert broker.list_calls == 0
 
 
 async def test_mismatched_abi_is_reported_then_healed(env_dir: Path) -> None:
@@ -421,19 +342,6 @@ async def test_delete_names_trees_that_required_the_extra(env_dir: Path) -> None
     assert out.packages == {}
     assert [row.name for row in out.broken] == ["UsesNumpy"]
     assert out.broken[0].requires == ["numpy"]
-
-
-async def test_upsert_adds_without_checking_sessions(env_dir: Path) -> None:
-    broker = EnvBroker(live=["sess-1"])
-    out = await upsert_package(
-        EnvironmentPackageBody(name="numpy", version="1.0", dist="numpy"),
-        broker=broker,
-        owner=1,
-        principal=Principal.owner(1, via="password"),
-    )
-    assert out.generation == 1
-    assert broker.list_calls == 0
-    assert out.restart_required is False
 
 
 async def test_two_upserts_of_different_names_both_survive(env_dir: Path) -> None:
@@ -561,31 +469,6 @@ def _resolving_installer(dest: Path, packages: dict[str, ApplySpec]) -> None:
         _dist_info(dest, "python-dateutil", "2.9.0", top_level="dateutil")
 
 
-async def test_a_new_name_that_moves_a_dependency_is_disruptive(
-    env_dir: Path,
-) -> None:
-    """Adding scipy changes no stamped name — and still swaps numpy.
-
-    Comparing the requested names says "nothing stamped is changing", so the
-    live-session gate never opens. Then the reload swings ``sys.path`` to a
-    generation with a different numpy while a session is holding the old one
-    in ``sys.modules``. The comparison has to be about what the resolver put
-    on disk.
-    """
-    environment_routes.installer_for_apply = _resolving_installer
-    await _put({"pandas": ("2.0", "pandas")}, EnvBroker())
-    assert NodeEnv(env_dir).read_stamp().generation == 1
-
-    with pytest.raises(HTTPException) as caught:
-        await _upsert("scipy", "1.0", "scipy", EnvBroker(live=["sess-1"]))
-    assert caught.value.status_code == 409
-    assert "sess-1" in str(caught.value.detail)
-
-    stamp = NodeEnv(env_dir).read_stamp()
-    assert stamp.generation == 1, "the generation was aborted, not published"
-    assert set(stamp.packages) == {"pandas"}
-
-
 async def test_the_same_add_goes_through_with_no_live_session(
     env_dir: Path,
 ) -> None:
@@ -604,7 +487,7 @@ async def test_an_add_that_moves_nothing_is_not_disruptive(
 ) -> None:
     environment_routes.installer_for_apply = _resolving_installer
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    out = await _upsert("httpx", "0.27", "httpx", EnvBroker(live=["sess-1"]))
+    out = await _upsert("httpx", "0.27", "httpx", EnvBroker())
     assert out.generation == 2
     assert out.restart_required is False
 
@@ -703,6 +586,6 @@ async def test_pin_change_allows_disruptive(env_dir: Path) -> None:
 
 async def test_force_allows_disruptive(env_dir: Path) -> None:
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    broker = EnvBroker(live=["sess-1"])
+    broker = EnvBroker()
     await _put({"numpy": ("2.0", "numpy")}, broker, force=True)
     assert broker.sync_allow_disruptive == [True]

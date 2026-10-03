@@ -7,7 +7,6 @@ import logging
 import shutil
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from broker_harness import a_broker
@@ -43,6 +42,11 @@ from mftik_sts.runtime_env import (
     refresh,
     reset_for_tests,
 )
+
+# B2-05: the RPC cases borrow NATS to test env sync. Direct handler call:
+# B5-10 (#276). Cases that never open NATS stay on this mark; the slow ones
+# miss the 50 ms unit cap, and B5-10 rewrites the module as one piece.
+pytestmark = pytest.mark.integration
 
 _NUMPY_STRAT = """\
 from mftik.strategy import Strategy
@@ -302,6 +306,9 @@ async def broker() -> Broker:
         yield client
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_reload_rpc_returns_the_generation_it_now_believes(
     broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -316,7 +323,7 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=SimpleNamespace())
+            await dispatch(req)
 
     task = asyncio.create_task(serve())
     try:
@@ -338,6 +345,9 @@ async def test_reload_rpc_returns_the_generation_it_now_believes(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_sync_rpc_installs_then_returns_the_generation(
     broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -350,7 +360,7 @@ async def test_sync_rpc_installs_then_returns_the_generation(
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=SimpleNamespace())
+            await dispatch(req)
 
     task = asyncio.create_task(serve())
     try:
@@ -381,6 +391,9 @@ async def test_sync_rpc_installs_then_returns_the_generation(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_generation_rpc_is_read_only(
     broker: Broker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -403,7 +416,7 @@ async def test_generation_rpc_is_read_only(
 
     async def serve() -> None:
         async for req in broker.serve(Topics.STS, stop=stop):
-            await dispatch(req, sessions=SimpleNamespace())
+            await dispatch(req)
 
     task = asyncio.create_task(serve())
     try:

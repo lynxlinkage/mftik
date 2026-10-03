@@ -19,12 +19,15 @@ from mftik.broker import Broker
 from mftik.exchange.models import AggTrade, Side, Trade
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import Topics
-from mftik.strategy import tape as tape_mod
 from mftik.strategy.eventlog import EventLog
 from mftik.strategy.tape import StrategyTape, TapeFeedNotAttached
 from mftik_md.rpc.tape import TAPE_RPC_CHUNK
 from mftik_md.tape_store import TapeStore
 from tape_rpc import serve_tape
+
+# B2-05: borrows NATS to test strategy tape reads. Direct handler call:
+# B5-07 (#216). B7-04 (#236) later keys the tape by atom.
+pytestmark = pytest.mark.integration
 
 TICKER = UniversalTicker.parse("BinanceUM_Perp_BTCUSDT")
 OTHER = UniversalTicker.parse("BinanceUM_Perp_ETHUSDT")
@@ -113,6 +116,9 @@ async def _record(
     )
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_reads_back_as_aggtrade_models(
     broker: Broker, store: TapeStore
@@ -139,6 +145,9 @@ async def test_reads_back_as_aggtrade_models(
     assert record.first_trade_id == "1"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_omitting_on_print_keeps_the_prints_on_the_slice(
     broker: Broker, store: TapeStore
@@ -166,6 +175,9 @@ async def test_omitting_on_print_keeps_the_prints_on_the_slice(
     assert len(result) == 2
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_trade_topic_reads_back_as_trade(
     broker: Broker, store: TapeStore
@@ -186,6 +198,9 @@ async def test_trade_topic_reads_back_as_trade(
     assert type(prints[0]) is Trade
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_records_from_before_a_gap_are_dropped(
     broker: Broker, store: TapeStore
@@ -208,6 +223,9 @@ async def test_records_from_before_a_gap_are_dropped(
     assert result.dropped_before_gap == 1
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_coverage_is_reported(broker: Broker, store: TapeStore) -> None:
     await store.mark_recording(AGG_FEED, since_ms=99, ttl_seconds=3600)
@@ -226,6 +244,9 @@ async def test_coverage_is_reported(broker: Broker, store: TapeStore) -> None:
     assert result.recording is True
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_stopped_feed_says_so(broker: Broker, store: TapeStore) -> None:
     """History that ends in the past is still history — but it ends."""
@@ -246,6 +267,9 @@ async def test_a_stopped_feed_says_so(broker: Broker, store: TapeStore) -> None:
     assert result.recording is False
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_nothing_recorded_is_an_empty_slice_not_an_error(
     broker: Broker, store: TapeStore
@@ -263,6 +287,9 @@ async def test_nothing_recorded_is_an_empty_slice_not_an_error(
     assert result.recording is False
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_one_unreadable_record_does_not_lose_the_read(
     broker: Broker, store: TapeStore
@@ -290,6 +317,9 @@ async def test_one_unreadable_record_does_not_lose_the_read(
     assert [r.trade_id for r in prints] == ["1", "3"]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_limit_takes_the_most_recent(
     broker: Broker, store: TapeStore
@@ -318,6 +348,9 @@ async def _interrupted(
     await store.mark_recording(AGG_FEED, since_ms=resumed_ms, ttl_seconds=3600)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_short_measured_gap_is_read_across_and_reported(
     broker: Broker, store: TapeStore
@@ -343,6 +376,9 @@ async def test_a_short_measured_gap_is_read_across_and_reported(
     assert result.missing_ms == 2_000
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_gap_too_long_to_span_still_ends_the_series(
     broker: Broker, store: TapeStore
@@ -367,6 +403,9 @@ async def test_a_gap_too_long_to_span_still_ends_the_series(
     assert result.gaps == []
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_caller_can_refuse_every_gap(
     broker: Broker, store: TapeStore
@@ -390,6 +429,9 @@ async def test_a_caller_can_refuse_every_gap(
     assert result.dropped_before_gap == 1
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_gap_the_records_no_longer_reach_is_not_reported(
     broker: Broker, store: TapeStore
@@ -436,6 +478,9 @@ async def test_a_star_mapping_does_not_invent_an_owner(
         await _tape(broker, md={"*": [AGG_FEED]}).read(TICKER)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_the_wrong_instance_returns_an_empty_slice(
     broker: Broker, store: TapeStore
@@ -461,6 +506,9 @@ async def test_the_wrong_instance_returns_an_empty_slice(
     assert result.recording is False
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 async def test_a_read_assembles_chunks_into_one_slice(
     broker: Broker, store: TapeStore, monkeypatch
@@ -483,56 +531,6 @@ async def test_a_read_assembles_chunks_into_one_slice(
 
     assert [r.trade_id for r in prints] == ["0", "1", "2", "3", "4"]
     assert TAPE_RPC_CHUNK > 2  # production chunk stays large
-
-
-@pytest.mark.asyncio
-async def test_parse_yields_the_loop_between_records(
-    broker: Broker, store: TapeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The assembled tail must not be one turn of the loop.
-
-    Fetching already awaits per page. A sibling task that only runs while
-    some, but not all, of the rows have been parsed is running during the
-    parse itself — the stretch that used to hold every session's heartbeat.
-    """
-    monkeypatch.setattr(tape_mod, "SLICE_S", -1.0)
-    await store.mark_recording(AGG_FEED, since_ms=1, ttl_seconds=3600)
-    for n in range(3):
-        await _record(store, AGG_FEED, str(n), "68000", recorded_ms=100 + n)
-
-    parsed = 0
-    real_parse = tape_mod._parse
-
-    def counting(topic: str, universal_ticker: str, fields: dict[str, str]):
-        nonlocal parsed
-        parsed += 1
-        return real_parse(topic, universal_ticker, fields)
-
-    monkeypatch.setattr(tape_mod, "_parse", counting)
-    interleaved = False
-
-    async def other() -> None:
-        nonlocal interleaved
-        while True:
-            if 0 < parsed < 3:
-                interleaved = True
-            await asyncio.sleep(0)
-
-    watcher = asyncio.create_task(other())
-    stop = asyncio.Event()
-    serve = asyncio.create_task(
-        serve_tape(broker, store, instance=INSTANCE, stop=stop)
-    )
-    try:
-        result, prints = await _read(_tape(broker), TICKER)
-    finally:
-        stop.set()
-        serve.cancel()
-        watcher.cancel()
-        await asyncio.gather(serve, watcher, return_exceptions=True)
-
-    assert [r.trade_id for r in prints] == ["0", "1", "2"]
-    assert interleaved
 
 
 def test_sts_and_strategy_do_not_import_redis() -> None:

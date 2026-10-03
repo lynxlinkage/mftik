@@ -2,48 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 
+from mftik.protocol import IntentOwner, TdIntentPut, load_td, td_api_ids_of
 from mftik_db.models.api import Api
-from mftik_db.models.session import TdSessionRow
-from mftik_db.repositories import ApiRepository, TdSessionRepository
+from mftik_db.repositories import (
+    ApiRepository,
+    InstanceRepository,
+    IntentRepository,
+    StsSessionRepository,
+    TdSessionRepository,
+)
 from mftik_db.session import session_scope
 
+logger = logging.getLogger(__name__)
 
-async def persist_live_session(
-    *,
-    session_id: str,
-    created_by: int,
-    api_id: int,
-) -> TdSessionRow:
-    async with session_scope() as db:
-        repo = TdSessionRepository(db)
-        return await repo.attach_live(
-            session_id=session_id,
-            created_by=created_by,
-            api_id=api_id,
-        )
-
-
-async def mark_session_done(*, session_id: str, api_id: int) -> TdSessionRow | None:
-    async with session_scope() as db:
-        repo = TdSessionRepository(db)
-        return await repo.mark_done(session_id=session_id, api_id=api_id)
-
-
-async def list_sessions(
-    *,
-    status: str | None = "live",
-    created_by: int | None = None,
-    limit: int = 100,
-) -> Sequence[TdSessionRow]:
-    async with session_scope() as db:
-        repo = TdSessionRepository(db)
-        return list(
-            await repo.list_sessions(
-                status=status, created_by=created_by, limit=limit
-            )
-        )
+#: Reads unreleased intents for one TD instance. Tests pass a stand-in.
+ReadHeldIntents = Callable[[str], Awaitable[tuple[TdIntentPut, ...]]]
 
 
 async def count_live_for_api(api_id: int) -> int:
@@ -58,7 +35,159 @@ async def get_api(api_id: int) -> Api | None:
         return await ApiRepository(db).get(api_id)
 
 
-async def instance_name(api_id: int) -> str | None:
-    """Which TD instance may use this credential."""
+@dataclass(frozen=True)
+class AccountCredential:
+    """The fields an account worker needs, copied out of the session."""
+
+    api_id: int
+    venue: str
+    api_key: str
+    api_secret: str
+    passphrase: str | None
+    cancel_on_disconnect: bool
+
+
+@dataclass(frozen=True)
+class InstanceBinding:
+    """One ``apis`` row bound to an instance, without the secret."""
+
+    api_id: int
+    venue: str
+    cancel_on_disconnect: bool
+
+
+async def account_credential(api_id: int) -> AccountCredential | None:
+    """The credential for ``api_id``, or ``None`` when the row is gone.
+
+    Copied before the session closes. A detached ORM row would expire
+    on the next attribute read.
+    """
     async with session_scope() as db:
-        return await ApiRepository(db).instance_name(api_id)
+        row = await ApiRepository(db).get(api_id)
+        if row is None:
+            return None
+        return AccountCredential(
+            api_id=row.id,
+            venue=row.venue,
+            api_key=row.api_key,
+            api_secret=row.api_secret,
+            passphrase=row.passphrase,
+            cancel_on_disconnect=bool(row.cancel_on_disconnect),
+        )
+
+
+async def read_held_intents(
+    instance: str,
+    *,
+    scope=None,
+) -> tuple[TdIntentPut, ...]:
+    """Unreleased ``td_intents`` for accounts bound to ``instance``.
+
+    One :class:`~mftik.protocol.TdIntentPut` per session, ``api_ids`` in
+    row order. ``owner.sts_instance`` is ``sts_sessions.instance``. An
+    old row whose column is null or empty is named with
+    :meth:`~mftik_db.repositories.InstanceRepository.derived_sts` on
+    ``td_api_ids_of(load_td(record.td))``, the same derivation the API
+    uses. That name is not written back. A missing session, or a
+    derivation that is not exactly one instance, logs ``session_id``
+    and fails the read: dropping the row would look like "no intent"
+    and the next push would turn that account's trading layer off
+    (P5). An empty result is a successful read: this instance really
+    has nothing unreleased.
+
+    ``scope`` defaults to :func:`mftik_db.session.session_scope`. A
+    test passes its scratch database. This does not write.
+    """
+    open_scope = session_scope if scope is None else scope
+    async with open_scope() as db:
+        apis = await ApiRepository(db).list_by_instance(instance)
+        rows = await IntentRepository(db).unreleased_td([api.id for api in apis])
+        grouped: dict[str, list[int]] = {}
+        for row in rows:
+            grouped.setdefault(row.session_id, []).append(int(row.api_id))
+        sessions = StsSessionRepository(db)
+        puts: list[TdIntentPut] = []
+        for session_id, api_ids in grouped.items():
+            record = await sessions.get_by_session_id(session_id)
+            name = None if record is None else record.instance
+            if not isinstance(name, str) or name == "":
+                derived = None
+                if record is not None:
+                    derived = await InstanceRepository(db).derived_sts(
+                        td_api_ids_of(load_td(record.td))
+                    )
+                if isinstance(derived, str) and derived != "":
+                    name = derived
+                else:
+                    logger.error(
+                        "td intent session_id=%s has no sts instance",
+                        session_id,
+                    )
+                    raise RuntimeError(
+                        f"td intent session_id={session_id} has no sts instance"
+                    )
+            puts.append(
+                TdIntentPut(
+                    session_id=session_id,
+                    owner=IntentOwner(sts_instance=name, session_id=session_id),
+                    api_ids=api_ids,
+                )
+            )
+        return tuple(puts)
+
+
+def install_intent_seed(book, puts: Sequence[TdIntentPut]) -> None:
+    """Copy ``puts`` into ``book`` without dropping a live put.
+
+    The boot book is empty, so this is the whole held set. A put that
+    arrived while the read was in flight stays: the database copy does
+    not replace that owner. An owner only the database has is added.
+    """
+    current = book.rows()
+    if not current:
+        for put in puts:
+            book.put(put)
+        return
+    held = {row.owner for row in current}
+    for put in puts:
+        if put.owner not in held:
+            book.put(put)
+
+
+async def seed_intent_book(
+    book,
+    *,
+    instance: str,
+    read: ReadHeldIntents | None = None,
+) -> bool:
+    """Seed ``book`` from ``td_intents``. False means do not publish.
+
+    A failed read leaves the book as it was. The caller keeps the
+    trading-bit gate closed and tries again on the next pass. Success
+    includes an empty held set.
+    """
+    load = read_held_intents if read is None else read
+    try:
+        puts = await load(instance)
+        install_intent_seed(book, puts)
+    except Exception:
+        logger.exception(
+            "TD intent seed failed instance=%s; trading bit not pushed",
+            instance,
+        )
+        return False
+    return True
+
+
+async def bindings_for_instance(instance: str) -> tuple[InstanceBinding, ...]:
+    """Every account bound to ``instance``, secrets left in the database."""
+    async with session_scope() as db:
+        rows = await ApiRepository(db).list_by_instance(instance)
+        return tuple(
+            InstanceBinding(
+                api_id=row.id,
+                venue=row.venue,
+                cancel_on_disconnect=bool(row.cancel_on_disconnect),
+            )
+            for row in rows
+        )

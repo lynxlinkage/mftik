@@ -29,8 +29,7 @@ from mftik.cli import config
 from mftik.cli.config import Profile
 
 #: How long a plain request may take. Short enough that an unreachable
-#: host fails rather than hangs. ``run`` sizes its own timeout from the
-#: document — a deploy's attach walk is longer than this.
+#: host fails rather than hangs.
 DEFAULT_TIMEOUT_S = 30.0
 
 #: Prefixes to try when connecting, in order. Empty first: a stack that

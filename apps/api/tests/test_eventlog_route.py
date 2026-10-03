@@ -101,6 +101,8 @@ async def _collect(response) -> bytes:  # noqa: ANN001
     return b"".join([chunk async for chunk in response.body_iterator])
 
 
+# walks every gzip chunk; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_download_walks_every_part_in_order(monkeypatch) -> None:
     monkeypatch.setattr(sts_routes, "_EVENTLOG_CHUNK_BYTES", 8)
     parts = {

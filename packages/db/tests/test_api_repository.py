@@ -72,3 +72,26 @@ async def test_lookup_finds_a_non_canonical_venue_spelling(db) -> None:
         await apis.get_by_venue_and_api_key("BinanceCM", "shared-key")
         is None
     )
+
+
+async def test_list_by_instance_is_the_binding(db) -> None:
+    from db_harness import an_instance
+
+    other = await an_instance(db, name="td-other")
+    apis = ApiRepository(db)
+    here = await apis.add(_row(venue="Paper", api_key="paper-key"))
+    await apis.add(
+        Api(
+            owner_id=1,
+            venue="Paper",
+            api_key="other-key",
+            api_secret="secret",
+            type=ApiType.HMAC.value,
+            instance_id=other.id,
+        )
+    )
+    await db.flush()
+
+    found = await apis.list_by_instance("td")
+
+    assert [row.id for row in found] == [here.id]

@@ -1,0 +1,67 @@
+# B4-09 acceptance overlay. `docker-compose.yml` is not modified.
+#
+# A controller roll is SIGTERM to the plane process inside the running
+# container, not a restart of the container. `init: true` makes tini PID 1,
+# so a shim that has left its parent is reparented there and keeps the
+# worker. The shell loop starts the next controller, which reattaches.
+#
+# `PROCMAN_MAX_WORKERS` and `PROCMAN_MEMORY_BUDGET_MB` are blank unless the
+# caller exported them. Blank is no limit. Auth on the API is off in this
+# overlay only, so the acceptance script can deploy without a login.
+
+services:
+  api:
+    environment:
+      MFTIK_AUTH_ENABLED: "0"
+
+  md:
+    init: true
+    environment:
+      PROCMAN_MAX_WORKERS: ${PROCMAN_MAX_WORKERS:-}
+      PROCMAN_MEMORY_BUDGET_MB: ${PROCMAN_MEMORY_BUDGET_MB:-}
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          md &
+          echo $$! > /tmp/b4-09-controller.pid
+          wait $$!
+          sleep 0.2
+        done
+
+  td:
+    init: true
+    environment:
+      PROCMAN_MAX_WORKERS: ${PROCMAN_MAX_WORKERS:-}
+      PROCMAN_MEMORY_BUDGET_MB: ${PROCMAN_MEMORY_BUDGET_MB:-}
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          td &
+          echo $$! > /tmp/b4-09-controller.pid
+          wait $$!
+          sleep 0.2
+        done
+
+  sts:
+    init: true
+    environment:
+      PROCMAN_MAX_WORKERS: ${PROCMAN_MAX_WORKERS:-}
+      PROCMAN_MEMORY_BUDGET_MB: ${PROCMAN_MEMORY_BUDGET_MB:-}
+    volumes:
+      - sts_eventlog:/var/log/mftik/sts
+      - mftik_data:/var/lib/mftik
+      - ${B4_09_MARKERS:-/tmp/b4-09-markers}:/b4-09
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          sts &
+          echo $$! > /tmp/b4-09-controller.pid
+          wait $$!
+          sleep 0.2
+        done

@@ -244,6 +244,9 @@ async def test_s3_short_name_is_not_a_source(world) -> None:
     assert peer_d.json()["deliveries"][0]["event_count"] == 1
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_s4_live_only_no_history(world, monkeypatch) -> None:
     scope, _, posts = world
     sid = uuid4().hex
@@ -305,6 +308,9 @@ async def test_s4_live_only_no_history(world, monkeypatch) -> None:
     assert posts == []
 
 
+@pytest.mark.real_sleep(
+    reason="alert flush still sleeps on the wall clock"
+)
 async def test_s5_no_ring_buffer_replay(world, monkeypatch) -> None:
     _, _, posts = world
     live: asyncio.Queue[tuple[str, Envelope[dict]] | None] = asyncio.Queue()

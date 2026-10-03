@@ -239,6 +239,8 @@ async def test_disabled_alert_does_not_post(runtime: MatchRuntime) -> None:
     assert runtime.pending_events(1) == []
 
 
+# webhook round-trip; over the 50 ms unit call cap
+@pytest.mark.component
 async def test_429_is_recorded_and_matching_continues(
     runtime: MatchRuntime, deliveries: list[dict[str, Any]]
 ) -> None:
@@ -260,6 +262,11 @@ async def test_429_is_recorded_and_matching_continues(
     assert len(runtime.pending_events(1)) == 1
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason="alert flush still sleeps on the wall clock"
+)
 async def test_timer_flushes_once(
     monkeypatch: pytest.MonkeyPatch, deliveries: list[dict[str, Any]]
 ) -> None:
@@ -288,6 +295,11 @@ async def test_timer_flushes_once(
     assert runtime.pending_events(1) == []
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
+@pytest.mark.real_sleep(
+    reason="alert flush still sleeps on the wall clock"
+)
 async def test_timer_flush_posts_when_webhook_suspends(
     monkeypatch: pytest.MonkeyPatch, deliveries: list[dict[str, Any]]
 ) -> None:

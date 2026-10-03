@@ -12,7 +12,7 @@ and ``key_kind`` snapshot a machine credential so the trail can say
 which key and which kind without joining a row that may later be gone.
 
 Nullable because the table is append-only and already has rows. Those
-stay blank; the page renders an em dash. See docs/AuditIdentity.md.
+stay blank; the page renders an em dash. See docs/archive/AuditIdentity.md.
 """
 
 from typing import Sequence, Union

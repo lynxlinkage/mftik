@@ -55,11 +55,9 @@ _PRE = sa.Table(
     sa.Column("type", sa.String(128)),
     sa.Column("status", sa.String(16)),
     sa.Column("restart", sa.String(8)),
-    sa.Column("rebuild_count", sa.Integer),
     sa.Column("td_api_ids", sa.JSON),
     sa.Column("md_ids", sa.JSON),
     sa.Column("st_paras", sa.JSON),
-    sa.Column("st_facts", sa.JSON),
 )
 
 _POST = sa.Table(
@@ -87,11 +85,9 @@ def _row(session_id: str, **over: Any) -> dict[str, Any]:
         "type": "NoopStrategy",
         "status": "live",
         "restart": "always",
-        "rebuild_count": 0,
         "td_api_ids": [],
         "md_ids": [],
         "st_paras": {},
-        "st_facts": {},
         **over,
     }
 
@@ -170,11 +166,11 @@ async def test_the_old_column_is_gone_and_the_new_one_is_there(
 async def test_cross_arb_gets_its_account_names_from_the_mapping(
     migrated,
 ) -> None:
-    """Without this a session live across the upgrade cannot rebuild.
+    """``CrossArb.on_initialized`` now requires the two names.
 
-    ``CrossArb.on_initialized`` now requires the two names, and it runs on the
-    rebuild path — so a row whose ``st_paras`` predates them fails there, not
-    here, where nothing is left to explain what went wrong.
+    A row whose ``st_paras`` predates them would fail wherever the strategy is
+    next constructed, not here, where nothing is left to explain what went
+    wrong.
     """
     table = await migrated(
         [

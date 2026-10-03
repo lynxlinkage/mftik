@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
 
 from mftik.broker import IncomingRequest
 from mftik.envapply import (
@@ -35,9 +34,6 @@ from mftik.protocol import (
 )
 
 from mftik_sts.runtime_env import current_stamp, overlay_is_live, refresh
-
-if TYPE_CHECKING:
-    from mftik_sts.session import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +119,9 @@ def _pins_out(stamp: EnvStamp) -> dict[str, StsEnvPackagePin]:
 async def handle_env_sync(
     req: IncomingRequest,
     *,
-    sessions: SessionManager | None = None,
+    instance: str | None = None,
 ) -> None:
-    del sessions
+    del instance
     request = StsEnvSyncRequest.model_validate(req.envelope.payload)
     try:
         # ``uv`` is a blocking subprocess. The scan that follows mutates

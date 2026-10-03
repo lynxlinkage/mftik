@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mftik.exchange.delivery_stamp import HasDelivery
 from mftik.exchange.tickers import SEPARATOR, Category, UniversalTicker
 
 
@@ -207,7 +208,7 @@ _TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
 }
 
 
-class InstrumentScoped(BaseModel):
+class InstrumentScoped(HasDelivery, BaseModel):
     """Base for anything that is about one instrument — and says which.
 
     Market updates, order events and order *requests* alike: what they share
@@ -290,6 +291,42 @@ class Ticker(InstrumentScoped):
     bid: Decimal
     ask: Decimal
     last: Decimal
+    ts: float = Field(default_factory=_ts)
+
+
+class TickerStats(InstrumentScoped):
+    """A rolling trade window, with **no quote in it**.
+
+    What a venue's 24h ticker actually carries once the bid and ask are taken
+    out of it. Binance's futures ``@ticker`` has never had them; a
+    :class:`Ticker` built from it alone would have to invent a quote, and a
+    bid, ask and last that are the same number read as a crossed-then-flat
+    book to anything comparing two venues.
+
+    So the two halves stay two models and two atoms: ``@ticker`` decodes to
+    this, ``@bookTicker`` to a :class:`BestQuote`, and the platform-generic
+    ``quote_stats`` projector pairs them into a :class:`Ticker` on the STS
+    ingress — one atom per connection, composed where both can be seen (F19,
+    :mod:`mftik.exchange.atoms`). Nothing subscribes to this model directly;
+    a strategy still declares ``ticker`` and still receives ``Ticker``.
+
+    ``last`` is the only required figure, because it is the one every venue
+    puts on the row and the one the projector reads. The rest are ``None``
+    where the venue omits them rather than ``0``, which would be a price.
+    ``window_s`` is the window the figures cover — a venue's "24h" is a
+    rolling window, not a session — so a consumer comparing two venues knows
+    whether it is comparing the same thing.
+    """
+
+    last: Decimal
+    open: Decimal | None = None
+    high: Decimal | None = None
+    low: Decimal | None = None
+    #: Base-denominated traded volume over the window.
+    volume: Decimal | None = None
+    #: Quote-denominated traded volume over the window.
+    quote_volume: Decimal | None = None
+    window_s: float = 86400.0
     ts: float = Field(default_factory=_ts)
 
 
@@ -582,7 +619,7 @@ class OrderBook(InstrumentScoped):
     ts: float = Field(default_factory=_ts)
 
 
-class Balance(BaseModel):
+class Balance(HasDelivery, BaseModel):
     """One asset's balance, as the venue reports it plus what we reserved.
 
     ``free`` and ``locked`` are the venue's numbers. ``prelock`` is ours: funds

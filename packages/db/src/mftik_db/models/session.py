@@ -67,7 +67,16 @@ class SessionStatus(StrEnum):
 
 
 class StsSessionRow(Base):
-    """STS strategy session record."""
+    """STS strategy session record, Spec and Status on one row (P2, §3.3).
+
+    The API is the only writer of Spec: the deploy, ``restart``, and
+    ``generation``. The STS controller's Supervisor is the only writer of
+    Status: phase (``status``, ``reason``), ``observed_generation``,
+    ``worker_incarnation``, ``conditions``, ``restart_count``. Readers —
+    API, UI, CLI — do not write those. ``strategy_digest`` and
+    ``env_generation`` are Spec too (F39): the API writes them at start,
+    and the controller only reads them.
+    """
 
     __tablename__ = "sts_sessions"
 
@@ -123,14 +132,54 @@ class StsSessionRow(Base):
     instance: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True
     )
-    #: ``always`` | ``never`` — whether this run asked to be restored after an
-    #: STS restart. A property of the deploy, not of the strategy class or of
-    #: whoever configured the process.
-    restart: Mapped[str] = mapped_column(String(8), default="always")
-    #: How many times a rebuild has been attempted. Counted before the attempt
-    #: rather than after it, so a rebuild that takes the process down with it
-    #: still counts — that is the loop the cap exists to break.
-    rebuild_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: ``never`` | ``on_failure`` (F11). Default ``never``: a crash ends the
+    #: session. ``on_failure`` may start a fresh run from ``on_start``, and
+    #: only for an A-class crash inside the document's ``max_restarts`` /
+    #: ``restart_window_s`` — those limits are not columns. Width 16 because
+    #: ``on_failure`` does not fit in the original 8. A row from before F11
+    #: may still say ``always``, which is no longer a policy.
+    restart: Mapped[str] = mapped_column(String(16), default="never")
+    #: Spec generation (P2, §8.1). The API writes ``1`` at start and bumps
+    #: it when the spec changes. The controller does not. Existing rows are
+    #: backfilled to ``1``: the stored spec is generation 1 of itself.
+    #: Not the extras pin: that is :attr:`env_generation`.
+    generation: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    #: Spec (F39). The strategy-tree digest pinned at start,
+    #: ``sha256:`` plus 64 hex characters. Null for a built-in strategy,
+    #: whose code is the platform release, and for every row written
+    #: before 0036. The API writes it. The controller reads it and does
+    #: not update it; a rehang uses this value, not the registry index.
+    strategy_digest: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    #: Spec (F39). The extras generation (``env/gen-{N}``) pinned at start.
+    #: Null when the session has no extras pin, and on rows from before
+    #: 0036. Not :attr:`generation`.
+    env_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Status. The generation the STS controller has reconciled to (P2's
+    #: observedGeneration). Null until it records one — not ``0``, which
+    #: would claim a generation that was never written.
+    observed_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Status. The incarnation the controller assigned to the worker
+    #: (§4.3, §5.2). Null until a worker exists. The controller is the only
+    #: writer (§3.3); a restart uses the previous value plus one.
+    worker_incarnation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Status. Readiness and start progress — ``MdReady``, ``TdReady``, and
+    #: the lines the board shows (§5.2, §5.6). The STS controller's
+    #: Supervisor is the only writer (§3.3). An empty object is "nothing
+    #: reported yet"; the document shape inside the object belongs to the
+    #: controller, not to this column.
+    conditions: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    #: Status. How many F11 restarts this session has used. The Supervisor
+    #: writes it (§5.2). Starts at ``0``. ``0037_drop_rebuild_facts`` dropped
+    #: the old ``rebuild_count`` column without copying it: that counter
+    #: belonged to a mechanism RM-01 already removed, and this one counts a
+    #: different event.
+    restart_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     #: Account name → ``{api_id, settings}``. The attach list the UI still
     #: calls ``td_api_ids`` is derived from this.
     td: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -147,11 +196,6 @@ class StsSessionRow(Base):
         JSON, default=dict
     )
     st_paras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    #: What ``Strategy.remember()`` wrote — facts established while running
-    #: that cannot be re-derived from ``st_paras`` or from TD reconciliation,
-    #: like the price a chase anchored its slippage guard on. Kept apart from
-    #: ``st_paras`` so configuration and runtime facts do not blur together.
-    st_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     creator = relationship("User", back_populates="sts_sessions")
 
@@ -169,7 +213,12 @@ class StsSessionRow(Base):
 
 
 class TdSessionRow(Base):
-    """TD trading attach record — one row per (session_id, api_id)."""
+    """TD trading attach record — one row per (session_id, api_id).
+
+    Read-only history from B10-01 (F38, §8.4). The table stays so a cutover
+    can still list what was attached before intents existed. Nothing in the
+    application inserts or updates a row; ``TdSessionRepository`` only reads.
+    """
 
     __tablename__ = "td_sessions"
     __table_args__ = (
@@ -201,7 +250,11 @@ class TdSessionRow(Base):
 
 
 class MdSessionRow(Base):
-    """MD attach record — one row per (venue, STS session_id)."""
+    """MD attach record — one row per (venue, STS session_id).
+
+    Read-only history from B10-01 (F38, §8.4), same as :class:`TdSessionRow`.
+    ``MdSessionRepository`` only reads.
+    """
 
     __tablename__ = "md_sessions"
     __table_args__ = (

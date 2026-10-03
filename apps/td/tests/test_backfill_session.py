@@ -1,11 +1,11 @@
 """``td.backfill`` — accepted at once, walked out of band.
 
 The shape is the argument. Order entry is keyed by ``api_id`` because only the
-process holding the lease may place an order; a history read is owned by
+process holding the credential may place an order; a history read is owned by
 nobody, so this subject takes work from anyone and answers for accounts this
 process has never traded. What that buys is the case a keyed subject cannot
-serve at all: an account nobody is attached to any more, whose record is
-exactly the one nothing else will repair.
+serve at all: an account nobody is trading any more, whose record is exactly
+the one nothing else will repair.
 
 The reply is acceptance, not the walk. A walk is minutes of venue round
 trips; the cursor is the record of progress.
@@ -20,6 +20,7 @@ from broker_harness import a_broker
 from mftik.broker import Broker
 from mftik.protocol import (
     TD_BACKFILL,
+    TD_BACKFILL_RESULT,
     Envelope,
     TdBackfill,
     TdBackfillResult,
@@ -28,7 +29,15 @@ from mftik.protocol import (
 from mftik_td.backfill.executor import BackfillOutcome
 from mftik_td.backfill.session import BackfillSession
 
+# B2-05: borrows NATS to test the backfill session. Direct handler call:
+# B6-05 (#223).
+pytestmark = pytest.mark.integration
+
 API_ID = 7
+
+#: Short enough that a missing worker does not spend the production
+#: forward budget inside this file. Production uses ``FORWARD_TIMEOUT_S``.
+_FORWARD_S = 0.25
 
 
 @pytest.fixture
@@ -68,7 +77,7 @@ async def ask(broker: Broker, **over) -> TdBackfillResult:
 @pytest.fixture
 async def serving(broker: Broker):
     executor = FakeExecutor()
-    session = BackfillSession(broker, executor)
+    session = BackfillSession(broker, executor, forward_timeout=_FORWARD_S)
     await session.start()
     yield session, executor
     await session.stop()
@@ -113,12 +122,15 @@ async def test_an_account_this_process_never_traded_is_still_served(
     assert executor.runs == [(999, (), "")]
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_walk_outcome_is_not_on_the_reply(broker) -> None:
     """Accepted means TD took it. The cursor is how the walk went."""
     executor = FakeExecutor(
         outcome=BackfillOutcome(api_id=API_ID, ok=False, reason="venue said no")
     )
-    session = BackfillSession(broker, executor)
+    session = BackfillSession(broker, executor, forward_timeout=_FORWARD_S)
     await session.start()
     try:
         result = await ask(broker)
@@ -143,11 +155,14 @@ async def test_an_unreadable_request_is_refused_not_dropped(serving, broker) -> 
     assert executor.runs == []
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_long_walk_does_not_stall_the_queue_behind_it(broker) -> None:
     """A walk is minutes of venue round trips; the serve loop is one consumer."""
     executor = FakeExecutor()
     executor.gate = asyncio.Event()
-    session = BackfillSession(broker, executor)
+    session = BackfillSession(broker, executor, forward_timeout=_FORWARD_S)
     await session.start()
     try:
         first = asyncio.create_task(ask(broker, api_id=1))
@@ -170,11 +185,16 @@ async def test_a_long_walk_does_not_stall_the_queue_behind_it(broker) -> None:
         await session.stop()
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_too_many_runs_at_once_are_refused_not_queued(broker) -> None:
     """Refused, because a request held here is one nothing can see the state of."""
     executor = FakeExecutor()
     executor.gate = asyncio.Event()
-    session = BackfillSession(broker, executor, max_in_flight=1)
+    session = BackfillSession(
+        broker, executor, max_in_flight=1, forward_timeout=_FORWARD_S
+    )
     await session.start()
     try:
         held = asyncio.create_task(ask(broker, api_id=1))
@@ -192,6 +212,47 @@ async def test_too_many_runs_at_once_are_refused_not_queued(broker) -> None:
     finally:
         executor.gate.set()
         await session.stop()
+
+
+@pytest.mark.real_sleep(
+    reason="NATS subscription has no ready event; the worker must be up first"
+)
+async def test_a_live_worker_is_asked_and_the_process_does_not_walk(broker) -> None:
+    """The schedule still hits ``td.backfill``. The walk is the worker's."""
+    executor = FakeExecutor()
+    session = BackfillSession(broker, executor, forward_timeout=1.0)
+    seen: list[TdBackfill] = []
+    stop = asyncio.Event()
+
+    async def serve_account() -> None:
+        async for req in broker.serve(Topics.td_account(API_ID), stop=stop):
+            payload = TdBackfill.model_validate(req.envelope.payload)
+            seen.append(payload)
+            await req.reply(
+                Envelope[TdBackfillResult].wrap(
+                    TdBackfillResult(
+                        api_id=payload.api_id, ok=True, reason="accepted"
+                    ),
+                    type=TD_BACKFILL_RESULT,
+                    source="td",
+                )
+            )
+
+    account = asyncio.create_task(serve_account())
+    await session.start()
+    await asyncio.sleep(0.2)
+    try:
+        result = await ask(broker, reason="cron")
+        assert result.ok is True
+        assert result.reason == "accepted"
+        assert [(row.api_id, row.reason) for row in seen] == [(API_ID, "cron")]
+        await asyncio.sleep(0.05)
+        assert executor.runs == []
+    finally:
+        stop.set()
+        await session.stop()
+        account.cancel()
+        await asyncio.gather(account, return_exceptions=True)
 
 
 async def _until(pred, *, timeout: float = 2.0) -> None:

@@ -116,6 +116,7 @@ PUBLIC_UNSUBSCRIBE = "public/unsubscribe"
 PUBLIC_SET_HEARTBEAT = "public/set_heartbeat"
 PUBLIC_TEST = "public/test"
 PUBLIC_GET_INSTRUMENTS = "public/get_instruments"
+PUBLIC_GET_TIME = "public/get_time"
 PUBLIC_TICKER = "public/ticker"
 PUBLIC_GET_ORDER_BOOK = "public/get_order_book"
 PUBLIC_GET_TRADINGVIEW = "public/get_tradingview_chart_data"
@@ -159,6 +160,7 @@ __all__ = [
     "PUBLIC_GET_FUNDING_HISTORY",
     "PUBLIC_GET_INSTRUMENTS",
     "PUBLIC_GET_ORDER_BOOK",
+    "PUBLIC_GET_TIME",
     "PUBLIC_GET_TRADINGVIEW",
     "PUBLIC_SET_HEARTBEAT",
     "PUBLIC_SUBSCRIBE",

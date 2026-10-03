@@ -32,6 +32,11 @@ from mftik.protocol import (
     Topics,
 )
 
+# B2-05: wiring smoke (§9.2), one case per plane. It still opens a private
+# socket, so it stays out of component. ``app.py`` wiring is B4-02 (STS,
+# #202), B4-05 (TD, #205) and B4-06 (MD, #206). Not a direct handler call.
+pytestmark = pytest.mark.integration
+
 #: The planes with a named subject, and how to ask each one whether it is
 #: listening. Health is the probe that needs no session manager — every other
 #: request type would fail on the ``None`` passed below for reasons that have
@@ -44,19 +49,38 @@ PLANES = [
 
 
 def _run_rpc(plane: str):
+    """Each plane's loop, callable as ``(broker, stop, subject=…)``.
+
+    The planes that still take a session manager are handed ``None``. TD no
+    longer has one (RM-06) and nor does STS (RM-04), so they are called
+    without it — the adapters are what lets one test cover loops whose
+    signatures are mid-migration.
+    """
     if plane == "td":
         from mftik_td import app
 
-        return app.run_rpc
+        return lambda broker, stop, *, subject: app.run_rpc(
+            broker, stop, subject=subject
+        )
     if plane == "md":
         from mftik_md import app
 
-        return app.run_rpc
+        return lambda broker, stop, *, subject: app.run_rpc(
+            broker,
+            None,  # type: ignore[arg-type]
+            stop,
+            subject=subject,
+        )
     from mftik_sts import app
 
-    return app.run_rpc
+    return lambda broker, stop, *, subject: app.run_rpc(
+        broker, stop, subject=subject
+    )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("plane", "health_type", "named"), PLANES)
 async def test_a_plane_answers_on_the_subject_it_was_given(
@@ -67,7 +91,7 @@ async def test_a_plane_answers_on_the_subject_it_was_given(
     async with a_broker(f"subj-{plane}") as broker:
         stop = asyncio.Event()
         task = asyncio.create_task(
-            _run_rpc(plane)(broker, None, stop, subject=subject)  # type: ignore[arg-type]
+            _run_rpc(plane)(broker, stop, subject=subject)
         )
         await asyncio.sleep(0.05)
         try:
@@ -86,6 +110,9 @@ async def test_a_plane_answers_on_the_subject_it_was_given(
         assert HealthStatus.model_validate(reply.payload).status == "ok"
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("plane", "health_type", "named"), PLANES)
 async def test_a_plane_does_not_answer_on_a_subject_it_was_not_given(
@@ -100,12 +127,7 @@ async def test_a_plane_does_not_answer_on_a_subject_it_was_not_given(
     async with a_broker(f"subj-{plane}-neg") as broker:
         stop = asyncio.Event()
         task = asyncio.create_task(
-            _run_rpc(plane)(
-                broker,
-                None,  # type: ignore[arg-type]
-                stop,
-                subject=named(f"{plane}-jp-1"),
-            )
+            _run_rpc(plane)(broker, stop, subject=named(f"{plane}-jp-1"))
         )
         await asyncio.sleep(0.05)
         try:

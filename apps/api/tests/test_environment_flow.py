@@ -1,8 +1,11 @@
-"""ENV-11 sequences that cross API, store, handshake, connect, and deploy.
+"""ENV-11 sequences that cross API, store, handshake, and connect.
 
 S9 (registry key cannot write extras) is ``test_auth_registry_keys``: GET
 ``/environment`` and POST ``/environment/import`` are 403 with that key, while
 ``/registry/v1/info`` and ``/registry/v1/strategies`` stay 200.
+
+S1, S2 and S6 ended on a deploy, and went with the synchronous deploy in
+RM-08 (#171).
 """
 
 from __future__ import annotations
@@ -16,19 +19,12 @@ from fanout_harness import UnansweredBroker, patch_authoritative_anycast
 from fastapi import HTTPException
 from mftik.envapply import ApplyFailed, ApplySpec
 from mftik.environment import EnvStamp, NodeEnv
-from mftik.protocol import (
-    STS_SESSION_CREATE,
-    StsCreateSessionResult,
-    StsCreateSessionResultEnvelope,
-)
 from mftik.registry import RegistryStore
 from mftik.registry.errors import MissingRemoteExtras, RegistryError
 from mftik.registry.inspect import inspect_files
 from mftik.registry.protocol import handshake_info
 from mftik.registry.sync import connect_remote
-from mftik_api import orchestrate
 from mftik_api.auth.principal import Principal
-from mftik_api.broker_rpc import DomainRpcError
 from mftik_api.routes import environment as environment_routes
 from mftik_api.routes.environment import (
     delete_package,
@@ -36,17 +32,19 @@ from mftik_api.routes.environment import (
     import_environment,
     put_environment,
 )
-from mftik_api.routes.registry import add_strategy, registry_info
-from mftik_api.routes.sts import deploy, list_strategy_types
+from mftik_api.routes.registry import add_strategy
+from mftik_api.routes.sts import list_strategy_types
 from mftik_api.schemas import (
     EnvironmentImportBody,
     EnvironmentPutBody,
     EnvPackageIn,
     RegistryAddBody,
-    StrategyDeployBody,
 )
 from test_environment_api import EnvBroker, _write_pkg
 from test_registry_add import ReloadingBroker
+
+# over the 50 ms unit call cap; still inside component
+pytestmark = pytest.mark.component
 
 _TINY = """\
 from mftik.strategy import Strategy
@@ -63,14 +61,6 @@ class UsesNumpy(Strategy):
     requires = ("numpy",)
 """
 
-_NUMPY_BARE = """\
-import numpy
-from mftik.strategy import Strategy
-
-class UsesNumpy(Strategy):
-    name = "uses_numpy"
-"""
-
 _SKLEARN = """\
 from mftik.strategy import Strategy
 
@@ -79,38 +69,12 @@ class UsesSklearn(Strategy):
     requires = ("sklearn",)
 """
 
-_TORCH = """\
-from mftik.strategy import Strategy
-
-class UsesTorch(Strategy):
-    name = "uses_torch"
-    requires = ("torch",)
-"""
-
 _OWNER = Principal.owner(1, via="password")
 
 
 @pytest.fixture(autouse=True)
 def _authoritative_anycast(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_authoritative_anycast(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _named_sts_without_a_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These sequences are about extras and deploy, not STS placement."""
-
-    async def _target(instance, td):  # noqa: ANN001
-        return instance or "sts"
-
-    async def _ok(broker, instance):  # noqa: ANN001
-        return None
-
-    async def _mint() -> str:
-        return "aabb01"
-
-    monkeypatch.setattr(orchestrate, "_sts_target", _target)
-    monkeypatch.setattr(orchestrate, "_check_sts_instance", _ok)
-    monkeypatch.setattr(orchestrate, "mint_session_id", _mint)
 
 
 @pytest.fixture
@@ -196,108 +160,6 @@ def _peer_transport(
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
-
-
-async def test_s1_bare_node_stdlib_tree(data_dir: Path) -> None:
-    store = _store(data_dir)
-    out = await add_strategy(
-        RegistryAddBody(files={"strategy.py": _TINY}),
-        store=store,
-        broker=_reload(store),
-    )
-    assert out.loaded is True
-    dest = data_dir / "registry" / "private" / "Tiny" / "strategy.py"
-    assert dest.is_file()
-    info = await registry_info(principal=_OWNER)
-    assert info.extras == {}
-    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
-    assert "private::Tiny" in listed.types
-    assert "NoopStrategy" in listed.types
-    await deploy(
-        "private::Tiny",
-        body=StrategyDeployBody(yaml="sts: {}\n"),
-        broker=_live_deploy(store),
-        store=store,
-    )
-
-
-class _LiveDeploy(ReloadingBroker):
-    async def publish_log(self, *args: object, **kwargs: object) -> int:
-        return 1
-
-    async def publish(self, *args: object, **kwargs: object) -> int:
-        return 1
-
-    async def request(self, subject, envelope, *, timeout=None):  # noqa: ANN001
-        if envelope.type == STS_SESSION_CREATE:
-            return StsCreateSessionResultEnvelope.wrap(
-                StsCreateSessionResult(
-                    session_id=envelope.payload.session_id,
-                    strategy=envelope.payload.strategy,
-                    status="live",
-                ),
-                type=STS_SESSION_CREATE,
-                source="sts",
-            )
-        return await super().request(subject, envelope, timeout=timeout)
-
-
-def _live_deploy(store: RegistryStore) -> _LiveDeploy:
-    return _LiveDeploy().with_store(store)
-
-
-async def test_s2_declare_then_apply_then_add(data_dir: Path) -> None:
-    store = _store(data_dir)
-    with pytest.raises(HTTPException) as undeclared:
-        await add_strategy(
-            RegistryAddBody(files={"strategy.py": _NUMPY_BARE}),
-            store=store,
-            broker=_reload(store),
-        )
-    assert undeclared.value.status_code == 400
-    assert "requires" in str(undeclared.value.detail)
-    assert not (data_dir / "registry" / "private" / "UsesNumpy").exists()
-
-    inspect_files({"strategy.py": _NUMPY})
-    with pytest.raises(HTTPException) as bare:
-        await add_strategy(
-            RegistryAddBody(files={"strategy.py": _NUMPY}),
-            store=store,
-            broker=_reload(store),
-        )
-    assert bare.value.status_code == 400
-    assert "numpy" in str(bare.value.detail)
-
-    def boom(dest: Path, packages: dict[str, ApplySpec]) -> None:
-        raise ApplyFailed("nope")
-
-    environment_routes.installer_for_apply = boom
-    with pytest.raises(HTTPException) as failed:
-        await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    assert failed.value.status_code == 502
-    assert handshake_info(data_dir=data_dir)["extras"] == {}
-    assert NodeEnv(data_dir).read_stamp().generation == 0
-
-    environment_routes.installer_for_apply = _write_pkg
-    broker = EnvBroker()
-    applied = await _put({"numpy": ("1.0", "numpy")}, broker)
-    assert applied.generation == 1
-    assert broker.sync_calls == 1
-    info = await registry_info(principal=_OWNER)
-    assert info.extras["numpy"].version == "1.0"
-
-    added = await add_strategy(
-        RegistryAddBody(files={"strategy.py": _NUMPY}),
-        store=store,
-        broker=_reload(store),
-    )
-    assert added.loaded is True
-    await deploy(
-        "private::UsesNumpy",
-        body=StrategyDeployBody(yaml="sts: {}\n"),
-        broker=_live_deploy(store),
-        store=store,
-    )
 
 
 async def test_s4_new_connect_blocked_on_names(data_dir: Path) -> None:
@@ -450,64 +312,6 @@ async def test_s5_failed_confirm_leaves_connect_refused(data_dir: Path) -> None:
     assert NodeEnv(data_dir).read_stamp().generation == 0
 
 
-async def test_s6_already_connected_can_pull_a_heavier_tree(data_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    peer = RegistryStore(data_dir / "peer")
-    peer.add({"strategy.py": _NUMPY}, origin="public")
-    store = _store(data_dir)
-    extras = {"numpy": {"version": "1.0", "dist": "numpy"}}
-    async with httpx.AsyncClient(transport=_peer_transport(peer, extras)) as client:
-        await connect_remote(store, name="peer", url="http://peer", client=client)
-    peer.add({"strategy.py": _TORCH}, origin="public")
-    heavier = {
-        "numpy": {"version": "1.0", "dist": "numpy"},
-        "torch": {"version": "2.0", "dist": "torch"},
-    }
-    async with httpx.AsyncClient(transport=_peer_transport(peer, heavier)) as client:
-        result = await connect_remote(
-            store, name="peer", url="http://peer", client=client
-        )
-    names = {rec.name for rec in result.pulled}
-    assert names == {"UsesNumpy", "UsesTorch"}
-    listed = await list_strategy_types(store=store, broker=UnansweredBroker())
-    types = {t.type for t in listed.templates}
-    assert "peer::UsesNumpy" in types
-    assert "peer::UsesTorch" in types
-    torch = next(t for t in listed.templates if t.type == "peer::UsesTorch")
-    assert torch.env_ok is False
-
-    await deploy(
-        "peer::UsesNumpy",
-        body=StrategyDeployBody(yaml="sts: {}\n"),
-        broker=_live_deploy(store),
-        store=store,
-    )
-    with pytest.raises(HTTPException) as caught:
-        await deploy(
-            "peer::UsesTorch",
-            body=StrategyDeployBody(yaml="sts: {}\n"),
-            broker=_EnvDeploy(),
-            store=store,
-        )
-    assert caught.value.status_code == 409
-    assert "torch" in str(caught.value.detail)
-    assert "unknown strategy" not in str(caught.value.detail).lower()
-
-
-class _EnvDeploy:
-    async def publish_log(self, *args: object, **kwargs: object) -> int:
-        return 1
-
-    async def publish(self, *args: object, **kwargs: object) -> int:
-        return 1
-
-    async def request(self, *args: object, **kwargs: object) -> None:
-        raise DomainRpcError(
-            "incompatible_environment",
-            "peer::UsesTorch requires torch which this node does not have",
-        )
-
-
 async def test_s7_delete_extra_breaks_deploy(data_dir: Path) -> None:
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
     store = _store(data_dir)
@@ -537,20 +341,12 @@ async def test_s7_delete_extra_breaks_deploy(data_dir: Path) -> None:
 
     await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
     environment_routes.installer_for_apply = record
-    with pytest.raises(HTTPException) as live:
-        await delete_package(
-            "numpy",
-            broker=EnvBroker(live=["sess-1"]),
-            store=store,
-            force=False,
-            owner=1,
-            principal=_OWNER,
-        )
-    assert live.value.status_code == 409
-    assert calls == []
+    # The refusal half of this scenario — the same delete turned away while a
+    # session was live — went with the gate in RM-04 (#167). What is left is
+    # that a forced delete still reports the tree it broke.
     forced = await delete_package(
         "numpy",
-        broker=EnvBroker(live=["sess-1"]),
+        broker=EnvBroker(),
         store=store,
         force=True,
         owner=1,
@@ -707,47 +503,3 @@ async def test_s15_helpers_declare_via_a_later_class_file(data_dir: Path) -> Non
         broker=_reload(store),
     )
     assert out.loaded is True
-
-
-async def test_s16_silent_sts_is_not_idle(data_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    store = _store(data_dir)
-    calls: list[str] = []
-
-    def record(dest: Path, packages: dict[str, ApplySpec]) -> None:
-        calls.append("ran")
-        _write_pkg(dest, packages)
-
-    environment_routes.installer_for_apply = record
-    with pytest.raises(HTTPException) as caught:
-        await delete_package(
-            "numpy",
-            broker=EnvBroker(list_silent=True),
-            store=store,
-            force=False,
-            owner=1,
-            principal=_OWNER,
-        )
-    assert caught.value.status_code == 409
-    assert calls == []
-    forced = await delete_package(
-        "numpy",
-        broker=EnvBroker(list_silent=True),
-        store=store,
-        force=True,
-        owner=1,
-        principal=_OWNER,
-    )
-    assert forced.restart_required is True
-
-
-async def test_s17_session_arriving_mid_install_aborts(data_dir: Path) -> None:
-    await _put({"numpy": ("1.0", "numpy")}, EnvBroker())
-    broker = EnvBroker(live=[], live_after=["sess-late"])
-    with pytest.raises(HTTPException) as caught:
-        await _put({"numpy": ("2.0", "numpy")}, broker)
-    assert caught.value.status_code == 409
-    stamp = NodeEnv(data_dir).read_stamp()
-    assert stamp.generation == 1
-    assert stamp.packages["numpy"].version == "1.0"
-    assert not (data_dir / "env" / "gen-2").exists()

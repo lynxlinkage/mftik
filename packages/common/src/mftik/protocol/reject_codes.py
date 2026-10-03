@@ -11,9 +11,11 @@ The code answers the only question a strategy really asks of a refusal:
 *whose problem is this, and can trying again possibly help?* Three bands:
 
 ``100``–``199`` — TD refused it, and nothing was sent
-    No venue event will ever follow, and the condition is a standing one: the
-    session is not attached, the funds are not there. A strategy that retries
-    one of these on a timer retries it forever.
+    No venue event will ever follow. Most of these are standing conditions:
+    the session is not attached, the funds are not there. A strategy that
+    retries one of those on a timer retries it forever. ``TD_DRAINING`` is
+    the exception :func:`is_retryable` names: the account is being replaced,
+    and the same order can be sent again once the new incarnation is up.
 
 ``200``–``299`` — the venue refused it, in a way we recognise
     The same meaning across venues; the venue's own words are still in
@@ -106,6 +108,16 @@ class RejectCode(IntEnum):
     #: before anything is reserved: sending it would size the order wrong
     #: or be rejected by the venue for a parameter it does not have.
     TD_UNSUPPORTED_ORDER_SHAPE = 115
+    #: The account is ``unavailable`` — its worker is restarting, changing
+    #: incarnation, or has gone silent for ten seconds (F14, §5.6). Refused in
+    #: the SDK without a round trip, because there is nothing on the other end
+    #: to refuse it. ``degraded`` is not this: an account whose confirmations
+    #: are merely late still takes orders.
+    TD_UNAVAILABLE = 116
+    #: The account worker is drain-replacing (F27). Nothing was sent. The
+    #: same order can be submitted again once the new incarnation is up:
+    #: :func:`is_retryable` is true for this code and for no other ``1xx``.
+    TD_DRAINING = 117
 
     # --- 2xx: the venue said no, in a way we recognise ---------------------
 
@@ -161,6 +173,22 @@ def is_td_internal(code: int | str) -> bool:
     return isinstance(code, int) and TD_BAND <= code < VENUE_BAND
 
 
+#: Refusals a caller may send again unchanged. ``TD_DRAINING`` ends when
+#: the replacement incarnation is up. The other ``1xx`` codes are standing
+#: conditions; retrying them on a timer retries them forever.
+_RETRYABLE = frozenset({RejectCode.TD_DRAINING})
+
+
+def is_retryable(code: int | str) -> bool:
+    """Whether the same order is worth sending again unchanged.
+
+    True only for :attr:`RejectCode.TD_DRAINING`. Every other TD refusal is
+    a standing condition, and an unmapped native code is not retried: a
+    caller that retried those on a timer would retry them forever.
+    """
+    return isinstance(code, int) and code in _RETRYABLE
+
+
 def is_venue(code: int | str) -> bool:
     """Whether the venue refused it, mapped or not.
 
@@ -193,6 +221,7 @@ __all__ = [
     "RejectCode",
     "describe",
     "is_normalized",
+    "is_retryable",
     "is_td_internal",
     "is_venue",
 ]

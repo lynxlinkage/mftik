@@ -1,4 +1,21 @@
-"""MD's fetch session — one per process, answering queries for everyone."""
+"""MD fetch handler — one decoded query in, an ack back, the answer published.
+
+The serve loop is :func:`mftik.broker.handler.serve` (H1). This object is
+the handler: it never sees the subject, the reply inbox, or the broker.
+A publisher is injected for the result, which is a side effect, not the
+ack. The ack is the return value.
+
+**State this object holds.** The in-flight set and the connected readers.
+Neither is a row in §3.3. A read is owned by nobody: two processes
+answering the same query produce the same candles, so there is nothing
+to fence. Readers are built the first time a venue is asked for and kept,
+so a query never waits on a subscription.
+
+The ack, the in-flight cap, the reply channel, and every query code are
+the ones the in-process fetch session used. A refusal at the ack is MD's
+own. A failure after the ack is still published, because a caller waiting
+on ``query_id`` has no other way to learn the answer is never coming.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +23,9 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
-from mftik.broker import Broker
-from mftik.broker.request import IncomingRequest
+from mftik.broker.handler import Reply
 from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     MD_BESTQUOTE_RESULT,
@@ -37,11 +53,10 @@ from mftik.protocol import (
     MdOrderBookResult,
     MdQueryAck,
     QueryCode,
-    Topics,
+    UntypedEnvelope,
 )
 from mftik.protocol.query_codes import describe
 
-from mftik_md.errors import normalize as normalize_query_error
 from mftik_md.fetch.readers import NoReaderError, ReaderFactory, VenueReader
 
 logger = logging.getLogger(__name__)
@@ -53,10 +68,12 @@ logger = logging.getLogger(__name__)
 #: caller before an unbounded pile of tasks does.
 MAX_QUERIES_IN_FLIGHT = 32
 
-#: How long the serve loop waits before rebuilding itself after an exception it
-#: did not expect. ``Broker.serve`` already survives what it knows how to
-#: survive, so this only paces the failures nothing has a name for yet.
-SERVE_RESTART_DELAY_SECONDS = 1.0
+
+class Publish(Protocol):
+    """``publish(topic, envelope)``. The worker passes the broker's publish."""
+
+    async def __call__(self, topic: str, envelope: Envelope[Any]) -> None:
+        """Put ``envelope`` on ``topic``. Failures are the handler's to log."""
 
 
 @dataclass(frozen=True)
@@ -164,39 +181,33 @@ def _ticker(req: MdFetchRequest) -> UniversalTicker:
     return UniversalTicker.parse(req.ticker)
 
 
-class FetchSession:
-    """Serves ``md.fetch`` for as long as the process lives.
+class FetchHandler:
+    """Answers one ``md.fetch`` envelope and publishes the result later.
 
-    Deliberately unlike the market-data sessions next to it. Those hold a
-    fencing lease because a feed is leased to a strategy and two of them
-    disagreeing about who owns it matters; a read is owned by nobody. Two MD
-    processes answering the same query produce the same candles, so there is
-    nothing to fence, and the session needs no attach, no heartbeat and no
-    expiry — it is up whenever the process is.
+    Deliberately unlike a feed. A feed is leased to a strategy; a read is
+    owned by nobody. The handler holds no idea who its callers are. The
+    answer goes to ``reply_channel`` on the request.
 
-    That is what decouples reads from feeds. A venue's reader is built the
-    first time it is asked for and kept, so a query never waits on a
-    subscription, and a venue nothing streams is queryable all the same.
-
-    Answers go where the request says (``reply_channel``); this session holds
-    no idea who its callers are.
+    The ack returns before the venue is touched (H3). A REST round trip
+    awaited inside the handler would stall every query behind it, because
+    :func:`~mftik.broker.handler.serve` awaits the handler before reading
+    the next message. ``accepted`` says the query was taken, nothing about
+    what the venue will answer.
     """
 
     def __init__(
         self,
-        broker: Broker,
+        publish: Publish,
         factory: ReaderFactory,
         *,
         max_in_flight: int = MAX_QUERIES_IN_FLIGHT,
     ) -> None:
-        self._broker = broker
+        self._publish_result = publish
         self._factory = factory
         self._max_in_flight = max_in_flight
         self._readers: dict[str, VenueReader] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._queries: set[asyncio.Task[Any]] = set()
-        self._stop = asyncio.Event()
-        self._task: asyncio.Task[Any] | None = None
 
     @property
     def in_flight(self) -> int:
@@ -207,24 +218,63 @@ class FetchSession:
         """Venues with a reader built and connected."""
         return sorted(self._readers)
 
-    async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop.clear()
-        self._task = asyncio.create_task(self._serve(), name="md-fetch")
-        logger.info("MD fetch session listening subject=%s", Topics.md_fetch())
+    async def __call__(self, message: UntypedEnvelope) -> Reply | None:
+        """Ack ``message``. An accepted query keeps running after the return."""
+        kind = _KINDS.get(message.type)
+        if kind is None:
+            return self._ack(
+                "",
+                False,
+                f"unsupported request {message.type!r}",
+                QueryCode.MD_UNSUPPORTED_REQUEST,
+            )
 
-    async def stop(self) -> None:
-        self._stop.set()
-        # Neither the serve loop nor a running query is cancelled: both end by
-        # touching the broker, and on a pooled transport cancelling one
-        # mid-command hands the connection back with its reply unread, which
-        # breaks whatever borrows it next. ``serve`` rechecks the stop event between
-        # polls, so this is bounded by a poll plus the venue's own timeout.
-        pending = [t for t in (self._task, *self._queries) if t is not None]
+        try:
+            payload = kind.model.model_validate(message.payload or {})
+        except Exception as exc:
+            return self._ack(
+                "", False, f"invalid payload: {exc}", QueryCode.MD_INVALID_REQUEST
+            )
+
+        if not payload.reply_channel:
+            # Nowhere to send the answer, so taking the query would be a lie.
+            return self._ack(
+                payload.query_id,
+                False,
+                "no reply_channel on the request",
+                QueryCode.MD_INVALID_REQUEST,
+            )
+
+        if len(self._queries) >= self._max_in_flight:
+            return self._ack(
+                payload.query_id,
+                False,
+                f"{len(self._queries)} queries already in flight",
+                QueryCode.MD_TOO_MANY_IN_FLIGHT,
+            )
+
+        ack = self._ack(payload.query_id, True, "", QueryCode.NONE)
+        task = asyncio.create_task(
+            self._run(kind, payload), name=f"md-fetch-{payload.query_id}"
+        )
+        self._queries.add(task)
+        task.add_done_callback(self._queries.discard)
+        return ack
+
+    async def wait_idle(self) -> None:
+        """Wait until every query that has already been accepted has published."""
+        pending = [task for task in self._queries if not task.done()]
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        self._task = None
+            await asyncio.gather(*pending)
+
+    async def aclose(self) -> None:
+        """Finish accepted queries, then close every reader.
+
+        Queries are not cancelled. Cancelling one mid-call is how a pooled
+        client used to be returned with its reply unread. The wait is
+        bounded by the venue's own timeout.
+        """
+        await self.wait_idle()
         self._queries.clear()
         for venue, reader in list(self._readers.items()):
             try:
@@ -233,94 +283,13 @@ class FetchSession:
                 logger.exception("MD fetch reader close failed venue=%s", venue)
         self._readers.clear()
 
-    async def _serve(self) -> None:
-        while not self._stop.is_set():
-            try:
-                async for req in self._broker.serve(
-                    Topics.md_fetch(), stop=self._stop
-                ):
-                    await self._handle(req)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Logged and then rebuilt, where this used to be logged and
-                # then abandoned. Giving up left MD up, its feeds running and
-                # its own log carrying the one line that said the fetch plane
-                # was gone — after which every query anyone made sat there
-                # until its caller timed out. On 2026-08-18 that state lasted
-                # six hours because nothing but that line marked it.
-                logger.exception("MD fetch serve loop failed — restarting")
-                try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=SERVE_RESTART_DELAY_SECONDS
-                    )
-                except TimeoutError:
-                    continue
-
-    async def _handle(self, req: IncomingRequest) -> None:
-        """Ack a query, then run it out of band.
-
-        The reply goes out before the venue is touched: this loop is a single
-        consumer, and a REST round trip awaited inside it would stall every
-        query behind it. ``accepted`` says the query was taken, nothing about
-        what the venue will answer.
-        """
-        env = req.envelope
-        kind = _KINDS.get(env.type)
-        if kind is None:
-            await self._ack(
-                req,
-                "",
-                False,
-                f"unsupported request {env.type!r}",
-                QueryCode.MD_UNSUPPORTED_REQUEST,
-            )
-            return
-
-        try:
-            payload = kind.model.model_validate(env.payload or {})
-        except Exception as exc:
-            await self._ack(
-                req, "", False, f"invalid payload: {exc}", QueryCode.MD_INVALID_REQUEST
-            )
-            return
-
-        if not payload.reply_channel:
-            # Nowhere to send the answer, so taking the query would be a lie.
-            await self._ack(
-                req,
-                payload.query_id,
-                False,
-                "no reply_channel on the request",
-                QueryCode.MD_INVALID_REQUEST,
-            )
-            return
-
-        if len(self._queries) >= self._max_in_flight:
-            await self._ack(
-                req,
-                payload.query_id,
-                False,
-                f"{len(self._queries)} queries already in flight",
-                QueryCode.MD_TOO_MANY_IN_FLIGHT,
-            )
-            return
-
-        await self._ack(req, payload.query_id, True, "", QueryCode.NONE)
-        task = asyncio.create_task(
-            self._run(kind, payload), name=f"md-fetch-{payload.query_id}"
-        )
-        self._queries.add(task)
-        task.add_done_callback(self._queries.discard)
-
-    async def _ack(
+    def _ack(
         self,
-        req: IncomingRequest,
         query_id: str,
         accepted: bool,
         reason: str,
         error_code: int | str,
-    ) -> None:
+    ) -> Reply:
         if not accepted:
             logger.warning(
                 "MD fetch refused query_id=%s code=%s: %s",
@@ -328,21 +297,16 @@ class FetchSession:
                 describe(error_code),
                 reason,
             )
-        try:
-            await req.reply(
-                Envelope[MdQueryAck].wrap(
-                    MdQueryAck(
-                        query_id=query_id,
-                        accepted=accepted,
-                        reason=reason,
-                        error_code=error_code,
-                    ),
-                    type=MD_QUERY_ACK,
-                    source="md",
-                )
-            )
-        except Exception:
-            logger.exception("MD fetch ack failed query_id=%s", query_id)
+        return Envelope[MdQueryAck].wrap(
+            MdQueryAck(
+                query_id=query_id,
+                accepted=accepted,
+                reason=reason,
+                error_code=error_code,
+            ),
+            type=MD_QUERY_ACK,
+            source="md",
+        )
 
     async def _reader(self, venue: str) -> VenueReader:
         """The venue's reader, built and connected once and then kept.
@@ -381,6 +345,11 @@ class FetchSession:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # Imported here: ``errors`` imports ``NoReaderError`` from this
+            # package, and this package imports the handler. A top-level
+            # import cycles when a test loads ``errors`` first.
+            from mftik_md.errors import normalize as normalize_query_error
+
             error_code = normalize_query_error(exc, venue=venue)
             logger.warning(
                 "MD fetch failed query_id=%s ticker=%s %s: %s",
@@ -418,7 +387,7 @@ class FetchSession:
         arrives on success is indistinguishable from one still in flight.
         """
         try:
-            await self._broker.publish(
+            await self._publish_result(
                 req.reply_channel,
                 Envelope[Any].wrap(
                     kind.result(req, ok, answer, reason, error_code),
@@ -434,4 +403,4 @@ class FetchSession:
             )
 
 
-__all__ = ["MAX_QUERIES_IN_FLIGHT", "FetchSession"]
+__all__ = ["MAX_QUERIES_IN_FLIGHT", "FetchHandler", "Publish"]

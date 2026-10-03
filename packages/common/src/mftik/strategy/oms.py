@@ -22,6 +22,7 @@ from mftik.exchange.tickers import UniversalTicker
 from mftik.protocol import (
     STS_ORDER_CANCEL,
     STS_ORDER_SUBMIT,
+    TD_ERROR,
     TD_OMS_ORDER,
     TD_OMS_VIEW,
     Envelope,
@@ -35,6 +36,7 @@ from mftik.protocol import (
 )
 from mftik.protocol.reject_codes import describe
 from mftik.strategy.client_order_id import ClientOrderIdFactory
+from mftik.strategy.errors import NotReady
 from mftik.strategy.eventlog import session_log
 
 if TYPE_CHECKING:
@@ -46,6 +48,22 @@ logger = logging.getLogger(__name__)
 #: about one broker round-trip. Generous enough to ride out a GC pause without
 #: leaving a strategy blocked for long.
 ORDER_ACK_TIMEOUT_S = 2.0
+
+#: How long :meth:`StrategyOms.view` waits when ``settled=True``.
+#:
+#: TD waits 30 seconds for an UNKNOWN order to converge
+#: (``WAIT_TIMEOUT_S`` in the account handler, the same number as
+#: ``SETTLED_WAIT_TIMEOUT_S``). This is that wait plus five seconds, so
+#: a book that answers on the deadline still reaches the strategy. The
+#: SDK does not import the TD package; 30 and 5 are literals, and a TD
+#: test locks the sum to TD's wait.
+SETTLED_VIEW_TIMEOUT_S = 35.0
+
+#: ``order_phase`` values on the session worker before ``on_ready`` has
+#: been called. A session that does not carry the attribute — the older
+#: shell, a test double — is not gated. The worker sets the attribute;
+#: this module does not import it.
+_BEFORE_ON_READY = frozenset({"boot", "load", "on_start"})
 
 #: Reject codes where the venue outcome is unknown. The cid stays inflight
 #: so a cancel is still refused — the order may be resting.
@@ -200,24 +218,69 @@ class StrategyOms:
             self._cid_factory = ClientOrderIdFactory(session.session_id)
         return self._cid_factory.next()
 
-    async def view(self, api_id: int | None = None) -> OmsView:
-        """Read TD's live book for ``api_id`` over ``td.account``."""
+    async def view(
+        self, api_id: int | None = None, *, settled: bool = False
+    ) -> OmsView:
+        """Read TD's live book for ``api_id`` over ``td.account``.
+
+        ``settled=True`` waits for the book to come clean before it answers: an
+        order whose venue outcome is UNKNOWN is chased, and the read parks until
+        it resolves. That is what a strategy needing certainty about what it
+        holds asks for (F13) — it replaces the ``send_recon`` /
+        ``on_recon_done`` round trip, which is gone. A clean book answers
+        immediately, so the wait costs nothing when there is nothing to wait
+        for. The request timeout is :data:`SETTLED_VIEW_TIMEOUT_S`, TD's wait
+        plus a margin. A timeout raises
+        :class:`~mftik.broker.errors.RequestTimeoutError`, the same way an
+        unsettled read's timeout does.
+
+        The default is the book as it stands, UNKNOWN included, which is the
+        right read for anything on a hot path. Its timeout stays
+        :attr:`_ack_timeout`.
+
+        A ``td.error`` reply is a refusal, not an empty book. The trading
+        layer being down is that reply (``TD_VENUE_NOT_CONNECTED``). It
+        raises :class:`RuntimeError` so a strategy cannot treat "the
+        account is closed" as "I hold nothing".
+        """
         resolved = self._resolve(api_id)
         log = session_log(self._strategy)
         if resolved is None:
-            log.record("read", "oms.view", dir="out", resolved=False, count=0)
+            log.record(
+                "read",
+                "oms.view",
+                dir="out",
+                resolved=False,
+                count=0,
+                settled=settled or None,
+            )
             return OmsView()
         session = self._require_session()
+        timeout = SETTLED_VIEW_TIMEOUT_S if settled else self._ack_timeout
         reply = await session.broker.request(
             Topics.td_account(resolved),
             Envelope[TdOmsViewRequest].wrap(
-                TdOmsViewRequest(api_id=resolved),
+                TdOmsViewRequest(api_id=resolved, settled=settled),
                 type=TD_OMS_VIEW,
                 source=_source_name(session),
                 session_id=getattr(session, "session_id", None),
             ),
-            timeout=self._ack_timeout,
+            timeout=timeout,
         )
+        if reply.type == TD_ERROR:
+            payload = reply.payload or {}
+            code = str(payload.get("code", "td.error"))
+            message = str(payload.get("message", "td refused the read"))
+            log.record(
+                "read",
+                "oms.view",
+                dir="out",
+                api_id=resolved,
+                settled=settled or None,
+                code=code,
+                reason=message,
+            )
+            raise RuntimeError(f"{code}: {message}")
         view = OmsView.model_validate(reply.payload or {})
         log.record(
             "read",
@@ -225,6 +288,7 @@ class StrategyOms:
             dir="out",
             api_id=resolved,
             count=len(view.orders),
+            settled=settled or None,
             payload=view.model_dump(mode="json"),
         )
         return view
@@ -525,8 +589,17 @@ class StrategyOms:
         (``TD_REDUCE_ONLY_UNSUPPORTED``) rather than dropping the flag, so a
         caller is never told True for an order it believes is protected and
         is not.
+
+        Raises :class:`~mftik.strategy.errors.NotReady` when the session
+        worker has not called ``on_ready`` yet. Nothing is minted and
+        nothing reaches TD.
         """
         session = self._require_session()
+        _refuse_if_before_on_ready(session)
+        if _account_unavailable(self._strategy, api_id):
+            cid = self._next_client_order_id()
+            self._refuse_unavailable(session, api_id, cid, remember=True)
+            return False
         cid = self._next_client_order_id()
         accepted = await self._request_ack(
             api_id,
@@ -568,15 +641,27 @@ class StrategyOms:
 
         Refuses locally when the cid is still inflight — same outcome as
         TD's ``TD_NOT_CANCELABLE``, without the round-trip or the warn.
+
+        Raises :class:`~mftik.strategy.errors.NotReady` on the same gate
+        as :meth:`submit_order`. A bound session is checked before the
+        inflight short-circuit, so a cancel during ``on_start`` is
+        ``NotReady`` rather than a local refusal. An OMS with no session
+        still refuses an inflight cid locally: that path never reached TD.
         """
         cid = str(client_order_id)
+        bound = self._strategy.session if self._strategy is not None else None
+        if bound is not None:
+            _refuse_if_before_on_ready(bound)
+            if _account_unavailable(self._strategy, api_id):
+                self._refuse_unavailable(bound, api_id, cid, remember=False)
+                return False
         if cid in self._inflight:
             self._last_reason = (
                 "order is inflight; it cannot be cancelled from that state"
             )
             self._last_code = RejectCode.TD_NOT_CANCELABLE
             return False
-        session = self._require_session()
+        session = bound if bound is not None else self._require_session()
         # Before the await: TD publishes PENDING_CANCEL before the ack, and
         # a concurrent cancel must see us. `_done` is the submit episode;
         # this cancel is a new one, so `_mark_inflight` would no-op.
@@ -698,6 +783,63 @@ class StrategyOms:
         if self._strategy is None or self._strategy.session is None:
             raise RuntimeError("strategy OMS is not bound to a session")
         return self._strategy.session
+
+    def _refuse_unavailable(
+        self,
+        session: Any,
+        api_id: int,
+        cid: str,
+        *,
+        remember: bool,
+    ) -> None:
+        """Local refusal. Nothing is sent and the cid is not marked inflight.
+
+        A refused submit still mints an id (``remember``) so
+        ``last_client_order_id`` is not the previous live order. A strategy
+        that cancels "the id that just failed" must not cancel that order.
+        """
+        if remember:
+            self._last_cid = cid
+        self._last_reason = "td_unavailable"
+        self._last_code = RejectCode.TD_UNAVAILABLE
+        session.event_log.record(
+            "order",
+            "td_unavailable",
+            dir="self",
+            api_id=api_id,
+            cid=cid,
+            reason="td_unavailable",
+            code=RejectCode.TD_UNAVAILABLE,
+        )
+        logger.warning(
+            "order refused locally api_id=%s cid=%s reason=td_unavailable",
+            api_id,
+            cid,
+        )
+
+
+def _account_unavailable(strategy: Strategy | None, api_id: int) -> bool:
+    """True only when the session has heard ``unavailable``.
+
+    No reader, or ``None`` from one, is unknown. Unknown is not a local
+    refusal: TD's ``TD_VENUE_NOT_CONNECTED`` is still the gate.
+    """
+    if strategy is None:
+        return False
+    return strategy.td.state(api_id) == "unavailable"
+
+
+def _refuse_if_before_on_ready(session: object) -> None:
+    """Raise :class:`NotReady` when the worker has not called ``on_ready``.
+
+    The attribute is the worker's. A session that does not have it is
+    the shell or a test double, and order entry stays as it was.
+    """
+    phase = getattr(session, "order_phase", None)
+    if phase in _BEFORE_ON_READY:
+        raise NotReady(
+            f"order entry is refused before on_ready (phase {phase})"
+        )
 
 
 def _cid_list(cids: str | int | Iterable[str | int]) -> list[str]:

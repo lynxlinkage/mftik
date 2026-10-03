@@ -5,7 +5,7 @@ A node can run several processes of one plane — ``td-jp-1``, ``md-jp-2``,
 here, from the environment, and nowhere else: it is set in a compose file on
 the host, which the API has never read and cannot write. That is why an
 instance cannot be renamed through the UI — a row edited there would not reach
-the process that answers to it. See ``docs/Instances.md``.
+the process that answers to it. See ``docs/archive/Instances.md``.
 
 The default is the plane's own name, so a deployment that has never heard of
 this is already an instance called ``td`` / ``md`` / ``sts`` — the three
@@ -88,7 +88,7 @@ class Role(StrEnum):
     """How much of its plane's work one instance will answer for.
 
     One ordered role rather than two booleans, and the reason is that
-    ``standby`` has to gate the *unicast* subject too. ``docs/MdHandover.md``
+    ``standby`` has to gate the *unicast* subject too. ``docs/archive/MdHandover.md``
     needs a warming MD to answer no attach at all, and blue and green are both
     ``md-jp-1`` — a green that gated only the anycast subject would still take
     a named attach for feeds it does not have. Two booleans would also admit a
@@ -121,7 +121,7 @@ class Role(StrEnum):
 
 #: Planes for which ``standby`` is a legitimate configuration.
 #:
-#: MD alone, and ``docs/MdHandover.md`` says why: a strategy session holds
+#: MD alone, and ``docs/archive/MdHandover.md`` says why: a strategy session holds
 #: positions and places orders, so two copies of STS is two copies deciding to
 #: trade, and TD is the same argument about an account. Neither is ever
 #: blue/greened, which is the only thing ``standby`` is for. A TD sitting in

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from mftik.protocol import SymbolInfo
+from mftik.protocol import StsStatusProgress, SymbolInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mftik_api.paging import MAX_LIST_OFFSET
@@ -63,12 +63,22 @@ class TdAttachOut(BaseModel):
 
 
 class DeployResponse(BaseModel):
+    """Accepted deploy (F12, §8.1).
+
+    ``status`` is ``starting``. The session row's phase is a different
+    field, and the STS controller writes it. ``progress`` is the
+    ingress's hook report. It is null at accept: ``on_start`` has not
+    run. ``td`` and ``md`` stay empty here — those lists used to be the
+    attach results, and the accept does not wait for them.
+    """
+
     session_id: str
     type: str
     config: dict[str, Any] = Field(default_factory=dict)
     td: list[TdAttachOut] = Field(default_factory=list)
     md: list[str] = Field(default_factory=list)
-    status: str = "live"
+    status: str = "starting"
+    progress: StsStatusProgress | None = None
 
 
 class StrategyOut(BaseModel):
@@ -82,6 +92,14 @@ class StrategyOut(BaseModel):
     status: str | None = None
     #: Why a ``failed`` session ended. Null otherwise.
     reason: str | None = None
+    #: v2 phase (B4-08). ``conditions["phase"]`` when the controller has
+    #: written one. When that object is null or has no phase, ``starting``
+    #: for a ``live`` row and the status column for a terminal row. The
+    #: column stays ``live`` for every non-terminal phase.
+    phase: str | None = None
+    #: The controller's conditions object, phase included. Null when the
+    #: row has none. Empty when nothing has been reported yet.
+    conditions: dict[str, Any] | None = None
     #: Trading accounts this deploy attached. Empty when attach never ran.
     td_api_ids: list[int] = Field(default_factory=list)
     #: Market-data feeds this deploy attached (``topic.UniversalTicker``).
@@ -855,3 +873,27 @@ class ArtifactListResponse(BaseModel):
     #: Declared STS processes that did not answer. Their silence is not an
     #: empty store.
     unanswered: list[str] = Field(default_factory=list)
+
+
+class WorkerOut(BaseModel):
+    """One worker from the latest ``procman.report`` of one plane instance.
+
+    ``age_s`` is seconds since that report arrived. A plane that stops
+    publishing stays in the list; the age grows instead of the row
+    disappearing (F32). ``code_ref`` is the platform release the worker
+    was spawned from. B10-03 builds the MD and TD pages from this row.
+    """
+
+    plane: str
+    instance: str
+    id: str
+    incarnation: int
+    phase: str
+    ready: bool
+    code_ref: str
+    rss_bytes: int | None = None
+    age_s: float
+
+
+class WorkerListResponse(BaseModel):
+    workers: list[WorkerOut] = Field(default_factory=list)

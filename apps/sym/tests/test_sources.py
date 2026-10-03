@@ -22,6 +22,9 @@ from mftik_sym.sources.gate import GateSpotInstrumentSource
 from mftik_sym.sources.gate_future import GateFuturesInstrumentSource
 from mftik_sym.sources.okx import OkxInstrumentSource
 
+# venue listing fetch; over the 50 ms unit call cap
+pytestmark = pytest.mark.component
+
 # Trimmed rows in Gate's /spot/currency_pairs shape.
 GATE_ROWS = [
     {

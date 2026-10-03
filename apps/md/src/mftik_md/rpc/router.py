@@ -1,69 +1,57 @@
-"""Dispatch API→MD control-plane requests by Envelope.type."""
+"""Dispatch API→MD control-plane requests by Envelope.type.
+
+A handler's whole input is the decoded envelope and its whole output is
+the reply (H1). :func:`mftik.broker.handler.serve` is the loop.
+"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from mftik.broker import IncomingRequest
+from mftik.broker.handler import Handler, Reply
 from mftik.protocol import (
     MD_ERROR,
     MD_HEALTH,
-    MD_SESSION_ATTACH,
-    MD_SESSION_DETACH,
-    MD_SESSION_LIST,
     MD_TAPE_TAIL,
     RpcError,
     RpcErrorEnvelope,
+    UntypedEnvelope,
 )
 
+from mftik_md.intents import INTENT_TYPES, MdIntentBook, md_intent_handler
 from mftik_md.rpc.health import handle_health
-from mftik_md.rpc.sessions import (
-    handle_session_attach,
-    handle_session_detach,
-    handle_session_list,
-)
 from mftik_md.rpc.tape import handle_tape_tail
 
 if TYPE_CHECKING:
-    from mftik_md.session import SessionManager
+    from mftik_md.tape_store import TapeStore
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[..., Awaitable[None]]
 
-_HANDLERS: dict[str, Handler] = {
-    MD_HEALTH: handle_health,
-    MD_SESSION_ATTACH: handle_session_attach,
-    MD_SESSION_DETACH: handle_session_detach,
-    MD_SESSION_LIST: handle_session_list,
-    MD_TAPE_TAIL: handle_tape_tail,
-}
+def control_handler(store: TapeStore | None, intents: MdIntentBook) -> Handler:
+    """Health, tape, and intent put/delete for one MD process.
 
+    ``intents`` is shared by every subject this process serves. The
+    pooled ``md`` subject and ``md.{instance}`` therefore hold the same
+    owners.
+    """
+    intents_handle = md_intent_handler(intents)
 
-async def dispatch(
-    req: IncomingRequest,
-    *,
-    sessions: SessionManager | None = None,
-) -> None:
-    handler = _HANDLERS.get(req.envelope.type)
-    if handler is None:
-        logger.warning(
-            "unknown md rpc type=%s id=%s",
-            req.envelope.type,
-            req.envelope.id,
+    async def handle(message: UntypedEnvelope) -> Reply | None:
+        kind = message.type
+        if kind == MD_HEALTH:
+            return await handle_health(message)
+        if kind == MD_TAPE_TAIL:
+            return await handle_tape_tail(message, store=store)
+        if kind in INTENT_TYPES:
+            return await intents_handle(message)
+        logger.warning("unknown md rpc type=%s id=%s", kind, message.id)
+        return RpcErrorEnvelope.wrap(
+            RpcError(code="unknown_type", message=f"unknown type: {kind}"),
+            type=MD_ERROR,
+            source="md",
+            session_id=message.session_id,
         )
-        await req.reply(
-            RpcErrorEnvelope.wrap(
-                RpcError(
-                    code="unknown_type",
-                    message=f"unknown type: {req.envelope.type}",
-                ),
-                type=MD_ERROR,
-                source="md",
-                session_id=req.envelope.session_id,
-            )
-        )
-        return
-    await handler(req, sessions=sessions)
+
+    return handle

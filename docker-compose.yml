@@ -99,7 +99,7 @@ services:
       MFTIK_DATA: /var/lib/mftik
       # On. This stack is where in-app auth is developed and verified;
       # production keeps its Traefik chain and this flag off until the cutover,
-      # because running both gates locks everybody out. See docs/Auth.md.
+      # because running both gates locks everybody out. See docs/archive/Auth.md.
       #
       # First `just up` on an empty database: open the UI and claim the
       # instance at /login. `seed` has already created the Owner row so
@@ -181,8 +181,6 @@ services:
       - mftik_data:/var/lib/mftik
     environment:
       MFTIK_DATA: /var/lib/mftik
-      # Restart the stack and interrupted sessions come back on their own.
-      STS_REBUILD_ON_BOOT: "1"
       # One jsonl per session: every event it was handed and every call it
       # made. A named volume, not the container filesystem — the moment the
       # log is worth reading is usually the moment the container went away.

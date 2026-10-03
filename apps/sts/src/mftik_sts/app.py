@@ -1,4 +1,13 @@
-"""STS process bootstrap — RPC, independent sessions, heartbeat."""
+"""STS process bootstrap — RPC, registry, heartbeat, session supervisor.
+
+B4-02 runs one :class:`~mftik.procman.Supervisor` for this instance.
+``start`` applies reattach before the control subject is served.
+``SIGTERM`` closes with ``detach``, so the session workers keep running
+(§4.6). Reports are :func:`mftik.procman.publish_reports` with no phase
+filter. ``extra_workers`` lists a session the supervisor's own report does
+not: accepted but not yet spawned (B4-07), and a dead or
+``restarting`` session so intent GC leaves it alone (R4).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +15,7 @@ import asyncio
 import logging
 import os
 import signal
+from pathlib import Path
 from typing import Any
 
 import uvloop
@@ -20,16 +30,11 @@ from mftik import (
     serve_health,
 )
 from mftik.broker import Broker
-from mftik.protocol import STS_SESSION_CREATE, STS_SESSION_FORCE_STOP, Topics
+from mftik.protocol import Topics
 from mftik.strategy.artifacts import get_store
 from mftik_db.schema import SchemaTooOld, require_sts_schema
 
-from mftik_sts import db as sts_db
 from mftik_sts.registry_catchup import catch_up_until_matched
-from mftik_sts.rpc import dispatch
-from mftik_sts.runtime_env import extras_names, refresh
-from mftik_sts.session import SessionManager
-from mftik_sts.spawn import SubprocessSpawner
 
 SOURCE = "sts"
 #: Which STS this process is. ``MFTIK_INSTANCE``, defaulting to the
@@ -46,150 +51,99 @@ ROLE = instance_role(SOURCE)
 logger = logging.getLogger(SOURCE)
 
 #: How long a serve loop waits before rebuilding itself after an exception it
-#: did not expect. ``Broker.serve`` already survives what it knows how to
-#: survive, so this only paces the failures nothing has a name for yet.
+#: did not expect. :func:`mftik.broker.handler.serve` already survives what
+#: it knows how to survive, so this only paces the failures nothing has a
+#: name for yet. ``run_rpc`` passes it through so a test can set it to zero.
 RPC_RESTART_DELAY_SECONDS = 1.0
 
+#: The process's orchestrator. ``run_rpc`` reads it. Health still answers
+#: when it is ``None`` (a probe, or a test that never booted a supervisor).
+_orchestrator: Any = None
 
-#: Mirrors the manager's own default; kept here so the env override has
-#: something to fall back to without importing a private name.
-_DEFAULT_REBUILD_MAX_AGE_S = 1800.0
+
+def bind_orchestrator(orchestrator: Any) -> None:
+    """Install the orchestrator ``run_rpc`` serves. ``None`` clears it."""
+    global _orchestrator
+    _orchestrator = orchestrator
 
 
-async def _dispatch_request(req: Any, sessions: SessionManager) -> None:
-    try:
-        await dispatch(req, sessions=sessions)
-    except Exception:
-        logger.exception(
-            "STS RPC handler failed type=%s id=%s",
-            req.envelope.type,
-            req.envelope.id,
-        )
+def _supervisor_work_dir(plane: str, instance: str) -> Path:
+    """``${WORK_DIR}/<plane>/<instance>``, or the cwd when ``WORK_DIR`` is unset."""
+    root = Path(os.environ.get("WORK_DIR") or os.getcwd())
+    return root / plane / instance
+
+
+def _open_supervisor() -> Any:
+    """This process's supervisor.
+
+    ``pin_path`` is :func:`mftik.procman.pinned_releases_path`: the S-2
+    file when Strategon named a release, and ``None`` while it did not
+    (B3-07). The path is not this instance's work directory.
+    """
+    from mftik.procman import (
+        Supervisor,
+        admission_budget_from_environ,
+        pinned_releases_path,
+    )
+
+    return Supervisor(
+        _supervisor_work_dir(SOURCE, INSTANCE),
+        plane="sts",
+        instance=INSTANCE,
+        budget=admission_budget_from_environ("sts"),
+        pin_path=pinned_releases_path(),
+    )
 
 
 async def run_rpc(
     broker: Broker,
-    sessions: SessionManager,
     stop: asyncio.Event,
     *,
     subject: str,
+    instance: str | None = None,
 ) -> None:
     """Serve STS request-reply on ``subject`` until ``stop``.
 
     One task per subject the role grants, rather than one loop over several:
     each is the same loop with a different name, and a failure in one is not a
-    reason to stop answering on the other.
+    reason to stop answering on the other. ``instance`` is unused: the bound
+    orchestrator already knows which STS this process is. Health answers
+    even when that orchestrator is not bound.
     """
+    del instance
+    # Imported here so a health probe, which imports this package, does not
+    # pay for the supervisor on the way to ``handle_health``.
+    from mftik.broker.handler import serve as serve_subject
+
+    from mftik_sts.rpc.router import control_handler
+
     logger.info("STS RPC listening on subject=%s", subject)
-    while not stop.is_set():
-        try:
-            async for req in broker.serve(subject, stop=stop):
-                # Create waits on the worker's result line. Force-stop waits
-                # out the kill and the row write. Awaiting either here would
-                # hold every other RPC on this subject — list, artifacts,
-                # another session's stop — for that whole time.
-                # The API's own timeout is unchanged. If a create timeout
-                # already fired and the worker later reports success, the
-                # session stays live and the deploy has not attached it.
-                # This process does not kill that worker and does not mark
-                # the row failed.
-                if req.envelope.type == STS_SESSION_CREATE:
-                    task = asyncio.create_task(
-                        _dispatch_request(req, sessions),
-                        name="sts-rpc-create",
-                    )
-                    sessions.track_create(task)
-                    continue
-                if req.envelope.type == STS_SESSION_FORCE_STOP:
-                    task = asyncio.create_task(
-                        _dispatch_request(req, sessions),
-                        name="sts-rpc-force-stop",
-                    )
-                    sessions.track_escalation(task)
-                    continue
-                await _dispatch_request(req, sessions)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Reaching here means something ``serve`` does not already handle,
-            # and the answer is still to serve. This coroutine returning is how
-            # STS ends up running sessions that nobody can list, pause or stop
-            # — the process alive, the subject silent, and no line anywhere
-            # saying so.
-            logger.exception(
-                "STS RPC serve loop failed subject=%s — restarting", subject
-            )
-            try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=RPC_RESTART_DELAY_SECONDS
-                )
-            except TimeoutError:
-                continue
+    await serve_subject(
+        broker,
+        subject,
+        control_handler(broker, _orchestrator),
+        stop=stop,
+        restart_delay=RPC_RESTART_DELAY_SECONDS,
+    )
 
 
-def _rebuild_enabled() -> bool:
-    """Whether to restore interrupted sessions on boot.
-
-    Off by default. Restoring a session puts a strategy back in front of a
-    live account. The scan only restores classes that set
-    ``rebuildable`` — a strategy that does not know it was away would treat
-    recon as a clean account and place beside the orders it left resting.
-    Opt in per deployment with ``STS_REBUILD_ON_BOOT=1``.
-    """
-    return os.getenv("STS_REBUILD_ON_BOOT", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+#: How often to clear abandoned artifact uploads. Slow on purpose: a part
+#: file costs disk and nothing else, and the scan reads a directory.
+SWEEP_INTERVAL_SECONDS = 60.0
 
 
-def _rebuild_max_age_s() -> float:
-    """How stale an interrupted session may be and still be restored.
-
-    Sized for a restart, where the gap is seconds to minutes. Widen it with
-    ``STS_REBUILD_MAX_AGE_S`` if a deploy routinely takes longer than the
-    default; do not widen it to cover sessions nobody meant to resume.
-    """
-    raw = os.getenv("STS_REBUILD_MAX_AGE_S", "").strip()
-    if not raw:
-        return _DEFAULT_REBUILD_MAX_AGE_S
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(
-            "ignoring STS_REBUILD_MAX_AGE_S=%r — not a number, using %.0fs",
-            raw,
-            _DEFAULT_REBUILD_MAX_AGE_S,
-        )
-        return _DEFAULT_REBUILD_MAX_AGE_S
-
-
-#: How often to look for sessions this instance owns and does not hold.
-#: Well under the window someone would spend wondering why a strategy is
-#: not doing anything, and far enough above two reap scans that a row
-#: between persist and ``_sessions`` is not closed on the first look.
-REAP_INTERVAL_SECONDS = 60.0
-
-
-async def reap_loop(
-    sessions: SessionManager,
+async def sweep_loop(
     stop: asyncio.Event,
     *,
-    interval: float = REAP_INTERVAL_SECONDS,
+    interval: float = SWEEP_INTERVAL_SECONDS,
 ) -> None:
-    """Scan for orphaned sessions on boot, then on a slow interval.
+    """Clear artifact uploads nobody committed, on boot and on an interval.
 
-    On boot because a crash is most often noticed by whatever replaces the
-    process; on an interval because a crash with no restart still leaves rows
-    claiming to be running, and nobody should have to restart STS to find out.
+    This used to share a loop with the orphan reaper, which RM-04 deleted
+    along with the session manager it scanned. The artifact store is this
+    plane's own disk and still needs sweeping.
     """
     while not stop.is_set():
-        try:
-            reaped = await sessions.reap_orphans()
-            if reaped:
-                logger.warning("STS reaped %d orphaned session(s)", len(reaped))
-        except Exception:
-            logger.exception("STS orphan reaper failed")
         try:
             # An upload nobody committed — the API died, the laptop closed —
             # leaves a part file. Hidden from listings, and not an object.
@@ -204,18 +158,6 @@ async def reap_loop(
             continue
 
 
-async def _rebuild_on_boot(sessions: SessionManager) -> None:
-    try:
-        rebuilt = await sessions.rebuild_interrupted()
-    except Exception:
-        logger.exception("STS rebuild on boot failed")
-        return
-    if rebuilt:
-        logger.warning("STS rebuilt %d interrupted session(s)", len(rebuilt))
-    else:
-        logger.info("STS found no interrupted sessions to rebuild")
-
-
 #: How long boot waits for the database to say it has run the migrations this
 #: build needs, before giving up and exiting.
 #:
@@ -223,9 +165,8 @@ async def _rebuild_on_boot(sessions: SessionManager) -> None:
 #: the one-shot migration step without ordering them, so "not listening yet",
 #: "no tables yet" and "one revision short" are all states a cold start sees
 #: for its first seconds — each of which becomes the right answer on its own,
-#: given a moment. None of them is a reason to serve: the rebuild scan reads
-#: every interrupted row once, at boot, and a scan that ran against the old
-#: schema is not repeated when the migration lands.
+#: given a moment. None of them is a reason to serve: a session created
+#: against the old schema is not written again when the migration lands.
 #:
 #: Wide enough for Postgres to pass its healthcheck (up to ~50s in that
 #: stack) and for a cold database to run the whole migration history behind
@@ -256,11 +197,12 @@ async def schema_is_current(budget_s: float | None = None) -> bool:
     """Wait for a database this build may serve. False means do not start.
 
     The deploy this build belongs to has an order, and this is the step that
-    catches it being run out of it: a session row written before
+    catches it being run out of it. A session row written before
     ``0034_strategy_type_key`` keeps its strategy's short name in a column
     this build does not read, so every one of them reads as a row naming no
-    strategy. Refusing to start is the only answer that leaves those rows for
-    the migration to fix.
+    strategy. A database that has not reached ``MIN_STS_REVISION`` is also
+    missing Spec/Status columns this build selects. Refusing to start is the
+    only answer that leaves those rows for the migration to fix.
 
     Every wait is logged with what is wrong, so an operator who ran the steps
     in the wrong order reads the reason in the first second rather than at
@@ -310,37 +252,44 @@ async def amain() -> bool:
         except InstanceAlreadyServing as exc:
             logger.error("%s", exc)
             return False
-        loaded, stamp = refresh()
-        if loaded:
-            logger.info(
-                "STS loaded %d registry strategy(ies): %s",
-                len(loaded),
-                ", ".join(loaded),
-            )
-        if stamp.generation:
-            logger.info(
-                "STS env generation=%s extras=%s",
-                stamp.generation,
-                ", ".join(sorted(extras_names())) or "(none)",
-            )
-        sessions = SessionManager(
-            broker,
-            persist_live=sts_db.persist_live_session,
-            mark_done=sts_db.mark_session_finished,
-            list_db_sessions=sts_db.list_sessions,
-            load_session=sts_db.load_session,
-            remember_fact=sts_db.remember_fact,
-            mark_live=sts_db.mark_session_live,
-            bump_rebuild_count=sts_db.bump_rebuild_count,
-            reset_rebuild_count=sts_db.reset_rebuild_count,
-            rebuild_max_age_s=_rebuild_max_age_s(),
-            td_instance=sts_db.td_instance,
-            derive_sts=sts_db.derived_sts,
-            instance=INSTANCE,
-            spawner=SubprocessSpawner(),
-            rebuild_on_worker_exit=_rebuild_enabled(),
-        )
         logger.info("STS started instance=%s", INSTANCE)
+        from mftik.clock import SystemClock
+        from mftik.procman import CloseMode, publish_reports
+        from mftik_db.session import session_scope
+
+        from mftik_sts.controller import StsOrchestrator
+        from mftik_sts.controller.status import DbStatusStore
+
+        supervisor = _open_supervisor()
+
+        async def _publish(subject: str, envelope: Any) -> None:
+            await broker.publish(subject, envelope)
+
+        orchestrator = StsOrchestrator(
+            supervisor,
+            clock=SystemClock(),
+            store=DbStatusStore(session_scope),
+            publish=_publish,
+            broker=broker,
+        )
+        bind_orchestrator(orchestrator)
+        try:
+            await orchestrator.boot()
+        except Exception:
+            logger.exception("STS supervisor failed to start")
+            bind_orchestrator(None)
+            await supervisor.close(CloseMode.DETACH)
+            return False
+        from mftik_sts.hostdisk.sync import prepare_disk
+
+        # Copy legacy ``<origin>/<name>/`` trees into the digest layout
+        # before RPC. The old directories stay. They are the API store
+        # on a shared volume, and a null-digest session still rehangs
+        # from them. B10 removes them when the API moves its own store.
+        if not await asyncio.to_thread(prepare_disk):
+            logger.warning(
+                "STS legacy registry was not fully copied into the digest layout"
+            )
         subjects = control_subjects(SOURCE, INSTANCE, ROLE)
         if not subjects:
             logger.warning(
@@ -350,7 +299,7 @@ async def amain() -> bool:
             )
         rpc_tasks = [
             asyncio.create_task(
-                run_rpc(broker, sessions, stop, subject=subject),
+                run_rpc(broker, stop, subject=subject, instance=INSTANCE),
                 name=f"sts-rpc-{subject}",
             )
             for subject in subjects
@@ -364,14 +313,29 @@ async def amain() -> bool:
             ),
             name="sts-sys-heartbeat",
         )
-        reaper_task = asyncio.create_task(
-            reap_loop(sessions, stop), name="sts-reaper"
+        sweep_task = asyncio.create_task(
+            sweep_loop(stop), name="sts-artifact-sweep"
         )
         health_task = asyncio.create_task(
             serve_health(
                 broker, domain=SOURCE, instance=INSTANCE, stop=stop
             ),
             name="sts-health",
+        )
+
+        report_task = asyncio.create_task(
+            publish_reports(
+                supervisor,
+                plane="sts",
+                instance=INSTANCE,
+                publish=_publish,
+                clock=SystemClock(),
+                extra_workers=orchestrator.extra_workers,
+            ),
+            name="sts-procman-report",
+        )
+        watch_task = asyncio.create_task(
+            orchestrator.watch(stop), name="sts-session-watch"
         )
         # Not one of the tasks run_until_stopped watches: this is meant
         # to finish, once the API has pushed the store. A process that
@@ -382,40 +346,35 @@ async def amain() -> bool:
                 catch_up_until_matched(broker, INSTANCE, stop),
                 name="sts-registry-catchup",
             )
-        if _rebuild_enabled():
-            # A task, not awaited: rebuilding waits on TD and MD, which may
-            # not be up yet, and RPC service must not be held up behind it.
-            rebuild_task: asyncio.Task[Any] | None = asyncio.create_task(
-                _rebuild_on_boot(sessions), name="sts-rebuild"
-            )
-        else:
-            rebuild_task = None
-            logger.info(
-                "STS rebuild on boot disabled (set STS_REBUILD_ON_BOOT=1)"
-            )
-        logger.info(
-            "STS rebuild window is %.0fs", _rebuild_max_age_s()
-        )
         try:
             clean = await run_until_stopped(
                 stop,
                 *rpc_tasks,
                 hb_task,
-                reaper_task,
+                sweep_task,
                 health_task,
+                report_task,
+                watch_task,
                 logger=logger,
             )
         finally:
+            # Stop accepting, then detach. Workers keep running (§4.6).
             stop.set()
-            tasks = [*rpc_tasks, hb_task, reaper_task, health_task]
-            if rebuild_task is not None:
-                tasks.append(rebuild_task)
+            tasks = [
+                *rpc_tasks,
+                hb_task,
+                sweep_task,
+                health_task,
+                report_task,
+                watch_task,
+            ]
             if catchup_task is not None:
                 tasks.append(catchup_task)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await sessions.close_all()
+            await supervisor.close(CloseMode.DETACH)
+            bind_orchestrator(None)
     logger.info("STS stopped")
     return clean
 
@@ -426,9 +385,8 @@ def main() -> None:
     # policy is what puts the process back, and an exit code is what
     # tells anyone reading ``docker ps`` that STS did not just stop.
     #
-    # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
-    # measurements. This loop serves the instance. Each live session is a
-    # worker process with a loop of its own. It builds that loop for this
-    # call alone and leaves the global policy untouched.
+    # ``uvloop.run`` rather than ``asyncio.run`` — docs/archive/EventLoop.md has the
+    # measurements. This loop serves the instance. It builds that loop for
+    # this call alone and leaves the global policy untouched.
     if not uvloop.run(amain()):
         raise SystemExit(1)

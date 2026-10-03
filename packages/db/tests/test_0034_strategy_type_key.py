@@ -124,6 +124,8 @@ def test_resolved_rules() -> None:
     assert mod._resolved("interrupted", None, "not_a_key") == (None, None, True)
 
 
+# migration rewrite; over the 50 ms unit call cap
+@pytest.mark.component
 def test_upgrade_rewrites_mapped_rows_and_drops_strategy(tmp_path: Path) -> None:
     engine = sa.create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     with engine.begin() as conn:
@@ -179,6 +181,8 @@ def test_upgrade_rewrites_mapped_rows_and_drops_strategy(tmp_path: Path) -> None
     assert dict(restored)["failed-junk"] == "tiny"
 
 
+# migration rewrite; over the 50 ms unit call cap
+@pytest.mark.component
 def test_a_live_unmapped_row_stops_the_migration(tmp_path: Path) -> None:
     engine = sa.create_engine(f"sqlite:///{tmp_path / 'm.db'}")
     with engine.begin() as conn:

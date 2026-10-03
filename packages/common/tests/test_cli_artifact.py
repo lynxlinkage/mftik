@@ -12,6 +12,9 @@ from mftik.cli.app import EXIT_ERROR, main
 from mftik.cli.client import Client
 from mftik.cli.config import Profile
 
+# `main()` builds the whole CLI parser; that call does not fit 50 ms.
+pytestmark = pytest.mark.component
+
 _REAL_HTTPX = httpx.Client
 
 
@@ -167,6 +170,8 @@ def test_rm_names_the_key(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     assert "removed weights/model.pt on sts-jp" in capsys.readouterr().out
 
 
+# over the 50 ms unit call cap; still inside component
+@pytest.mark.component
 def test_put_of_a_missing_file_does_not_call_the_node(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

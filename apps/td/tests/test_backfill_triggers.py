@@ -1,8 +1,8 @@
 """Who asks for a backfill, and what happens when asking fails.
 
-The ranking is the design. A detach is latency — it settles the record soon
-after somebody wants to read it. The schedule is why it settles at all. So
-these must be unable to hurt the thing they are attached to.
+The ranking is the design. The schedule is why the record settles at all, and
+an ask on top of it is only latency. So an ask must be unable to hurt the
+thing it is attached to.
 """
 
 from __future__ import annotations
@@ -12,12 +12,14 @@ import asyncio
 import pytest
 from broker_harness import a_broker
 from mftik.broker import Broker
-from mftik.protocol import Envelope, TdAttachRequest, TdBackfill, Topics
+from mftik.protocol import Envelope, TdBackfill, Topics
 from mftik_td.backfill.trigger import request_backfill
-from mftik_td.session import PaperSessionFactory, SessionManager
+
+# B2-05: borrows NATS to test backfill triggers. Direct handler call:
+# B6-05 (#223).
+pytestmark = pytest.mark.integration
 
 API_ID = 42
-SESSION = "sts-trigger"
 
 
 @pytest.fixture
@@ -42,6 +44,9 @@ async def _serve_backfill(broker: Broker, stop: asyncio.Event, seen: list) -> No
 # --- asking ---------------------------------------------------------------
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_request_is_answered_when_td_is_there(broker) -> None:
     seen: list[TdBackfill] = []
     stop = asyncio.Event()
@@ -55,6 +60,9 @@ async def test_a_request_is_answered_when_td_is_there(broker) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
 async def test_a_request_fails_at_once_when_nobody_is_serving(broker) -> None:
     assert (
         await request_backfill(
@@ -64,6 +72,9 @@ async def test_a_request_fails_at_once_when_nobody_is_serving(broker) -> None:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_request_may_name_instruments(broker) -> None:
     seen: list[TdBackfill] = []
     stop = asyncio.Event()
@@ -96,6 +107,9 @@ async def test_asking_never_raises_on_a_broken_broker(broker) -> None:
     )
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
     class Hanging:
         async def request(self, *a, **kw):
@@ -109,6 +123,9 @@ async def test_asking_gives_up_rather_than_holding_a_teardown(broker) -> None:
     assert result is False
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_an_in_flight_refusal_is_not_accepted(broker) -> None:
     """Saturated TD replies ``ok=False``; that is not a successful ask."""
     stop = asyncio.Event()
@@ -141,6 +158,9 @@ async def test_an_in_flight_refusal_is_not_accepted(broker) -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
 async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
     class Hanging:
         async def request(self, *a, **kw):
@@ -157,82 +177,3 @@ async def test_a_cancelled_ask_is_not_swallowed(broker) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-
-
-# --- detach ----------------------------------------------------------------
-
-
-@pytest.fixture
-async def paper():
-    from decimal import Decimal
-
-    from mftik.exchange import PaperExchange
-
-    async with PaperExchange(
-        symbols={"BTCUSDT": Decimal("50000")}, tick_interval=0.05, seed=7
-    ) as ex:
-        yield ex
-
-
-async def _lease(broker: Broker, stop: asyncio.Event) -> None:
-    from mftik.protocol import STS_LEASE_HEARTBEAT, LeaseHeartbeat
-
-    token = 0
-    while not stop.is_set():
-        token += 1
-        await broker.publish(
-            Topics.sts_td_session(SESSION),
-            Envelope[LeaseHeartbeat].wrap(
-                LeaseHeartbeat(session_id=SESSION, token=token),
-                type=STS_LEASE_HEARTBEAT,
-                source="sts",
-                session_id=SESSION,
-            ),
-        )
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=0.1)
-        except TimeoutError:
-            continue
-
-
-async def test_a_detach_asks_for_the_account_it_just_released(
-    broker, paper
-) -> None:
-    seen: list[TdBackfill] = []
-    stop_bf = asyncio.Event()
-    bf = asyncio.create_task(_serve_backfill(broker, stop_bf, seen))
-    await asyncio.sleep(0.2)
-
-    manager = SessionManager(PaperSessionFactory(broker, paper), broker)
-    stop = asyncio.Event()
-    pub = asyncio.create_task(_lease(broker, stop))
-    await manager.attach(
-        TdAttachRequest(
-            session_id=SESSION, api_id=API_ID, timeout=2.0, created_by=1
-        )
-    )
-    try:
-        await manager.detach(session_id=SESSION, api_id=API_ID)
-    finally:
-        stop.set()
-        stop_bf.set()
-        await asyncio.gather(pub, bf, return_exceptions=True)
-        await manager.close_all()
-
-    assert [(a.api_id, a.reason) for a in seen] == [(API_ID, "detach")]
-
-
-async def test_a_detach_for_an_account_that_was_never_attached_asks_nothing(
-    broker, paper
-) -> None:
-    seen: list[TdBackfill] = []
-    stop_bf = asyncio.Event()
-    bf = asyncio.create_task(_serve_backfill(broker, stop_bf, seen))
-    await asyncio.sleep(0.1)
-    manager = SessionManager(PaperSessionFactory(broker, paper), broker)
-
-    await manager.detach(session_id="never", api_id=API_ID)
-    stop_bf.set()
-    await asyncio.gather(bf, return_exceptions=True)
-
-    assert seen == []

@@ -19,7 +19,7 @@ import asyncio
 import time
 
 import pytest
-from broker_harness import a_broker
+from broker_harness import session_loop
 from mftik.broker import Broker
 from mftik.broker.errors import RequestTimeoutError
 from mftik.protocol import (
@@ -29,6 +29,10 @@ from mftik.protocol import (
     Topics,
     probe_is_stale,
 )
+
+# §9.1 component (shared NATS client). Slow cases miss the 50 ms unit call cap;
+# the 500 ms component cap still applies.
+pytestmark = pytest.mark.component
 
 SUBJECT = Topics.health("md", "md-jp-1")
 
@@ -51,11 +55,14 @@ def _status() -> Envelope[HealthStatus]:
     )
 
 
-async def test_a_probe_to_nobody_times_out() -> None:
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
+@session_loop
+async def test_a_probe_to_nobody_times_out(broker: Broker) -> None:
     """Which is the caller's answer of *down*, not an error to handle."""
-    async with a_broker() as broker:
-        with pytest.raises(RequestTimeoutError):
-            await broker.probe(SUBJECT, _probe_envelope(), timeout=0.15)
+    with pytest.raises(RequestTimeoutError):
+        await broker.probe(SUBJECT, _probe_envelope(), timeout=0.15)
 
 
 #: Probes at a subject nobody serves. Far more than either transport will keep,
@@ -64,7 +71,13 @@ async def test_a_probe_to_nobody_times_out() -> None:
 DEAD_PROBES = 64
 
 
-async def test_probing_a_dead_instance_does_not_pile_up() -> None:
+# probe deadline is the behaviour; over the 500 ms component cap
+@pytest.mark.integration
+@pytest.mark.real_sleep(
+    reason="NATS no-responders grace is a real asyncio.sleep"
+)
+@session_loop
+async def test_probing_a_dead_instance_does_not_pile_up(broker: Broker) -> None:
     """The leak this method exists to prevent, stated as the caller sees it.
 
     ``request`` would leave one record per probe for the next consumer —
@@ -73,63 +86,69 @@ async def test_probing_a_dead_instance_does_not_pile_up() -> None:
     probes a subject nobody serves many times over, and only then starts
     serving, to see what the instance is handed.
     """
-    async with a_broker() as broker:
-        for _ in range(DEAD_PROBES):
-            with pytest.raises(RequestTimeoutError):
-                await broker.probe(SUBJECT, _probe_envelope(), timeout=0.02)
+    for _ in range(DEAD_PROBES):
+        with pytest.raises(RequestTimeoutError):
+            await broker.probe(SUBJECT, _probe_envelope(), timeout=0.02)
 
-        stop = asyncio.Event()
-        served: list[Envelope] = []
+    stop = asyncio.Event()
+    served: list[Envelope] = []
 
-        async def serve() -> None:
-            async for req in broker.serve(SUBJECT, stop=stop):
-                served.append(req.envelope)
+    async def serve() -> None:
+        async for req in broker.serve(SUBJECT, stop=stop):
+            served.append(req.envelope)
 
-        task = asyncio.create_task(serve())
-        try:
-            # Long enough that anything waiting would have arrived. The probes
-            # above each gave up in 20ms, so a queued one has had many times
-            # that to turn up.
-            await asyncio.sleep(1.0)
-        finally:
-            stop.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+    task = asyncio.create_task(serve())
+    try:
+        # Long enough that anything waiting would have arrived. The probes
+        # above each gave up in 20ms, so a queued one has had many times
+        # that to turn up.
+        await asyncio.sleep(1.0)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
-        # Bounded, and by something other than how many were asked. Redis keeps
-        # a capped tail and NATS keeps none, so the exact number is a
-        # transport's to state — but neither may hand over the pile. What an
-        # instance does with the few it may still find is ``probe_is_stale``'s
-        # job, below.
-        assert len(served) < DEAD_PROBES
+    # Bounded, and by something other than how many were asked. Redis keeps
+    # a capped tail and NATS keeps none, so the exact number is a
+    # transport's to state — but neither may hand over the pile. What an
+    # instance does with the few it may still find is ``probe_is_stale``'s
+    # job, below.
+    assert len(served) < DEAD_PROBES
 
 
-async def test_a_served_probe_answers_like_any_request() -> None:
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+@session_loop
+async def test_a_served_probe_answers_like_any_request(broker: Broker) -> None:
     """Leaving nothing behind is about the unanswered case, not the reply path."""
-    async with a_broker() as broker:
-        stop = asyncio.Event()
+    stop = asyncio.Event()
 
-        async def serve() -> None:
-            async for req in broker.serve(SUBJECT, stop=stop):
-                await req.reply(_status())
-                return
+    async def serve() -> None:
+        async for req in broker.serve(SUBJECT, stop=stop):
+            await req.reply(_status())
+            return
 
-        task = asyncio.create_task(serve())
-        await asyncio.sleep(0.3)
-        try:
-            reply = await broker.probe(SUBJECT, _probe_envelope(), timeout=2.0)
-        finally:
-            stop.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+    task = asyncio.create_task(serve())
+    await asyncio.sleep(0.3)
+    try:
+        reply = await broker.probe(SUBJECT, _probe_envelope(), timeout=2.0)
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
-        status = HealthStatus.model_validate(reply.payload)
-        assert status.instance == "md-jp-1"
-        assert status.venues == ["Bybit"]
+    status = HealthStatus.model_validate(reply.payload)
+    assert status.instance == "md-jp-1"
+    assert status.venues == ["Bybit"]
 
 
+@pytest.mark.real_sleep(
+    reason="this test calls asyncio.sleep while waiting for a real side effect"
+)
+@session_loop
 async def test_a_probe_carries_a_reply_address_its_handler_can_use(
-    a_probe_broker: Broker,
+    broker: Broker,
 ) -> None:
     """However a transport addresses a reply, the handler reads it the same way.
 
@@ -142,7 +161,7 @@ async def test_a_probe_carries_a_reply_address_its_handler_can_use(
     seen: list[str | None] = []
 
     async def serve() -> None:
-        async for req in a_probe_broker.serve(SUBJECT, stop=stop):
+        async for req in broker.serve(SUBJECT, stop=stop):
             seen.append(req.envelope.reply_to)
             await req.reply(_status())
             return
@@ -150,19 +169,13 @@ async def test_a_probe_carries_a_reply_address_its_handler_can_use(
     task = asyncio.create_task(serve())
     await asyncio.sleep(0.3)
     try:
-        await a_probe_broker.probe(SUBJECT, _probe_envelope(), timeout=2.0)
+        await broker.probe(SUBJECT, _probe_envelope(), timeout=2.0)
     finally:
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
     assert seen and seen[0]
-
-
-@pytest.fixture
-async def a_probe_broker() -> Broker:
-    async with a_broker() as client:
-        yield client
 
 
 def test_a_fresh_probe_is_not_stale() -> None:

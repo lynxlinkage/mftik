@@ -31,6 +31,26 @@ from mftik.symbols.listed import ListedInstrument
 
 MAX_KLINES = 500
 
+#: How often an account worker reads public server time. Deribit
+#: documents that an HTTP connection expires after 15 minutes of
+#: inactivity, and that keep-alive is still terminated after 15 minutes.
+#: 60s is under that idle close.
+KEEPALIVE_INTERVAL_S = 60.0
+#: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
+#: the socket between ticks. Still under Deribit's 15-minute cap.
+KEEPALIVE_EXPIRY_S = 180.0
+#: Resolved against :data:`~mftik.exchange.deribit.protocol.DERIBIT_REST_URL`
+#: (``.../api/v2``). ``public/get_time`` is a public read.
+KEEPALIVE_PATH = "/api/v2/public/get_time"
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
+POOL_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+    keepalive_expiry=KEEPALIVE_EXPIRY_S,
+)
+
 
 class DeribitPublicRest:
     """Unsigned reads — the market-data snapshots MD asks for on demand."""
@@ -51,7 +71,9 @@ class DeribitPublicRest:
     async def connect(self) -> None:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout
+                base_url=self.base_url,
+                timeout=self.timeout,
+                limits=POOL_LIMITS,
             )
             self._owns_client = True
 
@@ -265,5 +287,23 @@ class DeribitPublicRest:
             )
         return interest
 
+    async def server_time(self) -> float:
+        """``public/get_time`` — the venue clock, in seconds."""
+        result = await self._get(ch.PUBLIC_GET_TIME)
+        return float(result) / 1000.0
 
-__all__ = ["MAX_KLINES", "DeribitPublicRest"]
+
+async def keepalive(client: httpx.AsyncClient) -> None:
+    """One public server-time read. No order, no cancel, no key."""
+    await DeribitPublicRest(client=client).server_time()
+
+
+__all__ = [
+    "KEEPALIVE_EXPIRY_S",
+    "KEEPALIVE_INTERVAL_S",
+    "KEEPALIVE_PATH",
+    "MAX_KLINES",
+    "POOL_LIMITS",
+    "DeribitPublicRest",
+    "keepalive",
+]

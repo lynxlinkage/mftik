@@ -32,7 +32,7 @@ class Instance(Base):
     process that answers to it. That is the opposite of :class:`Account`, whose
     name *is* renameable precisely because it is a lookup label resolved to an
     ``api_id`` at deploy — an instance name is the address itself. See
-    ``docs/Instances.md``.
+    ``docs/archive/Instances.md``.
     """
 
     __tablename__ = "instances"
