@@ -1,12 +1,12 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.36。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.37。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
 ## 怎麼用這份文件
 
-**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277、#363、#365、#366、#367，label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
+**編號：** `<批次>-<序號>`。每張票都已開成 GitHub issue（#154 到 #253，以及後來加的 #275 到 #277、#363、#365 到 #373（#364 不是票），label 為 `refactor` 和 `batch:<批次>`），標題後的括號是 issue 編號。批次依序是 B0、B1、RM、B2、IF、B3 到 B10（計畫 §11）。依賴只列直接依賴。
 
 **RM（清場）的共同驗收：**
 
@@ -32,10 +32,10 @@
 | RM 清場 | 10 | 刪掉要重寫的代碼和測試，留下「沒有 session 機制」的基線 |
 | B2 測試 | 5 | 測試標準、`FakeClock`、共用 NATS 連線、tier 與 CI 閘門 |
 | IF 介面 | 16 | 新抽象層只定義介面，回傳 null data，附 xfail 契約測試 |
-| B3 procman | 9 | shim、Supervisor、reattach、報告、准入、Strategon 實機驗證、不設 FATAL 的重啟策略、暫定數值定案 |
-| B4 骨架 | 10 | paper 上跑通 deploy → 下單 → 成交 → end；`pv` 的 deploy 比對與 transport 檢查 |
-| B5 STS | 11 | 交付策略、event log、offload、hook 預算、失聯通知、crash 與重啟、策略測試改寫、策略樹版本釘住、主機磁碟的 operator 路徑 |
-| B6 TD | 9 | 常駐層、交易層、`cancel_session`、drain-replace、backfill、狀態廣播、cancel-on-disconnect、readiness 與進程內重試 |
+| B3 procman | 10 | shim、Supervisor、reattach、報告、准入、Strategon 實機驗證、不設 FATAL 的重啟策略、暫定數值定案、收尾 |
+| B4 骨架 | 11 | paper 上跑通 deploy → 下單 → 成交 → end；`pv` 的 deploy 比對與 transport 檢查；stop 改非同步與 API／CLI 收尾 |
+| B5 STS | 13 | 交付策略、event log、offload、hook 預算、失聯通知、crash 與重啟、策略測試改寫、策略樹版本釘住、主機磁碟的 operator 路徑、清場與 intent 釋放的安全修正、收尾 |
+| B6 TD | 11 | 常駐層、交易層、`cancel_session`、drain-replace、backfill、狀態廣播、cancel-on-disconnect、readiness 與進程內重試、收尾、venue 實機 |
 | B7 MD atom | 11 | atom 模型、各 venue adapter、通用 join、tape、fetch worker |
 | B8 MD 編排 | 7 | orchestrator、placement、reconciler、到期、常駐訂閱、手動 restart |
 | B9 Selector | 4 | option_chain、rolling_future、狀態持久化、`md.universe` |
@@ -362,6 +362,10 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B2-01 `TESTING.md`（#174）
 
 - **驗收：** 寫明 tier（§9.1）、規則（§9.2）、預算與閘門（F30）、handler 和傳輸分開的寫法（F31），以及 IF 的 `xfail(strict=True)` 契約測試慣例；每條規則附一個範例。
+- **後續（#303、#344，F47）：**
+  - `TESTING.md` 依 F47 寫明：單一測試的時間上限在 CI 上只警告、本機判定失敗；120 秒 wall time 與 integration 的 10 秒仍是硬閘門
+  - 記錄：CI 的 stdlib-loop pass 不跑 `packages` 的 integration 測試；正式環境全用 uvloop，不另補（#303）
+  - 量測類測試的時間上限出現 flake 時放寬，不刪測試（#344）
 - **依賴：** —
 
 ### B2-02 `Clock` / `FakeClock`（#175）
@@ -577,6 +581,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 - **描述：** 外部依賴 strategon#60（S-1 到 S-3）。
 - **驗收：** 在 cp 和 yite 上以 `oci_host_pid` 實際滾動一次 controller，確認：worker 存活；release GC 不刪仍在使用的 rootfs；重啟 agent 不影響任何 strategy；新舊版本的 worker 能並存；`/proc/<pid>/oom_score_adj` 符合 §4.7。
+- **後續（#324）：** pin 改成釘所有還沒 release 的 held slot，不看 phase；`Supervisor.start()` 結束時寫一次 pin
 - **依賴：** B3-03、strategon#60
 - **決策：** F6
 
@@ -601,6 +606,11 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - 契約測試：`max_restarts=None` 時任何次數都不進 FATAL；等待時間單調不減且不超過上限乘上 `1+jitter`；連續 RUNNING 滿 `stable_s` 後下一次 crash 的等待回到 `min_backoff_s` 附近；告警在第 `alert_after` 次觸發一次、歸零時解除一次
   - 現有 STS 的 F11 測試不變、全綠
   - MD fetch 與 TD 帳號的 orchestrator 不再有自己的 restart 數字
+- **後續（#308、#327、#329）：**
+  - backoff 先截上限再算指數，避免 `attempt` 很大時溢位（#308）
+  - orchestrator 能要求 Supervisor 殺掉仍活著的 LOST pid；現在只有 `close(stop)` 會（#308）
+  - LOST 的 fetch worker 以 incarnation+1 重新 spawn（§4.4、F42）；spawn 失敗的重試也走 F42 曲線（#327）
+  - TD 的 reconcile 對死掉的帳號 worker 直接 SPAWN，改走 `plan_restart`（#329）
 - **依賴：** B3-02
 - **決策：** F42
 
@@ -616,6 +626,16 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **驗收：** `git grep -n "pending Yi Te"` 在 `apps/`、`packages/` 沒有結果；附錄 D 列出的常數和代碼一致；CI 檢查在加回標記時會失敗。
 - **依賴：** —
 - **決策：** F42
+
+### B3-10 procman 收尾（#368）
+
+- **描述：** #317、#327 留下的 procman 修正。
+- **範圍：**
+  - `Supervisor.start()` 失敗後可以重試：失敗時復原 `_booted`；單一 socket 的 id 不符降級成一筆觀察；`supervisor.json` 損壞仍 fail-closed 並寫 error log（#317）
+  - `_fence_pid` 不在鎖內做同步 I/O，改到鎖外用 `asyncio.to_thread`（#317）
+  - `heartbeat_loop` 除了 `BrokenPipeError`，也處理其他寫入錯誤（#327）
+- **驗收：** `start()` 失敗之後再呼叫一次會成功；fence 期間其他 slot 的操作不被阻塞；status fd 寫入出現 `OSError` 時 worker 正常結束。
+- **依賴：** B3-03
 
 ---
 
@@ -698,6 +718,18 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **依賴：** B4-01、B3-04、B4-07、B4-08
 - **決策：** F26、F41
 
+### B4-11 stop 改非同步與 API／CLI 收尾（#369）
+
+- **描述：** F46，以及 #331、#362 的 API／CLI 項目。
+- **範圍：**
+  - stop：STS controller 接受 `sts.session.end` 後，API 回 202，不再等 `on_stop` 與清場，也不再自己送 intent delete（改由 STS controller 在 terminal 時處理，B5-12）。`mftik stop` 與 `mftik run` 的 Ctrl-C 輪詢 status 到 terminal，期間顯示進度；錯誤訊息分清「已停、通知未送達」和「沒停」（#331）
+  - `GET /sts/sessions` 與 `mftik ps`（現在回 501）（#331）
+  - UI 的 bridge 改訂 `sts.status.{session_id}`，也就是 §3.3 的即時頻道（#331）
+  - sqlite 的 BIGINT 與 alembic check 的差異（#362）
+- **驗收：** stop 一個 `on_stop` 要跑 10 秒、清場要 40 秒的 session：API 在 1 秒內回 202，CLI 等到 terminal 才回報成功；`mftik ps` 列出 session；UI 收得到 status；alembic check 在 sqlite 與 Postgres 上都乾淨。
+- **依賴：** B4-08、B5-12
+- **決策：** F12、F46
+
 ---
 
 ## B5 STS 補齊
@@ -712,6 +744,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B5-02 event log 併入 ingress（#211）
 
 - **驗收：** 入站事件一收到就記錄，帶 `delivered` / `superseded` / `dropped` 標記；寫檔在 writer thread；沒設 `STS_EVENTLOG_DIR` 時只關掉寫檔。
+- **後續（優先，#360）：** `Ingress._logs` 沒有上限，長時間執行會 OOM；落盤之後要能丟掉已寫出的行
 - **依賴：** B5-01
 
 ### B5-03 offload（#212）
@@ -724,12 +757,14 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - stop 時 process 模式的子進程被 terminate；子進程 OOM 時，session 收到 `OffloadWorkerLost` 而不會跟著死；從非策略 thread 呼叫 SDK 會被拒
   - `offload_processes: 0`（預設）時，`isolate=True` 與 `offload_pool` 都拋出 `OffloadQuotaExceeded`，訊息寫明要設的欄位；`offload_processes: 3` 時，`offload_pool(workers=2)` 之後 `isolate=True` 的 pool 是 1 個，再開 `offload_pool(workers=1)` 會拋錯；pool 掉了一個子進程重建時不重複扣額度
   - 准入：同樣的記憶體預算下，`offload_processes: 2` 的 session 比沒宣告的多扣 2 × 子進程估計值；有設 `offload_memory_mb` 時用它；超過預算以 `capacity_exceeded` 拒絕
+- **後續（#315）：** procman 的 Pss 計算範圍要涵蓋整棵子進程樹，包含 offload 子進程；F43 執行中的准入依賴它
 - **依賴：** B4-03
 - **決策：** F9、F43
 
 ### B5-04 hook 時間預算（#213）
 
 - **驗收：** F15 表的每一列都有測試：1 秒警告與 `HookSlow`、30 秒時的 B 類 crash、`on_ready` / `on_stop` 的 10 秒上限。
+- **後續（#338）：** `on_start` 與 ready 的期限從 strategy.yml 讀（F12 已定欄位）
 - **依賴：** B4-03
 - **決策：** F15
 
@@ -754,6 +789,10 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B5-08 `StrategyHarness` 與策略測試改寫（#217）
 
 - **驗收：** 所有內建策略在 `StrategyHarness` 上測試全綠（F16）；內建策略都在 `on_ready` 開始交易。
+- **後續（#338、#350、#360）：**
+  - SDK `NotReady` 的 xfail（#338）
+  - `td.error` 回覆改成帶 `RejectCode` 的例外；無法解析的 `api_id` 拋例外；ledger 讀取要檢查 `td.error`（#350）
+  - SDK 文件寫明 must-deliver 嚴格優先於行情的取捨（#296、#360）
 - **依賴：** B5-01、IF-06
 - **決策：** F16
 
@@ -793,8 +832,47 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - session 跑在 worker 上時，artifact 的 list / read / delete 與 event log 讀取照常
   - 策略在 worker 裡寫的 artifact，operator 經 controller 讀得到
   - API 的 artifact 與 event log 路由不變，CI 的 contracts 檢查通過
+- **後續（#310、#361）：**
+  - catchup 的服務方是 API：§5.7、`broker/handler.py`、`docs/baseline/protocol.md` 的說明一併改（#310）
+  - `deployable` 不再比對目前 stamp 的 extras，改看 session 釘住的 generation（#310）
+  - 解析 pin 與 commit 之間的時間窗（#361）
+  - `pinned-generations.json` 有兩個寫者：寫入時取聯集並加 flock（#361）
 - **依賴：** B4-02、B5-02
 - **決策：** F40
+
+### B5-12 STS 清場與 intent 釋放的安全修正（優先）（#370）
+
+- **描述：** #345、#314 裡會造成「worker 還活著、intent 卻被回收」或「該清場卻沒清場」的項目，加上 F46 的 STS 端。優先處理。
+- **範圍：**
+  - 沒有 exit file 的 LOST 不再當成乾淨結束：先確認 pid 已消失，再走 C 類清場並發 alert（#345）
+  - `stop_unsettled`：pid 確認消失之前，session 不得進入 terminal；`_drive` 跑滿上限仍未收斂時，保持非 terminal 並告警（#345）
+  - session 進入 terminal（stop、`exit`、`fail`、crash 後不重啟）時，由 STS controller 寫該 session 的 MD / TD intent `released_at`，再盡力送 delete（F46、#314）
+  - TD 的 seed 過濾掉已 terminal 的 session，死掉的 session 不會讓交易層又打開（#314）
+  - `sts.session.end` 接受就回覆，不等 `on_stop`（F46）
+- **驗收：**
+  - 模擬 stop 期間 shim 被殺：session 走 C 類清場並發 alert，不會是 `done`
+  - Supervisor 的 driver 一直失敗時，session 不會進入 terminal，intent 不會被回收
+  - session 自己 `exit` 之後，幾秒內它的 intent 有 `released_at`；TD 重啟後不會為它打開交易層
+  - `sts.session.end` 的回覆時間和 `on_stop` 的長度無關
+- **依賴：** B5-06
+- **決策：** F10、F38、F46
+
+### B5-13 STS 收尾（#371）
+
+- **描述：** #308、#310、#314、#317、#328、#338、#344、#345、#349、#360 其餘的 STS 項目。
+- **範圍：**
+  - 列上 `phase=stopping` 視為 desired stopped：controller 在 stop 途中重啟時，reattach 不得把 session 重新掛起（#314、#317、#345）
+  - `restarts_in_window` 持久化，滾動 controller 不能繞過 F11；create request 接上 `max_restarts`、`restart_window_s`（#345）
+  - 撤單回「查無此單」時重查一次再判定 `unconfirmed`（#345）
+  - 非 capacity 的 spawn 失敗不會卡在 PENDING：設上限後 `_fail`；存活報告的小空窗（#328）
+  - `sts.status` 快照互蓋：依 §3.3，worker 只發進度用的型別或 subject；fail 由 worker 在 `sts.ctl` 服務，force_stop 留在 controller，END 的註解一致化（#338）
+  - 缺 tree 讓原本要重新掛起的 session 變成 failed 時，發 alert（F10，#310）
+  - no-responders 快速失敗（§5.3，#344）
+  - RUNNING 之前的積壓：依 §5.3，TD 在 `on_start` 之後才訂閱，補測試（#360）
+  - `worker.py` 過時的 docstring（#308）；STS worker 不 import DB 的靜態防護，用 unit 測試或 import-linter（#349）
+- **驗收：** 每一項都有對應的測試；靜態防護在 worker 端加回 DB import 時會失敗。
+- **依賴：** B5-06、B4-02
+- **決策：** F10、F11
 
 ---
 
@@ -836,6 +914,11 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B6-06 帳號狀態廣播與 reset（#224）
 
 - **驗收：** `td.account.state.*` 依 F14 廣播；殺掉帳號 worker 後，它會重啟、recon、發出 `td.account.reset`，策略收到 `on_resync(account_reset)`。
+- **後續（#352、#350、#302、#359）：**
+  - （優先，B6-06 上線前必修，#352）略過的 resync 仍送出 ready：依 §5.6「先 `on_resync` 再 ready」，resync 沒送達就不送 ready
+  - reconnect 觸發的 resync 失敗要重試；同一個帳號的 resync 依序送出，不亂序（#352）
+  - 啟動時的 `TdReady` 改用 settled 讀取（#352）；`TdReady` 要等交易層 recon 完成才為 true（§7.1，#350）
+  - `FIRST_INCARNATION=1` 在 slot 釋放後被重用，incarnation 會重複：改成跨 slot 釋放仍單調遞增（#302、#359）
 - **依賴：** B6-02、B5-05
 - **決策：** F13、F14
 
@@ -844,6 +927,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **範圍：** Binance UM / CM（逐 symbol）、Bitget UTA、OKX、Gate 現貨與合約的死人開關；帳號層級的設定；drain-replace 之前延長倒數。
   - Gate（#297）：`GateDeadMan` 與 `GateFuturesDeadMan` 都 `supported()`；分別呼叫 `POST /spot/countdown_cancel_all` 與 `POST /futures/usdt/countdown_cancel_all`，不帶 `currency_pair` / `contract`（整個市場一個倒數），`refresh` 忽略 `symbols`；`timeout` 至少 5 秒，`stop` 送 `timeout=0`。adapter 的說明寫明：到期時同一把 key 在那個市場上不是 MFTIK 下的單也會被撤。
 - **驗收：** 在 testnet 上 kill -9 帳號 worker，倒數到期時交易所撤單；一般重連不會觸發；各家參數寫進 adapter。Gate 現貨若沒有 testnet，改在主網用遠離市價的最小單驗證。
+- **待確認（#343）：** 交易層關閉時的倒數。建議交易層關閉時送 `timeout=0` 解除倒數：死人開關只在交易層啟用時保護，不讓交易所撤掉 deactivate 之後留下的掛單，和「deactivate 不撤單」一致。等 Yi Te 確認後實作
 - **依賴：** B6-02、B6-04
 - **決策：** F37
 
@@ -866,8 +950,39 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - integration：key 被拒時只嘗試一次認證，廣播 `unavailable(auth_rejected)`，之後不再送認證請求
   - `apis` 列不存在時記為 FAILED、不重啟
   - event loop 卡 5 秒不會被 procman 殺掉；卡超過 10 秒才會
+- **後續（#329）：** 帳號 worker 的環境變數改成 allowlist（比照 `fetch_ctl.py` 的轉送清單），不把 DB 連線設定寫進 `supervisor.json`
 - **依賴：** B3-08、B6-06
 - **決策：** F14、F42
+
+### B6-10 帳號 worker 收尾（#372）
+
+- **描述：** #336、#339、#343、#344、#350、#355、#359 的 TD 項目。第一項優先。
+- **範圍：**
+  - （優先，#336）recon 不得丟掉別的 session 在途的單：保留在途的 client id，或 ack 遇到缺列時記 UNKNOWN
+  - `cancel_session` 途中 venue 丟出非逾時的例外時也要回覆（現在只接 `TimeoutError`）；取消期間拒收該 session 的新 submit（#336）
+  - drain 先排空 NATS 訂閱，已收下、還沒進 handler 的下單回 `td_draining`；文件不寫「TD_NO_ACK 可安全重送」（#359）
+  - drain 與 trading push 改成獨立 task，不擋 TD 的控制迴圈，也不擋 `td.account.{api_id}` 上的讀取（#343、#359）
+  - quiesce 期間的 `cancel_session` 等恢復之後再做，上限是租約；drain 路由寫 audit（#359）
+  - seed 期間收到的 `td.intent.delete` 記 tombstone，seed 不再把它加回來（#343）
+  - `oms.order` 實作，現在是 IF-11 的 stub（#343、#350）
+  - destroy 取消 chase 時喚醒等待中的讀取；等待之後確認 session 沒換過才回 book（#350）
+  - backfill：拿掉 TD 程序的 fallback；detach 在帳號離開持有集合時觸發，不分路徑；已有 run 在跑時回 `ok=True` 並帶原因；單一 host、只轉送 get/post 的限制等有 venue 需要時再補（#339）
+  - paper 下單 205 ms 的牆鐘：確認是不是刻意模擬（#344）
+  - `account_views` 回歸測試要寫入 `SupervisorRecord`（#355）
+- **驗收：** 每一項都有測試；第一項有一個 integration 測試，重現「另一個 session 在途的單在 recon 之後還在」。
+- **依賴：** B6-02、B6-04、B6-05
+- **決策：** F13、F27、F35
+
+### B6-11 venue 實機與 history reader（#373）
+
+- **描述：** #335、#339、#343 留下的 venue 實機項目。
+- **範圍：**
+  - Deribit 連線的 15 分鐘壽命先在 testnet 量；如果是硬壽命，常駐層主動輪換連線（F35）（#335）
+  - Deribit、Bitget 的 history reader（#339）
+  - Deribit 下單，以及各 venue 的 testnet 驗收（#343）
+- **驗收：** Deribit 帳號 worker 連續跑 1 小時，常駐連線不中斷；兩個 reader 回補的歷史和交易所一致；testnet 驗收紀錄寫進 adapter 的說明。
+- **依賴：** B6-01、B6-02、B6-05
+- **決策：** F35
 
 ---
 
@@ -884,6 +999,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 - **驗收（每張相同）：** 該 venue 現有的每個 product topic 都改由 atom 提供；book 的 fold 和缺口 resync 搬進 `decode` / reconciler；capacity 的實測值寫進 adapter。
 - **B7-02a 另外：** 修掉原 #151：`DeribitSocket._read_loop` 的 `retries` 只在剛斷掉的那條連線收過 frame 時才歸零，連續幾次 setup 失敗後，之後一次普通斷線就可能耗盡 `max_retries`。改成 setup 成功、且之後收到 frame 就歸零；回歸測試涵蓋 `_open` 失敗和 `_on_open` / `_restore` 失敗兩條路徑。
+- **B7-02g 另外（#322）：** paper 的 capacity 是佔位數字，換成實際值；ticker、trades 的 atom 尚未支援
 - **依賴：** B7-01、IF-10
 - **決策：** F19、F21
 
@@ -912,6 +1028,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 - **驗收：** desired atom 由 intent、常駐訂閱、selector 組成，每個 atom 有 owner 集合；owner 進入 terminal 後由 GC 移除。
 - **另外（#299，F44）：** `controller_epoch` 存在新表 `md_controller(instance PK, controller_epoch bigint)`（含 migration），controller 啟動時以一句 `UPSERT … SET controller_epoch = controller_epoch + 1 RETURNING` 遞增並讀回。`controller.py` 裡「報告中斷要不要清 absence streak」的未定註解改成定案：不清（§8.2 規則 3）。驗收：同一個 instance 連續啟動兩次，epoch 嚴格遞增；兩個 controller 同時啟動拿到不同的 epoch。
+- **後續（#319）：** 同一個 owner 重新 put 時，從 absence 名單移出（`intent_gc.py`）；MD 的持有集合在 controller 重啟時從 DB 重建（TD 已由 seed 重建）
 - **依賴：** B7-01、B4-07
 - **決策：** F18、F44
 
@@ -920,6 +1037,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **驗收：** 容量不夠時才開新連線；atom 一旦放上去就不搬（F22）；連線上沒有 atom 時 worker 結束；controller 不對 `pv` 不同的連線 worker 推 desired，也不另開新 worker 承接它的 atom；`md.intent.put` 落在還有這種 worker 的 `(venue, endpoint)` 時，以 `protocol_mismatch` 拒絕，訊息列出要 `restart` 的 worker（F41）。
 - **placement 的速率（F44）：** placement 只看 `max_atoms`；連線 worker 在 `md.w.*` 回報的實測 msg/s 超過 `max_messages_per_second` 的 80% 時，那條連線不再放新 atom，已在上面的不搬。驗收：一條連線的回報速率超過門檻後，新 atom 開到別的連線；原有的 atom 不動。
 - **readiness 與重啟（F42）：** 連線 worker 的 ready 只代表本地初始化完成，不等第一次連上交易所；連不上時照樣 ready，經 `md.w.*` 報 `down`。crash 重啟用 B3-08 的 `INFRA_RESTART`，heartbeat timeout 10 秒。驗收：spawn 時交易所連不上不會 FAILED，恢復後不經重啟開始發佈；event loop 卡 5 秒不會被殺。
+- **後續（#322、#324）：** 以 B4-06 改過的 `ConnWorker.run` 簽名為準；加入連線 worker 後，同一個 pin 路徑仍只能有一個寫者，所有 worker 共用 MD 進程的那個 Supervisor
 - **依賴：** B8-01、B4-10、B3-08
 - **決策：** F17、F22、F41、F42、F44
 
@@ -942,12 +1060,14 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B8-05 常駐訂閱，`tape_keeper` 退役（#242）
 
 - **驗收：** 設定檔裡的常駐訂閱生效，tape 照常錄；`impl/tape_keeper.py` 和它的測試刪除。
+- **後續（#314）：** 常駐訂閱的權威是設定檔（§3.3）：MD controller 啟動時把設定檔整份同步進 `md_standing_subscriptions`，之後只讀這張表算 desired
 - **依賴：** B8-01、B7-04
 
 ### B8-06 狀態廣播、原地重啟、列出舊版 worker（#243）
 
 - **驗收：** `md.w.*` 依 F14 廣播；`mftik md restart <conn>` 原地重啟並在 coverage 記錄 tape 空洞；`mftik workers --stale` 列出跑在舊版代碼上的 worker。
 - **另外（F44）：** `md.w.*` 的狀態廣播帶這條連線實測的 msg/s，B8-02 用它判斷滿載。
+- **後續（#361）：** `/workers` 缺 `strategy_digest`
 - **依賴：** B8-03、B3-07
 - **決策：** F14、F24、F44
 
@@ -1014,6 +1134,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
   - MD 頁：每個連線 worker 的 venue / endpoint、狀態、incarnation、代碼版本、atom 數、RSS，以及每個 atom 的 owner 和最後一筆資料時間。
   - TD 頁：每個帳號 worker 的狀態、交易層開或關、session 數、incarnation、代碼版本、RSS。
 - **驗收：** 資料來自 `procman.report` 和 worker 狀態廣播；`just frontend-check` 和 frontend e2e 通過。
+- **後續（#324）：** API 的 `procman.report` 訂閱斷掉之後沒有重啟迴圈（`procman_reports.py`）
 - **依賴：** B8-06、B6-06
 - **決策：** F38
 
@@ -1021,10 +1142,16 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 
 - **範圍：** 先升級 agent（S-1 到 S-3），這一步會殺掉所有 strategy，所以必須在停掉所有策略之後做；再讓 plane sets 開啟 `oci_host_pid: true`；strategon#61 已上線的話，依 §4.7 設定每個平面的 `memoryBytes`。
 - **驗收：** 依 runbook 在空的平面上完成切換；回滾到 `arch/baseline` 演練過一次。
-- **依賴：** B10-02、B3-06，以及 B5、B6、B8、B9 全部完成
+- **後續（#349、#362，F45）：**
+  - 舊安裝要重新安裝 `sts` 指令（#349）
+  - `delete_api` 與 instance 退役改看未釋放的 intent，不看已停寫的 `td_sessions` / `md_sessions`；切換時把舊的 live 列標成 done（#362）
+  - 降版到 0035 時，先把 `restart: on_failure` 的列改成 `never`，寫進 runbook（#362）
+  - runbook 寫明搬帳號的做法：刪除後在新 instance 重建（F45）
+- **依賴：** B10-02、B3-06、B3-10、B4-11，以及 B5、B6、B8、B9 全部完成
 - **決策：** F2、F6
 
 ### B10-05 文件定稿（#253）
 
 - **驗收：** README、`ARCHITECTURE.md`、`Deployment.md` 更新為新架構；`REFACTOR_TICKETS.md` 和 `docs/baseline/` 封存到 `docs/archive/`。
+- **後續（#314、#355）：** §8.1 Start 寫的 `status=pending` 和 `create_live` 寫入的 `live` 要一致（#314）；`docs/Instances.md`、`docs/JetStreamRemoval.md` 仍是舊語意（#355）
 - **依賴：** B10-04

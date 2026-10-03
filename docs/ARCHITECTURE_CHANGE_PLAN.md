@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.36（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F44）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.37（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F47）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.37（後續 issue 盤點）：** 29 張「後續」issue（#302 到 #362）逐項分類，三項需要決定的定為 F45（帳號綁定不可改）、F46（stop 改非同步）、F47（CI 上單一測試的時間上限只警告）。§7.1、§8.1、§9.1 隨之更新；其餘收尾項目搬進既有的票，另開 B3-10（#368）、B4-11（#369）、B5-12（#370）、B5-13（#371）、B6-10（#372）、B6-11（#373）。
 >
 > **v0.36（#299，MD controller 與 selector 的行為細節）：** 新增 F44：placement 只用 `max_atoms`，速率改成實測的滿載訊號；報告中斷不清 absence streak；`controller_epoch` 存在 `md_controller` 表；`Center.at` 是明確欄位；selector 的平手、新 expiry、量距離的 strike 序列、空 listing、非週五到期五條規則。§6.2、§6.4、§8.2 隨之更新；實作分到 B8-01、B8-02、B8-06、B9-01、B9-02、B9-03。
 >
@@ -74,6 +76,9 @@
 | F42 | MD 連線、TD 帳號、MD fetch worker 不設 FATAL：crash 後第 n 次重啟前等 1 秒 × 2^(n−1)，上限 60 秒，±20% jitter；連續 RUNNING 滿 10 分鐘 n 才歸零；n 到 5 發 crash-loop 告警，歸零時解除。ready 只代表本地初始化完成（設定與憑證載入、NATS subject 答得到），不包含交易所連線：連不上由 F14 的狀態廣播回報，在進程內依同一條曲線重試（連線維持 60 秒後歸零）；FAILED 只留給設定錯誤；API key 被拒時照樣 ready，報 `unavailable(auth_rejected)`，不再重試認證。TD 帳號與 MD 連線的 heartbeat timeout 為 10 秒。STS 維持 F11。其餘暫定數值以現值為預設，列在附錄 D | 它們是共用基礎設施：FATAL 會讓所有依賴的 session 停到有人處理，TD 還會留下策略撤不掉的掛單（F37 預設關閉）；crash 重啟用的是當下 controller 的 release，修正版上線後會自己恢復。jitter 避免相關的 crash（同一個壞 frame 打在多條連線、同一個 bug 影響多個帳號）同步重連，撞上 per-IP 的連線速率限制。ready 若包含交易所連線，spawn 時遇到維護或網路抖動就會 FAILED 且永不重啟。10 秒和 F14 收件端的靜默判定一致，procman 不會比收件端先下手（§4.3）；B3-08（#365）、B3-09（#366）、B6-09（#367）、B8-02（#239）、B8-03（#240） |
 | F43 | `limits.offload_processes` 是 session 同時存在的 offload 子進程總上限，預設 0（用 process 模式要宣告）。`offload_pool(workers=N)` 建立時預留 N 個；`isolate=True` 背後的 pool 在第一次使用時建立，拿剩下的額度，至少 1 個。額度不夠就在呼叫處拋出 `OffloadQuotaExceeded`，不默默縮小。准入在部署時預留 session 估計值加上 P × 子進程估計值（P 為 `offload_processes`；子進程估計值有設 `offload_memory_mb` 就用它，否則用實測的 spawn 子進程基準 Pss）；子進程不算進 `max_workers`。`offload_threads` 預設維持 2 | 一個寫在 strategy.yml 的數字界定整棵子進程樹，准入和 operator 在代碼跑起來之前就看得到上限；若 pool 不受 `limits` 管，子進程數由執行期代碼決定，准入無從得知。默默縮小會讓策略以為有 N 個 worker，延遲莫名變差。預設 1 會讓每個 session 多預留一個大多用不到的子進程（約 60 MiB，等於估計值翻倍）。`StrategyHarness` 套用同樣的限制，測試時就會撞到（§4.7、§5.5）；B5-03（#212） |
 | F44 | MD controller 與 selector 的九條細節（#299）：(1) placement 只用 `max_atoms`；連線 worker 在 `md.w.*` 回報實測 msg/s，超過 `max_messages_per_second` 的 80% 就不再放新 atom，已在上面的不搬。(2) 報告中斷不清 absence streak。(3) `controller_epoch` 存在 `md_controller(instance PK, controller_epoch)`，啟動時以一句 UPSERT 遞增。(4) `Center.at` 是 selection 狀態裡的明確欄位，只在重新置中時改寫，不以 `updated_at` 代用。(5) 參考價落在兩檔正中間時取靠近目前中心的一檔，沒有中心時取較低的一檔。(6) debounce 期間新出現的 expiry 跟著存下的中心點，取它自己序列上離中心價最近的一檔。(7) 距離一律量在這一輪套用 `min_tte` 之後的最近 expiry 的 strike 序列上。(8) listing 回來 0 個 instrument 一律當讀取失敗，`Hold(listing_empty)`。(9) tenor 分類交給 venue 的 atom adapter（`tenor_of`），週五日曆是只套用在宣告適用的 venue（目前是 Deribit）的預設實作；沒有分類能力的 venue 部署 `rolling_future` 在 deploy 時失敗 | (1) 每個 atom 的推送量差好幾個數量級，給不出靜態成本。(2) 換 publisher 時 B3-04 已重置；同一 publisher 中斷前後的兩份報告都是權威的缺席觀測，terminal 的 session 不會回到報告上。(4) 期權到期輪替時 selection 會變，中心點和時間戳要保留（S5）。(6) 狀態只有一個中心點，`evaluate` 是純函數，結果必須能從 `(listing, prev)` 重算。(8) 把讀取失敗當成空盤面會退訂整條鏈；真的空了，舊合約到期時照 C7 移除。(9) venue 詞彙歸 MD 的 atom 層（§6.1），SYM 不改（§6.2、§6.4、§8.2）；B8-01、B8-02、B8-06、B9-01、B9-02、B9-03 |
+| F45 | 帳號的 TD instance 綁定（`apis.instance_id`）不可經 API 修改：`PATCH /apis` 只改名，欄位 NOT NULL、沒有未綁定的狀態。要搬帳號，就刪除後在新 instance 重建（新的 `api_id`）。之後若要加改綁的 route，帳號還有未釋放的 intent、或舊 instance 的報告還列著它的 worker 時一律拒絕，主機永久消失時才允許 `--force` | F36 的 at-most-one 靠的就是靜態綁定，所以要擋的是改綁這個動作本身。等舊 worker 從報告消失再 spawn 的做法依賴報告缺席，和 F32 衝突：舊主機永久消失時新 instance 永遠不會 spawn（§7.1，#329）；runbook 見 B10-04（#252） |
+| F46 | stop 改成非同步：STS controller 接受 `sts.session.end` 就回覆，API 回 202，CLI 輪詢 status 直到 terminal。session 進入 terminal（不論是 stop、`exit` 還是 `fail`）時，由 STS controller 寫該 session 的 intent `released_at`，再盡力送 `md.intent.delete` / `td.intent.delete`；MD / TD 的報告回收是兜底 | `on_stop` 10 秒加上 grace、再加上清場最多 45 秒，同步等待一定超過 API 和 CLI 的逾時，stop 常回 503，但 session 其實已停。和 deploy 的 202（F12）對稱。session 自行結束時本來就沒有人寫 `released_at`，這一步本來就要做。代價是 intent 晚幾秒釋放（§8.1，#331、#345、#314）；B4-11（#369）、B5-12（#370） |
+| F47 | CI 上 unit 50 ms、component 500 ms 的單一測試上限只輸出 warning，不判定失敗；本機仍判定失敗。`just test` 那一步 120 秒的 wall time 在 CI 上仍是硬性閘門，integration 10 秒上限在 CI 上也仍判定失敗 | `ubuntu-latest` runner 的計時抖動：每次失敗的都是不同的測試，而且都在上限附近，同一批 unit 測試本機最慢約 25 ms（§9.1，#303）；B2-01（#174） |
 
 ## 0. 摘要
 
@@ -1081,6 +1086,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 
 ### 7.1 帳號 worker（範圍 5）
 
+- **綁定（F45）：** 帳號綁定的 TD instance（`apis.instance_id`）不可經 API 修改。要搬帳號，就刪除後在新 instance 重建。日後若要加改綁的 route，帳號還有未釋放的 intent、或舊 instance 的報告還列著它的 worker 時一律拒絕，主機永久消失時才允許 `--force`。
 - **單位（F34）：** 一個進程對應一個 `api_id`，持有該帳號所有私有連線。Bybit（`/v5/trade` 加 private stream）和 Binance UM/CM（WS API 加 user stream）一個帳號就有兩條 websocket；拆成兩個進程，OMS 和 ledger 就得跨進程同步。
 - **兩層生命週期（F35）：**
   - **常駐層：** TD instance 名下每個啟用的帳號，都有一個常駐的帳號 worker，和有沒有 session 無關。它一啟動就對交易所建立 HTTP 連線並保持溫熱。現行的 httpx client 用預設設定，閒置 5 秒（`keepalive_expiry`）就會關掉連線，也沒有預熱；所以要把 keepalive 調長，並由 adapter 定義一個輕量請求（例如 server time）定期送出。recon、槓桿查詢、backfill 和走 HTTP 的下單都共用這個連線池。
@@ -1129,9 +1135,10 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 
 **End**
 
-1. `sts.session.end(session_id, reason)`：worker 執行 `on_stop` 後退出，狀態進入 terminal。
-2. `md.intent.delete`、`td.intent.delete`，冪等。
-3. 兜底：MD/TD orchestrator 會依 §8.2 的規則回收 intent。session 自己 `exit` 或 `fail` 時不經過 API，靠的就是這條路徑。
+1. `sts.session.end(session_id, reason)`：STS controller 接受就回覆，API 回 202，不等 `on_stop`（F46）。之後的進度看 status；`mftik stop` 輪詢到 terminal。
+2. worker 執行 `on_stop`、平台清場後退出，狀態進入 terminal。
+3. session 進入 terminal 時，由 STS controller 寫該 session 的 MD / TD intent `released_at`（F38），再盡力送 `md.intent.delete`、`td.intent.delete`，冪等。stop、`exit`、`fail` 都走這一步。
+4. 兜底：MD/TD orchestrator 會依 §8.2 的規則回收 intent。
 
 啟動失敗的回滾直接走 End。因此 `deploy_strategy` 的同步流程和它的回滾（`_detach_md`、`_fail_sts`）一起刪除，API 寫死的 10 秒 create timeout（#132 的成因）也隨之消失。驗證步驟（`_sts_target`、`_check_sts_instance`、`_check_md_instances`、`_td_instance`）留給新的 start 重用。
 
@@ -1205,7 +1212,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 | integration | `integration` | 真 NATS、Postgres、真的 Supervisor 和 shim 子進程 | — | 10 s | `just test-int`、CI |
 | e2e | `e2e` | compose stack | — | — | release 前 |
 
-**預算（F30）：** 以 GitHub Actions 的 `ubuntu-latest` 為準：`just test`（unit 加 component，`pytest -n auto`）那一步的 wall time 在 120 秒內，不含 `uv sync` 和服務啟動；integration tier 另開 job，不算在內。CI 設閘門：這一步超過 120 秒，或任何一個 unit 測試的 call phase 超過 50 ms，就判定失敗。B0 的基線也在 GitHub Actions 上量。
+**預算（F30）：** 以 GitHub Actions 的 `ubuntu-latest` 為準：`just test`（unit 加 component，`pytest -n auto`）那一步的 wall time 在 120 秒內，不含 `uv sync` 和服務啟動；integration tier 另開 job，不算在內。CI 設閘門：這一步超過 120 秒就判定失敗。單一測試的 call phase 上限（unit 50 ms、component 500 ms）在本機判定失敗，在 CI 上只輸出 warning，因為 runner 的計時抖動會讓接近上限的測試隨機失敗；integration 的 10 秒上限在 CI 上仍判定失敗（F47）。B0 的基線也在 GitHub Actions 上量。
 
 ### 9.2 規則
 
