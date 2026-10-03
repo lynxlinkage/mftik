@@ -472,8 +472,12 @@ def test_the_queue_bounds_are_independent() -> None:
         all_capacity=ALL_QUEUE_CAPACITY,
         must_capacity=MUST_DELIVER_CAPACITY,
     )
-    for seq in range(ALL_QUEUE_CAPACITY):
-        market.accept(_event(StreamKind.TRADE, feed, f"m{seq}", seq=seq))
+    # The bound is the queue length. One event, accepted that many
+    # times, is the same depth as that many distinct prints, and it
+    # stays inside the unit call budget.
+    queued = _event(StreamKind.TRADE, feed, "queued", seq=0)
+    for _ in range(ALL_QUEUE_CAPACITY):
+        market.accept(queued)
     assert market.failed is False
     assert market.dropped == 0
     market.accept(_event(StreamKind.TRADE, feed, "extra", seq=ALL_QUEUE_CAPACITY))
@@ -481,8 +485,9 @@ def test_the_queue_bounds_are_independent() -> None:
     assert market.dropped == 1
 
     must = Delivery(all_capacity=1, must_capacity=MUST_DELIVER_CAPACITY)
-    for index in range(MUST_DELIVER_CAPACITY):
-        must.accept(_event(StreamKind.TD, "td.7", f"t{index}"))
+    held = _event(StreamKind.TD, "td.7", "t0")
+    for _ in range(MUST_DELIVER_CAPACITY):
+        must.accept(held)
     assert must.failed is False
     with pytest.raises(SessionFailed) as caught:
         must.accept(_event(StreamKind.TD, "td.7", "overflow"))
