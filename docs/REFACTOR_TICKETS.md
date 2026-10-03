@@ -1,6 +1,6 @@
 # REFACTOR_TICKETS — 平面進程化重構的工作票
 
-> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.37。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
+> **對應 `ARCHITECTURE_CHANGE_PLAN.md` v0.38。** 所有改動先合併到 `refactor/process-planes` 分支。票裡的 F 編號、§ 章節、附錄都指那份文件。
 >
 > 每張票都有描述、範圍、驗收、依賴。驗收寫成別人能檢查的事：測試名稱、grep 結果、量測數字、文件章節。
 
@@ -927,7 +927,7 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 - **範圍：** Binance UM / CM（逐 symbol）、Bitget UTA、OKX、Gate 現貨與合約的死人開關；帳號層級的設定；drain-replace 之前延長倒數。
   - Gate（#297）：`GateDeadMan` 與 `GateFuturesDeadMan` 都 `supported()`；分別呼叫 `POST /spot/countdown_cancel_all` 與 `POST /futures/usdt/countdown_cancel_all`，不帶 `currency_pair` / `contract`（整個市場一個倒數），`refresh` 忽略 `symbols`；`timeout` 至少 5 秒，`stop` 送 `timeout=0`。adapter 的說明寫明：到期時同一把 key 在那個市場上不是 MFTIK 下的單也會被撤。
 - **驗收：** 在 testnet 上 kill -9 帳號 worker，倒數到期時交易所撤單；一般重連不會觸發；各家參數寫進 adapter。Gate 現貨若沒有 testnet，改在主網用遠離市價的最小單驗證。
-- **待確認（#343）：** 交易層關閉時的倒數。建議交易層關閉時送 `timeout=0` 解除倒數：死人開關只在交易層啟用時保護，不讓交易所撤掉 deactivate 之後留下的掛單，和「deactivate 不撤單」一致。等 Yi Te 確認後實作
+- **交易層關閉（#343，已定案）：** deactivate 時送 `timeout=0` 解除倒數，不是單純停止刷新；交易層重新打開、有掛單時再設倒數。`deadman/base.py` 的 D3 寫明這條。驗收：交易層關閉後 kill -9 帳號 worker，倒數期滿後留下的掛單仍在交易所上
 - **依賴：** B6-02、B6-04
 - **決策：** F37
 

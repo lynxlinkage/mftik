@@ -1,8 +1,10 @@
 # ARCHITECTURE_CHANGE_PLAN — 平面進程化重構
 
-> **狀態：v0.37（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F47）；工作票見 `docs/REFACTOR_TICKETS.md`。
+> **狀態：v0.38（2026-10-03）**。§12 的待決事項已全部定案（F1 到 F47）；工作票見 `docs/REFACTOR_TICKETS.md`。
 >
 > **基準：** `main` @ `a0cbfb2`。§1 的「現況」，以及本文引用的檔案、symbol、行數和測試數，都在這個 commit 上查證過。重構在 `refactor/process-planes` 分支上進行，所有改動先合併到這個分支。README 與 `docs/` 已經過時，不作為依據。**RM 清場已完成**，所以描述現況的章節（§1、§5 到 §8、附錄 A、B）說的是 `a0cbfb2`，不是分支上的代碼；清場後還剩什麼見 `docs/baseline/remaining.md`（RM-10，#173）。
+>
+> **v0.38（#343）：** F37 補上交易層關閉時的行為：送 `timeout=0` 解除倒數，死人開關只在交易層啟用時保護（§7.1，B6-07）。
 >
 > **v0.37（後續 issue 盤點）：** 29 張「後續」issue（#302 到 #362）逐項分類，三項需要決定的定為 F45（帳號綁定不可改）、F46（stop 改非同步）、F47（CI 上單一測試的時間上限只警告）。§7.1、§8.1、§9.1 隨之更新；其餘收尾項目搬進既有的票，另開 B3-10（#368）、B4-11（#369）、B5-12（#370）、B5-13（#371）、B6-10（#372）、B6-11（#373）。
 >
@@ -68,7 +70,7 @@
 | F34 | TD 帳號 worker 以帳號（`api_id`）為單位，一個進程持有該帳號所有私有連線 | §7.1 |
 | F35 | 帳號 worker 對每個啟用帳號常駐，維持溫熱的 HTTP 連線池；refcount（intent）只開關交易層（私有 websocket、OMS、recon），不 linger；backfill 是帳號 worker 用連線池處理的一次性 request，不另開 job worker | §7.1、§7.2 |
 | F36 | 帳號的 at-most-one 不用 DB lease：同 instance 由 Supervisor 以 PID 確認，跨 instance 靠 `api_id` → instance 的靜態綁定；`st_facts` 在 B10 drop | §7.1、§8.4 |
-| F37 | cancel-on-disconnect 預設關閉、逐帳號開啟；只用倒數計時型機制，當作 TD worker 的死人開關；不用 Deribit COD 和 Bybit DCP | §7.1 |
+| F37 | cancel-on-disconnect 預設關閉、逐帳號開啟；只用倒數計時型機制，當作 TD worker 的死人開關，只在交易層啟用時保護：交易層關閉時送 `timeout=0` 解除倒數（#343）；不用 Deribit COD 和 Bybit DCP | §7.1 |
 | F38 | intent 兼任歷史：session 結束時 intent 列不刪、改記 `released_at`；`md_sessions` / `td_sessions` 從 B10 起停寫、保留唯讀；前端 MD/TD 頁改成顯示 worker 與 intent | §8.4；前端資料來自 procman 回報和 worker 狀態廣播 |
 | F39 | 「worker 跑哪一份代碼」分成三個軸：平台 release（`code_ref`）、策略樹 `strategy_digest`、extras `env_generation`。策略樹與 extras 的目錄權威維持在 API；session 在 start 時釘住 `(strategy_digest, env_generation)`，重新掛起沿用；Supervisor 記錄 worker 實際跑的版本；STS 磁碟副本改以 digest 定址，被釘住的版本不被覆蓋或回收；STS controller 不 import 策略代碼 | §3.3、§5.7；IF-16（#275）、B5-10（#276） |
 | F40 | STS controller 服務 operator 對主機磁碟的所有路徑：registry 副本、extras、artifact 的 list / read / 上傳 / 刪除、event log 讀取、未完成上傳的清理；不另開 files worker。策略仍在自己的 worker 裡直接讀寫 artifact，而且可以寫任何 key（全域寫入，刻意保留） | §5.7；B5-11（#277） |
@@ -1106,6 +1108,7 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 - **cancel-on-disconnect（F37）：**
   - 預設關閉，逐帳號開啟。設定掛在帳號上，不放在 strategy.yml，因為帳號 worker 是多個 session 共用的。
   - 語意是「TD worker 的死人開關」，不是「socket 斷線就撤」。只用倒數計時型機制（Binance UM/CM 以 symbol 為單位、Bitget UTA、OKX、Gate 現貨與合約）：交易層啟用且有掛單時，帳號 worker 定期刷新倒數；進程死掉或卡住、刷新停止，交易所才撤單。一般的重連不會觸發。
+  - 交易層關閉（deactivate）時，帳號 worker 送 `timeout=0` 解除倒數，不是單純停止刷新。關閉交易層不撤單；session 結束後故意留下的掛單不歸 MFTIK 管理，不該因為 worker 之後死掉而被交易所撤掉。死人開關只在交易層啟用時保護。交易層重新打開、有掛單時再設倒數。
   - 不用 Deribit 的 COD（每次重連都會撤單），也不用 Bybit 的 DCP（只開放給機構客戶，需另外申請）。
   - 計畫內的換版（F27）在 drain-replace 之前先延長倒數，新 incarnation 接手後再恢復。
   - 被交易所撤掉的單，照常以 `on_order_update(cancelled)` 送給策略；帳號重啟時另外有 `on_resync`。不需要新的 hook。
