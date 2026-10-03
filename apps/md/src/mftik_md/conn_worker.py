@@ -39,9 +39,13 @@ from collections.abc import AsyncIterator, Callable, Sequence
 import uvloop
 from mftik.broker import Broker
 from mftik.clock import Clock, SystemClock
-from mftik.exchange.atoms import TOPIC_ORDERBOOK, Atom, UnsupportedTopicError
+from mftik.exchange.atoms import (
+    TOPIC_ORDERBOOK,
+    Atom,
+    UnsupportedTopicError,
+    adapter_for,
+)
 from mftik.exchange.paper.atoms import PUBLIC, VENUE, parse_channel
-from mftik.exchange.paper.atoms import decode as paper_decode
 from mftik.exchange.paper.remote_public import PaperRemotePublicClient
 from mftik.exchange.tickers import UniversalTicker
 from mftik.procman import (
@@ -326,6 +330,11 @@ async def _amain(argv: Sequence[str]) -> None:
         incarnation=args.incarnation,
         clock=clock,
     )
+    # Decode comes from the venue registry. This entry still only serves
+    # paper (B4-06); ``parse_channel`` is paper's own channel spelling,
+    # which the adapter protocol does not carry.
+    adapter = adapter_for(conn.venue)
+    worker.remember(atoms)
     logger.info(
         "md conn worker started worker_id=%s incarnation=%s atoms=%s",
         worker.worker_id,
@@ -350,7 +359,7 @@ async def _amain(argv: Sequence[str]) -> None:
                 worker_id=worker.worker_id,
                 incarnation=worker.incarnation,
             )
-            await worker.run(frames, decode=paper_decode, publisher=broker)
+            await worker.run(frames, decode=adapter.decode, publisher=broker)
     finally:
         stop.set()
         beat_task.cancel()
