@@ -72,10 +72,10 @@ just lint            # ruff
 
 | 分類 | 文件 |
 |---|---|
-| broker 與傳輸 | [`Broker.md`](docs/Broker.md)、[`BrokerPatterns.md`](docs/BrokerPatterns.md)、[`BrokerProvisioning.md`](docs/BrokerProvisioning.md)、[`JetStreamRemoval.md`](docs/JetStreamRemoval.md)、[`RedisRemoval.md`](docs/RedisRemoval.md)、[`EventLoop.md`](docs/EventLoop.md) |
-| 平面與 instance | [`Instances.md`](docs/Instances.md)、[`StsPause.md`](docs/StsPause.md)、[`StsSessionList.md`](docs/StsSessionList.md)、[`MdHandover.md`](docs/MdHandover.md)、[`MdExpiry.md`](docs/MdExpiry.md)、[`MdVenueSubscriptions.md`](docs/MdVenueSubscriptions.md)、[`MdOpenInterest.md`](docs/MdOpenInterest.md) |
-| 功能設計 | [`Auth.md`](docs/Auth.md)、[`AuditIdentity.md`](docs/AuditIdentity.md)、[`Alert.md`](docs/Alert.md)、[`Artifact.md`](docs/Artifact.md)、[`StrategyEnvironment.md`](docs/StrategyEnvironment.md)、[`CLI.md`](docs/CLI.md) |
-| venue 實測 | [`Deribit.md`](docs/Deribit.md)、[`BitgetUta.md`](docs/BitgetUta.md) |
+| broker 與傳輸 | [`Broker.md`](docs/archive/Broker.md)、[`BrokerPatterns.md`](docs/archive/BrokerPatterns.md)、[`BrokerProvisioning.md`](docs/archive/BrokerProvisioning.md)、[`JetStreamRemoval.md`](docs/archive/JetStreamRemoval.md)、[`RedisRemoval.md`](docs/archive/RedisRemoval.md)、[`EventLoop.md`](docs/archive/EventLoop.md) |
+| 平面與 instance | [`Instances.md`](docs/archive/Instances.md)、[`StsPause.md`](docs/archive/StsPause.md)、[`StsSessionList.md`](docs/archive/StsSessionList.md)、[`MdHandover.md`](docs/archive/MdHandover.md)、[`MdExpiry.md`](docs/archive/MdExpiry.md)、[`MdVenueSubscriptions.md`](docs/archive/MdVenueSubscriptions.md)、[`MdOpenInterest.md`](docs/archive/MdOpenInterest.md) |
+| 功能設計 | [`Auth.md`](docs/archive/Auth.md)、[`AuditIdentity.md`](docs/archive/AuditIdentity.md)、[`Alert.md`](docs/archive/Alert.md)、[`Artifact.md`](docs/archive/Artifact.md)、[`StrategyEnvironment.md`](docs/archive/StrategyEnvironment.md)、[`CLI.md`](docs/archive/CLI.md) |
+| venue 實測 | [`Deribit.md`](docs/archive/Deribit.md)、[`BitgetUta.md`](docs/archive/BitgetUta.md) |
 
 已經封存的：[`docs/archive/README.md`](docs/archive/README.md) 是公開改寫前的 repo README，留著是為了舊的路徑與 recipe 對照表不要失傳。`docs/readme/` 是截圖，留給 B10 的 README 定稿用。
 

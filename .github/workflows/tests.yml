@@ -62,7 +62,7 @@ jobs:
             || { echo "contracts/openapi.json is stale — run: just openapi" >&2; exit 1; }
 
       # On uvloop, because that is the loop all six processes run
-      # (docs/EventLoop.md) and `conftest.py` defaults the suite to it. A suite
+      # (docs/archive/EventLoop.md) and `conftest.py` defaults the suite to it. A suite
       # on a different loop from the node cannot see a loop-specific regression.
       # `just test` is unit + component, `pytest -n auto`, and fails if the
       # step's wall time exceeds 120s (F30).

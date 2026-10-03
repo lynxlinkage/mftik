@@ -1,6 +1,6 @@
 """Measure what this node's hot paths cost on asyncio vs uvloop.
 
-Evidence for `docs/EventLoop.md`. A loop swap is the kind of change that is
+Evidence for `docs/archive/EventLoop.md`. A loop swap is the kind of change that is
 argued about with numbers from someone else's benchmark, so this one runs
 *this* codebase: the real `Broker`, the real pydantic envelopes, against a real
 server. Nothing here re-implements a hot path in order to time it.

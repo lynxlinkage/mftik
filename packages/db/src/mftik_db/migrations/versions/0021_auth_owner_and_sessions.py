@@ -7,7 +7,7 @@ Create Date: 2026-08-16
 The API has never authenticated anyone; ``MFTIK_DEFAULT_USER_ID`` names the
 Owner and the gate lives in Traefik. This is the first half of moving that
 gate into the app — the columns a username/password login needs, and the
-table a browser session lives in. See docs/Auth.md.
+table a browser session lives in. See docs/archive/Auth.md.
 
 **Why the new user columns are nullable.** There is already a ``users`` row
 on every deployment and on every local stack: ``seed`` creates one so that

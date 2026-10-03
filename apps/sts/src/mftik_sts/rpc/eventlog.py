@@ -72,7 +72,7 @@ async def handle_eventlog_info(
     :attr:`StsEventLogPart.instance`. Assembling a whole log from several is
     the caller's job: ``mftik_api.routes.sts`` asks every declared STS and
     merges, because a session's log can span two volumes and neither of them
-    is *the* right one to ask. See ``docs/Instances.md``.
+    is *the* right one to ask. See ``docs/archive/Instances.md``.
     """
     try:
         payload = StsEventLogInfoRequest.model_validate(req.envelope.payload)

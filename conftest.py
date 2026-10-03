@@ -42,7 +42,7 @@ _budget_offenders: list[tuple[str, str]] = []
 #: Which event loop the suite runs on: ``uvloop`` or ``asyncio``.
 #:
 #: Defaults to uvloop because that is what every process runs in production
-#: (docs/EventLoop.md). A suite on a different loop from the node is a suite
+#: (docs/archive/EventLoop.md). A suite on a different loop from the node is a suite
 #: that cannot see a loop-specific regression, which is the whole reason the
 #: default is not simply left at CPython's.
 #:

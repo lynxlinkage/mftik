@@ -7,7 +7,7 @@ export { LOGIN_PATH, loginUrl, safeNextPath } from '$lib/login-path';
 /**
  * Keeping the login session alive, and recovering when it dies anyway.
  *
- * There is one gate now, and it is this app's own (see docs/Auth.md). An
+ * There is one gate now, and it is this app's own (see docs/archive/Auth.md). An
  * expired session is answered with 401 whatever asked, and the answer to a
  * 401 is to route to /login — a page this app serves, reachable without
  * leaving it. Cold document loads never get that far: `+layout.server.ts`

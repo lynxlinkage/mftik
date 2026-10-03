@@ -8,7 +8,7 @@ plane being up in order to read a table the API is already connected to.
 
 Removing it is what lets TD stop serving an anycast subject at all: every other
 thing that reaches TD carries an `api_id`, and an `api_id` resolves to the one
-instance allowed to use that credential. See ``docs/Instances.md``.
+instance allowed to use that credential. See ``docs/archive/Instances.md``.
 """
 
 from __future__ import annotations

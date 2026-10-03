@@ -185,7 +185,7 @@ def run() -> None:
     # means uvloop whenever uvloop imports — which it always has here, because
     # it arrives as a ``uvicorn[standard]`` extra. So this changes no behaviour;
     # it removes an accident. The domains now say the same thing at their own
-    # entrypoints (docs/EventLoop.md), and a node running one loop on purpose is
+    # entrypoints (docs/archive/EventLoop.md), and a node running one loop on purpose is
     # worth more than a node running the right one by luck: with ``auto``, a
     # dependency bump that dropped the extra would move the API off uvloop and
     # nothing would say so but a latency graph.

@@ -15,7 +15,7 @@ import { pingSession } from '$lib/auth';
  * Production already satisfies this: one hostname serves the document, `/api`
  * and `/ws`. Locally the Vite proxy forwards `/ws` to the API for the same
  * reason it forwards `/api`, so both sides of the app now reach it the same
- * way. See docs/Auth.md.
+ * way. See docs/archive/Auth.md.
  */
 export function wsBaseUrl(): string {
 	const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';

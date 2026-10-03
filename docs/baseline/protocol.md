@@ -254,7 +254,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 
 | 名稱 | 定義 | 證據 | 去向 |
 |---|---|---|---|
-| `TD_SESSION_LIST`（`td.session.list`） | `messages.py:1487` | 除了 `protocol/__init__.py:115`／`:478` 的 re-export 和 `docs/Instances.md:411` 的敘述，整個 repo 零引用。TD 的 `rpc/router.py:32` 沒有掛它 | **刪除** |
+| `TD_SESSION_LIST`（`td.session.list`） | `messages.py:1487` | 除了 `protocol/__init__.py:115`／`:478` 的 re-export 和 `docs/archive/Instances.md:411` 的敘述，整個 repo 零引用。TD 的 `rpc/router.py:32` 沒有掛它 | **刪除** |
 | `SYM_HEALTH`（`sym.health`） | `messages.py:1895` | 只在 `protocol/__init__.py:92`／`:354` 出現。`sym/rpc.py:128` 沒掛，SYM 也不在 `INSTANCED_PLANES` 所以沒有 `serve_health` | **刪除** |
 | `STS_HEARTBEAT` | `messages.py:1648` | `STS_LEASE_HEARTBEAT` 的 alias（註解寫「alias for older names」），零引用 | **刪除**（本體也刪） |
 | `CreateSessionRequest` / `CreateSessionResult` | `messages.py:227`–`:228` | 註解寫「Backward-compatible aliases used by older call sites / tests」，但**連測試都沒有用** | **刪除** |
@@ -344,7 +344,7 @@ TD 的 `rpc/router.py:32`–`:36` 只掛三個型別（health、attach、detach�
 
 2. **§3.1 與 §7.1 說 TD 帳號 worker「服務 `td.oms.*`、`td.ledger.*`」，這和代碼有兩層落差。** （§3.1 表格第 4 列、§7.1 第 963 行）
    - `td.oms.view`、`td.oms.order`、`td.ledger.view` 是**型別**，它們服務在 `td.account.{api_id}` 這個 subject 上（`session/manager.py:1005` serve，`:1048`–`:1056` 分派）。沒有任何 subject 叫 `td.oms.*` 或 `td.ledger.*` 被 serve。
-   - 真正叫 `td.oms.{api_id}` / `td.ledger.{api_id}` 的 subject 由 `Topics.td_oms`／`td_ledger`（`topics.py:296`／`:291`）組出，但**兩者在全 repo 零呼叫端**，而 `publish_oms`（`mftik_td/session/session.py:503`）是空實作。`docs/JetStreamRemoval.md:186` 記錄了這個變更。
+   - 真正叫 `td.oms.{api_id}` / `td.ledger.{api_id}` 的 subject 由 `Topics.td_oms`／`td_ledger`（`topics.py:296`／`:291`）組出，但**兩者在全 repo 零呼叫端**，而 `publish_oms`（`mftik_td/session/session.py:503`）是空實作。`docs/archive/JetStreamRemoval.md:186` 記錄了這個變更。
    - 影響：如果照 §3.1 的字面去設計新協定，會把一個已經刪掉的 fan-out 當成要保留的東西。建議把這兩列改寫成「服務 `td.order.{api_id}` 與 `td.account.{api_id}`（`oms.view` / `oms.order` / `ledger.view` / `ensure_leverage`）；發佈 `td.{api_id}.global`」。另外 `strategy/base.py:67`–`:68` 和 `strategy/ledger.py:9` 的 docstring 也還在說「snapshots arrive on `td.ledger.{api_id}`」，同樣過期。
 
 3. **§8.3 把 `md.subscribe` / `md.unsubscribe` 當成要改名的現行機制。** 實際上兩者沒有生產發送者（4.3），`MdSubscribe` 的 docstring 自己就說沒有人送。所以 `md.intent.patch` 是**新增**的能力，不是舊東西改名；現行的兩個型別該直接刪。這個差別對 IF-01 有實際影響：如果當成「改名」，驗收會去找對應的舊名字並以為有呼叫端要改，實際上一個都沒有。

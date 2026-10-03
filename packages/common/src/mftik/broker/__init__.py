@@ -1,6 +1,6 @@
 """The broker — fan-out and request-reply.
 
-One vocabulary, one bus. ``docs/Broker.md`` is what a plane may say and
+One vocabulary, one bus. ``docs/archive/Broker.md`` is what a plane may say and
 what NATS does to answer it.
 """
 

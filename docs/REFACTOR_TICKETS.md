@@ -1153,5 +1153,5 @@ RM 結束時，三個平面都還能啟動，只是沒有 session 機制。要�
 ### B10-05 文件定稿（#253）
 
 - **驗收：** README、`ARCHITECTURE.md`、`Deployment.md` 更新為新架構；`REFACTOR_TICKETS.md` 和 `docs/baseline/` 封存到 `docs/archive/`。
-- **後續（#314、#355）：** §8.1 Start 寫的 `status=pending` 和 `create_live` 寫入的 `live` 要一致（#314）；`docs/Instances.md`、`docs/JetStreamRemoval.md` 仍是舊語意（#355）
+- **後續（#314、#355）：** §8.1 Start 寫的 `status=pending` 和 `create_live` 寫入的 `live` 要一致（#314）；`docs/archive/Instances.md`、`docs/archive/JetStreamRemoval.md` 仍是舊語意（#355）
 - **依賴：** B10-04
