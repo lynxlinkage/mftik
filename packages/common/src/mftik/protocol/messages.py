@@ -78,7 +78,7 @@ class HealthStatus(BaseModel):
     Carries what a presence registry would have held, and carries it *fresher*:
     these are read off the answering process at the moment it answers, where a
     TTL'd key would be up to its whole TTL out of date. See
-    ``docs/Instances.md``.
+    ``docs/archive/Instances.md``.
     """
 
     model_config = ConfigDict(frozen=True)

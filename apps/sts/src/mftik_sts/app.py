@@ -385,7 +385,7 @@ def main() -> None:
     # policy is what puts the process back, and an exit code is what
     # tells anyone reading ``docker ps`` that STS did not just stop.
     #
-    # ``uvloop.run`` rather than ``asyncio.run`` — docs/EventLoop.md has the
+    # ``uvloop.run`` rather than ``asyncio.run`` — docs/archive/EventLoop.md has the
     # measurements. This loop serves the instance. It builds that loop for
     # this call alone and leaves the global policy untouched.
     if not uvloop.run(amain()):

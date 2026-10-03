@@ -1,4 +1,4 @@
-"""In-app authentication for the API gateway. See docs/Auth.md.
+"""In-app authentication for the API gateway. See docs/archive/Auth.md.
 
 One Owner, proved several ways. This step is the gate itself plus the
 username/password proof; machine credentials and OAuth follow.

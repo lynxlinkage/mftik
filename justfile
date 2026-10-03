@@ -64,7 +64,7 @@ lint:
 backfill-check *args:
     uv run --all-packages python scripts/backfill_check.py {{args}}
 
-# Time this node's hot paths on asyncio vs uvloop — evidence for docs/EventLoop.md.
+# Time this node's hot paths on asyncio vs uvloop — evidence for docs/archive/EventLoop.md.
 # Wants a broker nobody else is using: it publishes thousands of messages and
 # writes a tape. `--probe` reports behaviour differences instead.
 loop-bench *args:

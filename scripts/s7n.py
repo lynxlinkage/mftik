@@ -28,7 +28,7 @@ control plane expands for us: ``${member.name}`` becomes ``MFTIK_INSTANCE`` and
 the WorkDir, and ``${member.vars.X}`` carries the site's NATS address. One set
 per role, because ``template.env`` is shared by a set's members — a single set
 would have to hand ``REDIS_URL`` to STS, which is the one thing the tape design
-forbids (docs/JetStreamRemoval.md).
+forbids (docs/archive/JetStreamRemoval.md).
 
 Secrets are ``secret.<name>`` tokens in the spec file. The control plane
 resolves them when it writes the assignment, so the file is complete on its

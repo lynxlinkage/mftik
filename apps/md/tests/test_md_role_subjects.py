@@ -12,7 +12,7 @@ property that makes a warming MD safe to run next to the one it is replacing.
 This used to be asserted by looking for the unanswered request still sitting in
 a Redis list. That was Redis' own behaviour rather than a promise of the broker,
 and it is no longer one: ``request`` fails fast when nobody is serving, and
-``post`` is what waits. See ``docs/Broker.md``.
+``post`` is what waits. See ``docs/archive/Broker.md``.
 """
 
 from __future__ import annotations

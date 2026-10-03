@@ -1079,8 +1079,8 @@ self.md.current("btc_q")        # rolling_future 目前的 current
 - `Dispatcher` 的 per-session fan-out（`md.{session_id}`）、`StsLink`、MD 端的 lease loop。
 - 每個 venue 一條 socket 的 `VenueSession` 模型、`_expiry_tasks`。
 - 各 adapter socket 類別裡的訂閱管理。adapter 只留下傳輸和 decode。
-- `docs/MdHandover.md`（由 §4.6 取代）。
-- `docs/MdVenueSubscriptions.md` 的 I6（由 §6.1 推翻）。
+- `docs/archive/MdHandover.md`（由 §4.6 取代）。
+- `docs/archive/MdVenueSubscriptions.md` 的 I6（由 §6.1 推翻）。
 
 ---
 

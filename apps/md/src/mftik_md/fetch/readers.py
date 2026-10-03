@@ -873,7 +873,7 @@ class OkxReader:
         name, not as a venue call that failed.
 
         ``oiCcy`` is used as sent; the side-count calibration lives in
-        ``docs/MdOpenInterest.md``.
+        ``docs/archive/MdOpenInterest.md``.
         """
         if ticker.category is not Category.PERP:
             raise NoReaderError(

@@ -60,7 +60,7 @@ class Api(Base):
     #: credential that silently never attaches.
     #:
     #: ``RESTRICT``: retiring an instance a credential still points at is
-    #: refused, not cascaded. See ``docs/Instances.md``.
+    #: refused, not cascaded. See ``docs/archive/Instances.md``.
     instance_id: Mapped[int] = mapped_column(
         # Named so ``create_all`` and migration 0031 build the same constraint.
         # Left to autogenerate they differ, and a schema built one way cannot

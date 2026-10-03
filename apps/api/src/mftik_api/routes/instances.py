@@ -3,7 +3,7 @@
 Declaring a row does not start anything. The node checks and does not
 guarantee: a row nobody deployed reads *down* on Home forever rather than
 provoking the node into fixing it, and making it true is operations work done
-wherever the compose file lives. See ``docs/Instances.md``.
+wherever the compose file lives. See ``docs/archive/Instances.md``.
 """
 
 from __future__ import annotations

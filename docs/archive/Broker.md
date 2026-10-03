@@ -45,7 +45,7 @@ the other exemption: regional Redis is that plane's disk, not a second
 broker, and STS still must not import `redis`. `scripts/` and the test
 suites are outside the rule.
 
-[`packages/common/tests/test_broker_is_the_only_transport.py`](../packages/common/tests/test_broker_is_the_only_transport.py)
+[`packages/common/tests/test_broker_is_the_only_transport.py`](../../packages/common/tests/test_broker_is_the_only_transport.py)
 walks the trees and fails with file and line.
 
 ## What a plane may say
@@ -113,5 +113,5 @@ Two files, and the split is the point:
 ## What a second transport would owe
 
 `BrokerTransport` in
-[`packages/common/src/mftik/broker/transport/base.py`](../packages/common/src/mftik/broker/transport/base.py),
+[`packages/common/src/mftik/broker/transport/base.py`](../../packages/common/src/mftik/broker/transport/base.py),
 and the tests above it. `build()` in `transport/__init__.py` is the seam.

@@ -623,4 +623,4 @@ the derivation filter being in the rebuild scan.
 | [`Instances.md`](Instances.md) | One process per instance name is an invariant. Tape is not in the broker. `claim_*` is not the long-term guard. `region` routes STS placement for unnamed sessions. |
 | [`RedisRemoval.md`](RedisRemoval.md) | Redis may return only as MD's tape disk. |
 | [`Alert.md`](Alert.md) | Late session-log replay is `session_logs`. Late `/ws/status/sts` is the REST session list. |
-| [`README.md`](../README.md) | Tape / lease sentences match the destination. |
+| [`README.md`](../../README.md) | Tape / lease sentences match the destination. |
