@@ -1,0 +1,35 @@
+{
+  "layer": "probe",
+  "artifactVersion": "set-by-tag",
+  "labels": { "app": "mftik", "layer": "probe" },
+  "deployPolicy": {
+    "startsecs": 5,
+    "healthWindowSeconds": 30,
+    "maxCrashesInWindow": 3,
+    "stopGraceSeconds": 15,
+    "enableAutoRollback": false
+  },
+  "limits": { "memoryBytes": "268435456" },
+  "update": { "maxUnavailable": 1, "waitReadySeconds": 120 },
+  "captureStdio": true,
+  "ociHostPid": true,
+  "sets": [
+    {
+      "metadata": { "name": "b306" },
+      "spec": {
+        "strategy": "b306",
+        "template": {
+          "args": ["python", "/app/scripts/b3_06_probe.py", "controller"],
+          "env": {
+            "MFTIK_INSTANCE": "${member.name}",
+            "PROBE_PERIOD_S": "10"
+          }
+        },
+        "members": [
+          { "machine": "cp", "name": "b306-jp" },
+          { "machine": "yite", "name": "b306-tw" }
+        ]
+      }
+    }
+  ]
+}

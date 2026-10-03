@@ -293,7 +293,7 @@ def render_sets(spec: dict[str, Any], version: str | None) -> list[dict[str, Any
         env.update({str(k): str(v) for k, v in (template.get("env") or {}).items()})
         template["env"] = env
 
-        for key in ("deployPolicy", "limits", "captureStdio"):
+        for key in ("deployPolicy", "limits", "captureStdio", "ociHostPid"):
             if key not in template and key in spec:
                 template[key] = spec[key]
         if "update" not in s and "update" in spec:
