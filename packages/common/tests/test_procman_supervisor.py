@@ -165,7 +165,10 @@ def _hold(
 
 def test_the_backoff_curve_uses_the_named_ratio() -> None:
     """Attempt 1 is the floor. Each later attempt multiplies by BACKOFF_RATIO.
-    There is no cap. Issue #286 has not fixed the ratio; 2 is what B3-02 uses."""
+
+    F42 keeps the multiplier at 2. There is no policy cap yet; B3-08
+    (#365) adds one.
+    """
     assert BACKOFF_RATIO == 2.0
     delays = [
         plan_restart(

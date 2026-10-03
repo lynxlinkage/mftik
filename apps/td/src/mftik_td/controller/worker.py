@@ -36,7 +36,7 @@ def account_worker_spec(
     procman. The intensity that bounds that restart is not a field of
     this spec. The orchestrator passes the caller's
     :class:`~mftik.procman.RestartIntensity` to
-    :func:`mftik.procman.plan_restart` (issue #286). This function does
+    :func:`mftik.procman.plan_restart` (Appendix D, F42). This function does
     not choose those numbers.
 
     ``labels`` is empty. ``strategy_digest`` and ``env_generation`` are

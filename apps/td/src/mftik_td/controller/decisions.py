@@ -16,8 +16,8 @@ module does not restate either.
   shim is still waiting (S3).
 * :func:`plan_account_restart` is :func:`mftik.procman.plan_restart` with
   ``restart="on_failure"`` and the intensity the caller supplied.
-  Restart-intensity numbers for MD and TD are not decided (issue #286).
-  This module does not construct a
+  The defaults the TD process passes are Appendix D. F42 changes that
+  curve; B3-08 (#365) owns the change. This module does not construct a
   :class:`~mftik.procman.RestartIntensity`.
 
 Account membership and the trading-layer bit are this layer's (F35).
@@ -366,9 +366,9 @@ def plan_account_restart(
     worker has no A/B/C (P6).
 
     ``intensity`` is the caller's. This function does not build one and
-    does not substitute a default (issue #286).
+    does not substitute a default (Appendix D).
 
-    B4-07. The numbers stay the caller's (issue #286).
+    B4-07. The numbers stay the caller's.
     """
     named = WorkerPhase(phase)
     if not isinstance(intensity, RestartIntensity):

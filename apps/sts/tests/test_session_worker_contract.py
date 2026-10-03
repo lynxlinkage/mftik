@@ -72,7 +72,7 @@ def _spec() -> StsCreateSessionRequest:
 
 
 def _ingress(capacity: int = 4) -> Ingress:
-    return Ingress(_spec(), capacity=capacity)
+    return Ingress(_spec(), all_capacity=capacity, must_capacity=capacity)
 
 
 def _event(
@@ -443,7 +443,7 @@ def test_latest_keeps_the_newest_body_and_does_not_count_a_drop(
     on the event.
     """
     feed = f"{kind.value}.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=4)
+    lane = Delivery(all_capacity=4, must_capacity=4)
     lane.accept(
         _event(
             kind, feed, "old", seq=1, body=b"old", recv_ts=1.0, clock=lambda: 10.0
@@ -474,7 +474,7 @@ def test_latest_conflates_per_feed() -> None:
     print loses its first one."""
     btc = "ticker.Paper_Spot_BTCUSDT"
     eth = "ticker.Paper_Spot_ETHUSDT"
-    lane = Delivery(capacity=4)
+    lane = Delivery(all_capacity=4, must_capacity=4)
     lane.accept(_event(StreamKind.TICKER, btc, "a1", seq=1, body=b"a1", recv_ts=1))
     lane.accept(_event(StreamKind.TICKER, eth, "b1", seq=1, body=b"b1", recv_ts=2))
     lane.accept(_event(StreamKind.TICKER, btc, "a2", seq=2, body=b"a2", recv_ts=3))
@@ -493,7 +493,7 @@ def test_kline_keeps_the_latest_per_bar_and_does_not_drop_a_closed_one() -> None
     """
     feed = "kline_1m.Paper_Spot_BTCUSDT"
     other = "kline_1m.Paper_Spot_ETHUSDT"
-    lane = Delivery(capacity=4)
+    lane = Delivery(all_capacity=4, must_capacity=4)
     lane.accept(
         _event(
             StreamKind.KLINE, feed, "next",
@@ -551,7 +551,7 @@ def test_all_drops_the_oldest_and_the_seq_hole_is_the_loss(kind: StreamKind) -> 
     ``superseded``, and the session has not failed.
     """
     feed = f"{kind.value}.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=2)
+    lane = Delivery(all_capacity=2, must_capacity=2)
 
     def one(seq: int) -> Inbound:
         return _event(
@@ -577,7 +577,7 @@ def test_all_drops_the_oldest_and_the_seq_hole_is_the_loss(kind: StreamKind) -> 
 
 def test_an_all_queue_is_per_feed() -> None:
     """A full BTC queue does not drop the ETH print sitting next to it."""
-    lane = Delivery(capacity=1)
+    lane = Delivery(all_capacity=1, must_capacity=1)
     lane.accept(
         _event(StreamKind.TRADE, "trade.Paper_Spot_BTCUSDT", "btc", seq=1, recv_ts=1)
     )
@@ -595,7 +595,7 @@ def test_a_feed_override_to_all_does_not_conflate() -> None:
     Both prints are delivered, in arrival order, and neither is
     superseded."""
     feed = "ticker.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=4, overrides={feed: DELIVERY_ALL})
+    lane = Delivery(all_capacity=4, must_capacity=4, overrides={feed: DELIVERY_ALL})
     lane.accept(_event(StreamKind.TICKER, feed, "a", seq=1, body=b"a", recv_ts=1))
     lane.accept(_event(StreamKind.TICKER, feed, "b", seq=2, body=b"b", recv_ts=2))
     assert lane.mark("a") is None
@@ -615,7 +615,7 @@ def test_a_must_deliver_overflow_fails_the_session_and_drops_nothing(
     The TD case is the row the ticket names. The other two are the
     same sentence in the table.
     """
-    lane = Delivery(capacity=2)
+    lane = Delivery(all_capacity=2, must_capacity=2)
 
     def one(seq: int) -> Inbound:
         return _event(
@@ -645,7 +645,7 @@ def test_a_superseded_event_is_marked_on_its_log_record() -> None:
     Logged at receive, so the body and ``recv_ts`` are the ones the
     ingress saw, not a decode."""
     feed = "ticker.Paper_Spot_BTCUSDT"
-    lane = Delivery(capacity=4)
+    lane = Delivery(all_capacity=4, must_capacity=4)
     lane.accept(_event(StreamKind.TICKER, feed, "old", seq=1, body=b"old", recv_ts=1))
     lane.accept(_event(StreamKind.TICKER, feed, "new", seq=2, body=b"new", recv_ts=2))
     by_id = {record.event_id: record for record in lane.log_records()}

@@ -86,10 +86,12 @@ class Ingress:
     Parsing ``strategy.yml`` stays where IF-07 put it; the worker is
     given the result so it does not open the registry to find the file.
 
-    ``capacity`` is forwarded to :class:`Delivery`. No default: the plan
-    doesn't name one. Production passes
-    :data:`~mftik_sts.session_worker.limits.TEMP_BUFFER_CAPACITY`, which
-    is both the per-feed ``all`` bound and the must-deliver bound.
+    ``all_capacity`` and ``must_capacity`` are forwarded to
+    :class:`Delivery`. Neither has a default. Production passes
+    :data:`~mftik_sts.session_worker.limits.TEMP_BUFFER_CAPACITY` as
+    ``all_capacity`` (it follows the per-feed ``all`` bound) and
+    :data:`~mftik_sts.session_worker.limits.MUST_DELIVER_CAPACITY` as
+    ``must_capacity`` (#296).
 
     ``clock`` is the ingress clock. Drop warnings are rate-limited on
     its monotonic clock. ``None`` uses :func:`time.monotonic`.
@@ -99,7 +101,8 @@ class Ingress:
         self,
         spec: StsCreateSessionRequest,
         *,
-        capacity: int,
+        all_capacity: int,
+        must_capacity: int,
         delivery_overrides: Mapping[str, str] | None = None,
         start_timeout_s: float = DEFAULT_START_TIMEOUT_S,
         clock: Clock | None = None,
@@ -107,7 +110,10 @@ class Ingress:
         self.spec = spec
         self.start_timeout_s = start_timeout_s
         self.delivery = Delivery(
-            capacity=capacity, overrides=delivery_overrides, clock=clock
+            all_capacity=all_capacity,
+            must_capacity=must_capacity,
+            overrides=delivery_overrides,
+            clock=clock,
         )
         self._phase: Phase | None = None
         self._exit_code: int | None = None

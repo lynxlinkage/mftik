@@ -121,13 +121,14 @@ class TradingLayer:
         #: How long :meth:`deactivate` waits for calls already inside
         #: the order handler. The plan does not name it.
         #: ``cancel_session`` waits :data:`WAIT_TIMEOUT_S`, so a shorter
-        #: drain would destroy the book under that call. Provisional.
+        #: drain would destroy the book under that call.
+        #: Default; adjust from measurement (Appendix D).
         self.drain_timeout_s = drain_timeout_s
         #: How long :meth:`drain_for_replace` waits. Not a deactivate:
-        #: the book stays up either way. Provisional, the same number as
-        #: :data:`DRAIN_TIMEOUT_S` (issue #286).
+        #: the book stays up either way. The same number as
+        #: :data:`DRAIN_TIMEOUT_S` (Appendix D).
         self.replace_timeout_s = replace_timeout_s
-        #: How long a quiesced layer waits to be stopped (issue #286).
+        #: How long a quiesced layer waits to be stopped (Appendix D).
         #:
         #: The controller should ``STOP`` inside this window. If it
         #: does not — the reply was lost, or the controller restarted —

@@ -219,11 +219,8 @@ def test_deploy_route_accepts_with_202() -> None:
 
 
 def test_end_timeout_covers_the_stop_grace_and_fits_the_cli() -> None:
-    """Provisional, pending Yi Te (#286).
-
-    ``SESSION_STOP_GRACE_S`` is ``ON_STOP_TIMEOUT_S`` today. B4-03 may
-    add a teardown margin; this fails if the end budget no longer
-    exceeds that grace, or no longer fits under the CLI's HTTP timeout.
+    """Appendix D. The end budget stays above the stop grace and under
+    the CLI's HTTP timeout.
     """
     assert orchestrate._END_TIMEOUT_S == (
         ON_STOP_TIMEOUT_S + orchestrate._ACCEPT_TIMEOUT_S

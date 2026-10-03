@@ -59,11 +59,13 @@ logger = logging.getLogger("md.conn")
 #: How often the status pipe is refreshed. Not a product restart timer
 #: and not the B8-02 heartbeat budget: the shim counts beats, and a
 #: stuck loop is what a missed beat means (S6). This worker's own pace.
+#: Default; adjust from measurement (Appendix D).
 _BEAT_INTERVAL_S = 0.2
 
 #: Pause before subscribing the same fixed set again, so a dead stream
 #: does not spin. Not the B8-03 token bucket and not a B8-02 restart
-#: delay (#286).
+#: delay. Paper only; B8-03 does not carry this to a real venue.
+#: Default; adjust from measurement (Appendix D).
 _RESUBSCRIBE_PAUSE_S = 0.05
 
 

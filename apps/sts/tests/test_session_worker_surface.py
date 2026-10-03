@@ -172,7 +172,11 @@ def test_an_unknown_override_is_refused() -> None:
     with pytest.raises(ValueError, match="sometimes"):
         delivery_mode(StreamKind.TICKER, "sometimes")
     with pytest.raises(ValueError, match="sometimes"):
-        Delivery(capacity=1, overrides={"ticker.Paper_Spot_BTCUSDT": "sometimes"})
+        Delivery(
+            all_capacity=1,
+            must_capacity=1,
+            overrides={"ticker.Paper_Spot_BTCUSDT": "sometimes"},
+        )
 
 
 def test_feed_keys_map_onto_kinds() -> None:
@@ -192,8 +196,12 @@ def test_feed_keys_map_onto_kinds() -> None:
 def test_mode_of_applies_a_feed_override() -> None:
     feed = "ticker.Paper_Spot_BTCUSDT"
     event = _ticker()
-    assert Delivery(capacity=1).mode_of(event) == DELIVERY_LATEST
-    overridden = Delivery(capacity=1, overrides={feed: DELIVERY_ALL})
+    assert Delivery(all_capacity=1, must_capacity=1).mode_of(event) == DELIVERY_LATEST
+    overridden = Delivery(
+        all_capacity=1,
+        must_capacity=1,
+        overrides={feed: DELIVERY_ALL},
+    )
     assert overridden.mode_of(event) == DELIVERY_ALL
     td = Inbound(
         kind=StreamKind.TD, feed="td", recv_ts=1.0, body=b"", event_id="t"
@@ -201,10 +209,26 @@ def test_mode_of_applies_a_feed_override() -> None:
     assert overridden.mode_of(td) == DELIVERY_ALL
 
 
+@pytest.mark.parametrize("name", ["all_capacity", "must_capacity"])
 @pytest.mark.parametrize("capacity", [0, -1, True, 1.5])
-def test_capacity_has_to_be_a_positive_integer(capacity: object) -> None:
+def test_capacity_has_to_be_a_positive_integer(name: str, capacity: object) -> None:
+    kwargs: dict[str, object] = {"all_capacity": 1, "must_capacity": 1}
+    kwargs[name] = capacity
     with pytest.raises(ValueError):
-        Delivery(capacity=capacity)  # type: ignore[arg-type]
+        Delivery(**kwargs)  # type: ignore[arg-type]
+
+
+def test_the_two_limits_have_no_default() -> None:
+    with pytest.raises(TypeError):
+        Delivery()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        Delivery(all_capacity=1)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        Delivery(must_capacity=1)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        Ingress(_spec(), all_capacity=1)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        Ingress(_spec(), must_capacity=1)  # type: ignore[call-arg]
 
 
 def test_the_budget_lines_are_the_plan() -> None:
@@ -295,7 +319,7 @@ def test_a_log_record_can_carry_a_mark() -> None:
 
 
 def test_the_worker_is_handed_a_spec_without_code_identity() -> None:
-    ingress = Ingress(_spec(), capacity=2, start_timeout_s=15)
+    ingress = Ingress(_spec(), all_capacity=2, must_capacity=2, start_timeout_s=15)
     assert ingress.spec.session_id == "abc123"
     assert ingress.start_timeout_s == 15
     assert "strategy_digest" not in type(ingress.spec).model_fields
@@ -303,7 +327,7 @@ def test_the_worker_is_handed_a_spec_without_code_identity() -> None:
 
 
 def test_a_fresh_worker_returns_null() -> None:
-    ingress = Ingress(_spec(), capacity=2)
+    ingress = Ingress(_spec(), all_capacity=2, must_capacity=2)
     runner = StrategyRunner(ingress, _strategy())
     lane = ingress.delivery
     assert ingress.phase is None
@@ -329,7 +353,7 @@ def test_operations_refuse_with_the_ticket_number() -> None:
     I1–I4 are B4-03. The queues are B5-01. Hook classification is
     B5-04. The log file is B5-02, and it is not a method here yet.
     """
-    ingress = Ingress(_spec(), capacity=2)
+    ingress = Ingress(_spec(), all_capacity=2, must_capacity=2)
     runner = StrategyRunner(ingress, _strategy())
     calls = [
         lambda: runner.note_hook("on_ticker", 1.5),
@@ -344,7 +368,7 @@ def test_accept_refuses_a_kline_with_no_bar_open_and_an_event_with_no_id() -> No
     """Those two are how the queue would place the event. They are
     checked before the not-implemented queue, so a caller finds out
     which one it forgot."""
-    lane = Delivery(capacity=1)
+    lane = Delivery(all_capacity=1, must_capacity=1)
     with pytest.raises(ValueError, match="bar_open"):
         lane.accept(
             Inbound(

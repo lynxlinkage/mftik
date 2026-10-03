@@ -293,7 +293,7 @@ async def test_the_window_stops_further_restarts() -> None:
 
 
 def test_restart_numbers_are_the_provisional_stand_ins() -> None:
-    """The plan does not give these. The names are the ones under 「需要決定」."""
+    """Current stand-ins (Appendix D). F42's curve is B3-08 (#365)."""
     assert FETCH_RESTART_MAX == 5
     assert FETCH_RESTART_WINDOW_S == 600.0
     assert FETCH_MIN_BACKOFF_S == 1.0

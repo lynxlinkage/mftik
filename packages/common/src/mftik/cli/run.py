@@ -58,15 +58,16 @@ from mftik.registry.qualify import PRIVATE_ORIGIN, qualify
 #: this timer.
 _DEPLOY_HTTP_TIMEOUT_S = DEFAULT_TIMEOUT_S
 
-#: How often ``--wait`` polls ``GET /sts/sessions/{id}``. Provisional,
-#: pending Yi Te. The watch has no client-side deadline: ``on_start`` may
-#: run up to 3600s (F12), and the controller is what ends a start that
-#: hangs.
+#: How often ``--wait`` polls ``GET /sts/sessions/{id}``. The watch has
+#: no client-side deadline: ``on_start`` may run up to 3600s (F12), and
+#: the controller is what ends a start that hangs.
+#: Default; adjust from measurement (Appendix D).
 _WAIT_POLL_S = 1.0
 
 #: Consecutive failed polls (unreachable or 5xx) before ``--wait`` gives
-#: up. Provisional, pending Yi Te. The count that adds up to
+#: up. The count that adds up to
 #: :data:`~mftik.cli.client.DEFAULT_TIMEOUT_S` at :data:`_WAIT_POLL_S`.
+#: Default; adjust from measurement (Appendix D).
 _WAIT_MAX_MISSES = round(DEFAULT_TIMEOUT_S / _WAIT_POLL_S)
 
 #: What :func:`run_wait_action` returns. ``wait`` means keep watching,
@@ -99,9 +100,9 @@ def run_wait_action(status: str, *, wait: bool) -> RunWaitStep:
     * **W3.** This is not the deploy POST's timer. That timer is
       :data:`_DEPLOY_HTTP_TIMEOUT_S`, one HTTP hop.
 
-    ``stopping`` and ``done`` are DEFAULT 2 (pending Yi Te, #293). The
-    plan says the watch ends on ``running`` or ``failed`` and does not
-    name these two; this is the choice that ticket left open.
+    ``stopping`` keeps watching and ``done`` tails. The plan says the
+    watch ends on ``running`` or ``failed`` and does not name these two;
+    this is the choice #293 recorded.
     """
     if not wait:
         return "return_id"
@@ -117,7 +118,7 @@ def run_wait_action(status: str, *, wait: bool) -> RunWaitStep:
 def run_disposition(
     phase: str, *, wait: bool, no_follow: bool
 ) -> RunDisposition:
-    """Flags applied to one snapshot (DEFAULT 3, pending Yi Te, #293).
+    """Flags applied to one snapshot (#293).
 
     ``--no-wait`` (``wait`` false) returns the id. ``--no-follow`` does
     not change that. ``--wait`` with ``--no-follow`` still watches; a

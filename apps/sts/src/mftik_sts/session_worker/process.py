@@ -79,7 +79,11 @@ from mftik_sts.session_worker.delivery import kind_of_topic
 from mftik_sts.session_worker.dispatch import dispatch_md, dispatch_notice, dispatch_td
 from mftik_sts.session_worker.events import Inbound, StreamKind
 from mftik_sts.session_worker.ingress import Ingress
-from mftik_sts.session_worker.limits import HEARTBEAT_PERIOD_S, TEMP_BUFFER_CAPACITY
+from mftik_sts.session_worker.limits import (
+    HEARTBEAT_PERIOD_S,
+    MUST_DELIVER_CAPACITY,
+    TEMP_BUFFER_CAPACITY,
+)
 from mftik_sts.session_worker.pending import PendingTable
 from mftik_sts.session_worker.phase import Phase
 from mftik_sts.session_worker.readiness import FeedReady, resolve_feeds
@@ -455,12 +459,16 @@ async def amain(
     *,
     clock: Clock | None = None,
     install_signals: bool = False,
-    capacity: int = TEMP_BUFFER_CAPACITY,
+    all_capacity: int = TEMP_BUFFER_CAPACITY,
+    must_capacity: int = MUST_DELIVER_CAPACITY,
 ) -> int:
     """Walk phases 0–6. Return the process exit code.
 
     ``install_signals`` is for the process entry. An in-process caller
-    leaves the host's handlers alone.
+    leaves the host's handlers alone. ``all_capacity`` follows
+    :data:`~mftik_sts.session_worker.limits.TEMP_BUFFER_CAPACITY`.
+    ``must_capacity`` is
+    :data:`~mftik_sts.session_worker.limits.MUST_DELIVER_CAPACITY`.
     """
     clock = clock if clock is not None else SystemClock()
     try:
@@ -472,7 +480,8 @@ async def amain(
         return 1
     ingress = Ingress(
         request,
-        capacity=capacity,
+        all_capacity=all_capacity,
+        must_capacity=must_capacity,
         delivery_overrides=overrides,
         start_timeout_s=DEFAULT_START_TIMEOUT_S,
         clock=clock,

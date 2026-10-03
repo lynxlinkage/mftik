@@ -19,8 +19,7 @@ already posts to.
 
 ``stopping`` and ``done`` are on the W1 table. The plan says a ``--wait``
 ends on ``running`` or ``failed`` and does not name those two; B4-08
-DEFAULT 2 (pending Yi Te, #293) treats ``stopping`` as keep watching
-and ``done`` as tail.
+treats ``stopping`` as keep watching and ``done`` as tail (#293).
 """
 
 from __future__ import annotations
@@ -99,9 +98,8 @@ def test_run_defaults_to_wait() -> None:
 def test_wait_tails_only_once_running_or_failed(status: str, step: str) -> None:
     """W1. A 202 of ``starting`` is not the end of the watch (F12).
 
-    ``stopping`` and ``done`` are B4-08 DEFAULT 2 (pending Yi Te, #293).
-    The plan does not decide them; the docstring above used to say they
-    were absent on purpose.
+    ``stopping`` keeps watching and ``done`` tails (B4-08, #293).
+    The docstring above used to say they were absent on purpose.
     """
     assert run_wait_action(status, wait=True) == step
 

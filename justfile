@@ -59,6 +59,11 @@ test-pg *args="packages apps":
 lint:
     uv run --all-packages ruff check packages apps conftest.py
 
+# Fail if apps/ or packages/ still say `pending Yi Te` (B3-09). docs/ is
+# not scanned: the plan and the tickets quote the phrase.
+check-pending:
+    uv run --all-packages python scripts/check_pending_markers.py
+
 # Sign a real history read with a stored credential and print what came back.
 # Read-only: every call is a GET on a history endpoint and nothing is written.
 backfill-check *args:

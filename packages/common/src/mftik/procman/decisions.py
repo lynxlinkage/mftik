@@ -53,11 +53,12 @@ from mftik.procman.state import ALIVE_PHASES, WorkerPhase
 #: How fast a ``BACKOFF`` delay grows with ``attempt``.
 #:
 #: Attempt 1 waits ``min_backoff_s``. Attempt ``n`` (``n >= 1``) waits
-#: ``min_backoff_s * BACKOFF_RATIO ** (n - 1)``. There is no cap, and this
-#: module does not reset ``attempt``: both are the caller's, and issue #286
-#: leaves the multiplier open. A floor of 0 stays 0, because the curve
-#: multiplies the floor; callers that need a growing delay pass a positive
-#: floor (F11's STS floor is 1 second).
+#: ``min_backoff_s * BACKOFF_RATIO ** (n - 1)``. F42 keeps this
+#: multiplier at 2. The cap, jitter, the stable window and the
+#: crash-loop alert are B3-08 (#365); this layer does not apply them
+#: yet, and it does not reset ``attempt``. A floor of 0 stays 0, because
+#: the curve multiplies the floor. Callers that need a growing delay
+#: pass a positive floor (F11's STS floor is 1 second). Appendix D.
 BACKOFF_RATIO = 2.0
 
 
@@ -118,9 +119,9 @@ class RestartIntensity:
     is allowed) and five prior restarts are ``FATAL`` (a sixth would exceed).
 
     ``min_backoff_s`` is the floor of the delay. :data:`BACKOFF_RATIO` is
-    the multiplier :func:`plan_restart` applies. The plan does not fix that
-    ratio (issue #286); the constant is the value this layer uses until it
-    does.
+    the multiplier :func:`plan_restart` applies. F42 keeps that
+    multiplier. The cap and jitter are B3-08 (#365); this class does
+    not grow those fields.
     """
 
     max_restarts: int
@@ -176,7 +177,7 @@ def _backoff_delay_s(*, attempt: int, min_backoff_s: float) -> float:
 
     A zero floor stays 0. An exponent that overflows a float returns the
     largest finite float instead of raising. That ceiling is not a policy
-    cap: the curve still has none (issue #286).
+    cap. B3-08 (#365) is what adds ``max_backoff_s``.
     """
     if min_backoff_s == 0.0:
         return 0.0

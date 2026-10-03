@@ -46,21 +46,21 @@ MAX_CANDLES = 2000
 MAX_HISTORY = 1000
 FUTURES_PREFIX = f"/futures/{SETTLE}"
 
-# provisional, pending Yi Te (#286)
 #: How often an account worker reads public server time. Gate's API v4
-#: docs do not state an HTTP idle close
-#: (https://www.gate.io/docs/developers/apiv4/). 30s until measured.
+#: docs do not state an HTTP idle close.
+#: Default; adjust from measurement (Appendix D).
 KEEPALIVE_INTERVAL_S = 30.0
 #: Longer than :data:`KEEPALIVE_INTERVAL_S`, so the pool does not drop
 #: the socket between ticks. httpx's own default is 5s.
-#: provisional, pending Yi Te (#286)
+#: Default; adjust from measurement (Appendix D).
 KEEPALIVE_EXPIRY_S = 90.0
 #: Gate publishes server time on the spot path. Futures REST is the
 #: same host (``api.gateio.ws``), so this public read is what warms
 #: this account's pool. No order, no key.
 KEEPALIVE_PATH = f"{API_PREFIX}/spot/time"
-#: Connection counts are httpx's own defaults. Only the expiry changes.
-#: provisional, pending Yi Te (#286)
+#: Connection counts are httpx's own defaults (100 and 20). Only the
+#: expiry changes.
+#: Default; adjust from measurement (Appendix D).
 POOL_LIMITS = httpx.Limits(
     max_connections=100,
     max_keepalive_connections=20,
