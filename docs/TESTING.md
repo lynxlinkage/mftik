@@ -9,7 +9,7 @@
 `[tool.pytest.ini_options]`、根目錄 `conftest.py`、
 `packages/common/tests/tier_budget.py`、`packages/common/tests/sleep_guard.py`、
 `packages/common/tests/nats_guard.py`、`packages/common/tests/broker_harness.py`、
-`justfile`、`.github/workflows/tests.yml`。
+`justfile`、`.github/workflows/tests.yml`、`scripts/check_pending_markers.py`。
 
 ## 怎麼跑
 
@@ -27,8 +27,8 @@ session 開始時 `conftest.py` 會確認 NATS 有在聽。suite 沒有 broker f
 這一步在 CI 上記 wall time。超過 120 秒，`scripts/check_wall_budget.py` 讓
 job 失敗（F30）。判定走 `tier_budget.on_ci`：`CI` 或 `GITHUB_ACTIONS` 有值，
 而且不是空字串、`0`、`false`、`no`、`off`。本機這些變數不成立，同一支腳本以
-0 結束。120 秒不含 `uv sync`、服務啟動、lint、OpenAPI 比對，也不含下面的
-stdlib-loop pass。
+0 結束。120 秒不含 `uv sync`、服務啟動、lint、`pending Yi Te` 標記檢查、
+OpenAPI 比對，也不含下面的 stdlib-loop pass。
 
 `just test-int` 是 integration 與 e2e，不加 xdist：
 
@@ -94,10 +94,16 @@ uv run --all-packages pytest packages -q -n auto -m "not integration and not e2e
 
 `.github/workflows/tests.yml` 兩個 job，都在 `ubuntu-latest`，各自起 NATS：
 
-- `unit`：`just lint` 那句 ruff（`uv run --all-packages ruff check packages apps conftest.py`）、`contracts/openapi.json` 比對、`just test`、上面的 stdlib-loop pass。
+- `unit`：`just lint` 那句 ruff（`uv run --all-packages ruff check packages apps conftest.py`）、`pending Yi Te` 標記檢查、`contracts/openapi.json` 比對、`just test`、上面的 stdlib-loop pass。
 - `integration`：先 `alembic upgrade head` 與 `alembic check`，再 `just test-int`。
 
-`release.yml` 的測試 job 同樣跑 `just test` 與 `just test-int`。
+標記檢查是 B3-09（#366）。`unit` job 的步驟跑
+`uv run --all-packages python scripts/check_pending_markers.py`，本機同一句是
+`just check-pending`。它掃 `apps/` 與 `packages/`，不掃 `docs/`：一行出現
+`pending Yi Te`（不分大小寫），或同一行同時有「待決」與 `#286`，就以 1 結束。
+這一步在 `just test` 之前，不計入 120 秒。
+
+`release.yml` 的測試 job 同樣跑 `just test` 與 `just test-int`。它沒有這道標記檢查。
 
 ## Tier
 
@@ -130,8 +136,8 @@ skip；用來證明 tier 豁免的短測試（`packages/common/tests/test_clock.
 
 **Wall time（F30）。** `just test` 那一步，在 `ubuntu-latest` 上 120 秒
 （`tier_budget.WALL_LIMIT_S`）。CI 上超過就失敗。本機 `on_ci()` 為假，
-`scripts/check_wall_budget.py` 以 0 結束。stdlib-loop pass、lint、OpenAPI、
-`uv sync`、服務啟動都不算進這 120 秒。
+`scripts/check_wall_budget.py` 以 0 結束。stdlib-loop pass、lint、
+`pending Yi Te` 標記檢查、OpenAPI、`uv sync`、服務啟動都不算進這 120 秒。
 
 **Call phase（F47）。** pytest 記在 `call` 上的秒數，不含 fixture 的 setup。
 上限在 `tier_budget.CALL_LIMIT_S`：unit 0.05 秒、component 0.5 秒、
