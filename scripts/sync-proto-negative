@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Prove scripts/sync-proto --check fails when a proto file drifts from the pin.
+# The repository tree is not modified. A temporary copy is edited, then checked.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+work="$(mktemp -d)"
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT
+
+mkdir -p "$work/scripts"
+cp "$root/scripts/sync-proto" "$work/scripts/sync-proto"
+cp -a "$root/contract" "$work/contract"
+
+echo "checking a clean temporary copy"
+bash "$work/scripts/sync-proto" --check
+
+target="$work/contract/proto/mftiko/common/v1/common.proto"
+if [[ ! -f "$target" ]]; then
+  echo "missing ${target}" >&2
+  exit 1
+fi
+printf '\n// sync-proto negative check: this line is not in the pinned tree\n' >> "$target"
+
+log="$work/check.log"
+echo "checking the same copy after appending a line to common/v1/common.proto"
+set +e
+bash "$work/scripts/sync-proto" --check >"$log" 2>&1
+status=$?
+set -e
+cat "$log"
+
+if [[ "$status" -eq 0 ]]; then
+  echo "sync-proto --check succeeded after a proto edit; expected failure" >&2
+  exit 1
+fi
+
+drift_lines="$(grep -F 'common/v1/common.proto' "$log" || true)"
+if [[ "$drift_lines" != *' differ'* ]]; then
+  echo "sync-proto --check failed, but not because common.proto drifted (exit ${status})" >&2
+  exit 1
+fi
+if ! grep -q 'differs from' "$log"; then
+  echo "sync-proto --check did not report a drift from the pinned commit (exit ${status})" >&2
+  exit 1
+fi
+
+echo "sync-proto --check rejected the drifted proto tree (exit ${status})"

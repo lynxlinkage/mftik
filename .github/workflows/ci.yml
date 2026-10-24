@@ -25,6 +25,41 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # E01-D006: uv + maturin wheel, import smoke test, and ruff.
+  python:
+    name: python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.12"
+      - name: Install CPython
+        run: uv python install 3.12
+      - name: Sync ruff and maturin
+        run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.12
+      - name: Ruff
+        run: uv run --frozen --no-sync ruff check python
+      - name: Ruff format
+        run: uv run --frozen --no-sync ruff format --check python
+      - name: Build the mftik wheel
+        run: uv run --frozen --no-sync maturin build --release --out dist
+      - name: Install the wheel and import mftik
+        run: |
+          uv venv --managed-python --python 3.12 /tmp/mftik-smoke
+          uv pip install --python /tmp/mftik-smoke/bin/python dist/*.whl
+          /tmp/mftik-smoke/bin/python python/smoke_import.py
+
+  # Temporary copy only. The committed proto tree is not edited.
+  proto-drift:
+    name: proto-drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Drifted proto fails the consistency check
+        run: bash scripts/sync-proto-negative
+
   # E01-D007: the install steps are prepared. E05 removes `if` and runs the suite.
   mftiko-conformance:
     name: mftiko-conformance
