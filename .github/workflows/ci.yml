@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Python headers
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - name: Proto matches the pinned mftiko commit
+        run: bash scripts/sync-proto --check
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  # E01-D007: the install steps are prepared. E05 removes `if` and runs the suite.
+  mftiko-conformance:
+    name: mftiko-conformance
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Install mftiko-conformance from the pinned mftiko commit
+        run: bash scripts/install-mftiko-conformance

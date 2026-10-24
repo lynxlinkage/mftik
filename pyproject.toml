@@ -1,58 +1,28 @@
 [project]
-name = "mftik-workspace"
-version = "0.1.0"
-description = "MFTIK monorepo workspace root"
-requires-python = ">=3.12"
-dependencies = []
+name = "mftik"
+version = "0.12.0"
+description = "STS Python SDK compatible with mftiko (PROTOCOL §9)."
+readme = "README.md"
+requires-python = ">=3.11"
 
-[tool.uv]
-package = false
-
-[tool.uv.workspace]
-members = ["apps/*", "packages/*"]
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
 
 [dependency-groups]
 dev = [
-    # `conftest.py` implements `pytest_asyncio_loop_factories`, and that hookspec
-    # is 1.4's. Below it pytest-asyncio does not know the name, pytest rejects
-    # the plugin outright — `PluginValidationError: unknown hook` — and no test
-    # in the workspace runs. 1.4 pins `pytest>=8.4` itself; the floor is named
-    # here too because the same 8.4 is what gives `pytest.HIDDEN_PARAM`, which
-    # is why one loop factory leaves test ids alone.
-    "pytest>=8.4",
-    "pytest-asyncio>=1.4",
-    "ruff>=0.9",
-    "aiosqlite>=0.20",
-    "fakeredis>=2.23",
+    "maturin>=1.8,<2",
+    "ruff>=0.17",
 ]
 
+[tool.maturin]
+manifest-path = "crates/mftik-py/Cargo.toml"
+module-name = "mftik"
+bindings = "pyo3"
+
 [tool.ruff]
-target-version = "py312"
-src = ["apps", "packages"]
-exclude = ["**/migrations/versions/**"]
+target-version = "py311"
+line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
-ignore = ["UP046"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["packages", "apps"]
-pythonpath = [
-    # The venue stand-in servers (`gate_stub`, `binance_stub`) live beside the
-    # adapter tests that drive them hardest, but the apps composing those
-    # adapters need them too — MD's reader talks to the same fake Binance.
-    # One copy, importable from either side, beats two that drift.
-    "packages/common/tests",
-    "packages/common/src",
-    # `db_harness` stands up the database every DB-touching test runs against,
-    # and those live in five packages — same reasoning as the stubs above.
-    "packages/db/tests",
-    "packages/db/src",
-    "apps/td/src",
-    "apps/api/src",
-    "apps/md/src",
-    "apps/sts/src",
-    "apps/sym/src",
-    "apps/paper/src",
-]

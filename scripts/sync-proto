@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Copy contract/proto/mftiko from the pinned BullionBear/mftiko commit and
+# record that commit in contract/proto/SOURCE (E01-D004).
+# This script only reads the upstream repository.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_url="https://github.com/BullionBear/mftiko.git"
+commit="e7b3543e2269c4ae8c10631edd448bdb86c52e2c"
+src_path="contract/proto/mftiko"
+dest="${root}/contract/proto/mftiko"
+source_file="${root}/contract/proto/SOURCE"
+
+if [[ $# -gt 1 || (${#} -eq 1 && "$1" != "--check") ]]; then
+  echo "usage: scripts/sync-proto [--check]" >&2
+  exit 2
+fi
+check=0
+if [[ "${1:-}" == "--check" ]]; then
+  check=1
+fi
+
+tmpdir="$(mktemp -d)"
+cleanup() { rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
+git init -q -b main "$tmpdir/src"
+git -C "$tmpdir/src" remote add origin "$repo_url"
+git -C "$tmpdir/src" sparse-checkout init --cone
+git -C "$tmpdir/src" sparse-checkout set "$src_path"
+git -C "$tmpdir/src" fetch --depth 1 --filter=blob:none origin "$commit"
+git -C "$tmpdir/src" checkout -q --detach FETCH_HEAD
+
+got="$(git -C "$tmpdir/src" rev-parse HEAD)"
+if [[ "$got" != "$commit" ]]; then
+  echo "expected ${commit}, fetched ${got}" >&2
+  exit 1
+fi
+
+upstream="${tmpdir}/src/${src_path}"
+if [[ ! -d "$upstream" ]]; then
+  echo "missing ${src_path} at ${commit}" >&2
+  exit 1
+fi
+
+write_source() {
+  local path="$1"
+  cat >"$path" <<EOF
+repo=https://github.com/BullionBear/mftiko
+commit=${commit}
+path=${src_path}
+EOF
+}
+
+if [[ "$check" -eq 1 ]]; then
+  if [[ ! -f "$source_file" ]]; then
+    echo "missing ${source_file}" >&2
+    exit 1
+  fi
+  write_source "$tmpdir/SOURCE"
+  if ! cmp -s "$source_file" "$tmpdir/SOURCE"; then
+    echo "contract/proto/SOURCE does not record ${commit}" >&2
+    diff -u "$source_file" "$tmpdir/SOURCE" || true
+    exit 1
+  fi
+  if ! diff -rq "$dest" "$upstream"; then
+    echo "contract/proto/mftiko differs from ${commit}" >&2
+    exit 1
+  fi
+  echo "contract/proto/mftiko matches ${commit}"
+  exit 0
+fi
+
+rm -rf "$dest"
+mkdir -p "${root}/contract/proto"
+cp -a "$upstream" "$dest"
+write_source "$source_file"
+echo "copied ${src_path} at ${commit}"

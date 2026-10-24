@@ -1,0 +1,15 @@
+[package]
+name = "mftik-proto"
+description = "Protobuf types compiled from the pinned mftiko contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = "0.14.4"
+
+[build-dependencies]
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.3.0"

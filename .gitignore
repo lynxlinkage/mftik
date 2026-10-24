@@ -1,3 +1,7 @@
+# Cargo. prost-build writes generated Rust under target/ (OUT_DIR).
+# That output is not committed (E01-D005).
+/target
+
 # Python
 __pycache__/
 *.py[cod]
@@ -6,7 +10,6 @@ __pycache__/
 .Python
 .venv/
 venv/
-.env
 *.egg-info/
 dist/
 build/
@@ -16,33 +19,9 @@ build/
 .coverage
 htmlcov/
 
-# Node / SvelteKit
-node_modules/
-frontend/.svelte-kit/
-frontend/build/
-frontend/.vite/
-frontend/package-lock.json
-frontend/test-results/
-frontend/playwright-report/
-frontend/blob-report/
-frontend/playwright/.cache/
-
 # IDE / OS
 .idea/
 .vscode/
 *.swp
 .DS_Store
 *.log
-
-# Docker
-*.pid
-
-# Live API tokens (Hostinger, GitHub, Discord). Never commit.
-credentials/
-
-# Local node data (strategy registry). Default when MFTIK_DATA is unset.
-.mftik/
-mft/
-
-# Sibling repo, tracked separately at lynxlinkage/mjolnir
-mjolnir/

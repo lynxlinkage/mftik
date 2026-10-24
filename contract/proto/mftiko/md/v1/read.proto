@@ -1,0 +1,107 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.md.v1;
+
+import "mftiko/md/v1/md.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/md/v1;mdv1";
+
+// ---------- md.v1.view.{inst}.{topic}.{ticker} ----------
+// subject 最後一段是 UniversalTicker，原樣、不轉義（E04-D055）。NATS topic 用人讀的名字，不用 UID。
+// 由持有該 feed 的 conn worker 回答（E04-D044、E04-D048）。回什麼由 subject 的 topic 決定（E04-D042）：
+// trade、aggtrade、liquidation 回 tape；orderbook_delta 回現在的窗內 book（E04-D053）。
+// 其他 topic 回 error = "unsupported"。沒有 responder 就是沒有 worker 持有這個 feed。
+
+message ViewRequest {
+  uint32 limit = 1;             // 只用於 tape。0 是 1000，上限 5000，超過是 invalid，不截短（E04-D039）
+  optional Cursor before = 2;   // 只用於 tape：不含本身。第一頁不填（E04-D036）
+  optional int64 since_ns = 3;  // 只用於 tape：只回 md_ts_ns ≥ since_ns 的事件（E04-D036）
+}
+
+// 以 (conn_epoch, seq) 的字典序比較。
+message Cursor {
+  uint64 conn_epoch = 1;
+  uint64 seq = 2;
+}
+
+message ViewReply {
+  string error = 1; // 空字串 = 成功；unsupported | not_held | invalid | not_synced
+  oneof result {
+    TapePage tape = 10;
+    BookSnapshot book = 11;
+  }
+}
+
+// 一則 tape 事件。不帶 envelope，也不帶 digest（E04-D035）。
+// event 的位元組就是 ring 裡 md.f 訊息 offset 40 之後的 payload，原樣寫入，不重新編碼。
+message TapeEvent {
+  uint64 conn_epoch = 1;
+  uint64 seq = 2;
+  int64 md_ts_ns = 3;
+  FeedEvent event = 4;
+}
+
+message TapePage {
+  // 由新到舊（E04-D036）。
+  repeated TapeEvent events = 1;
+  bool more = 2;
+  optional Cursor next = 3;      // 下一頁的 before。more 為假時不填
+  int64 continuous_since_ns = 4; // 從這個時間起，留下的 tape 沒有 gap（E04-D040）
+  repeated Gap gaps = 5;         // 這一頁涵蓋範圍內的 gap
+  Cursor head = 6;               // 回覆當下這個 feed 已發佈到 md.f 的最新游標（E04-D037）
+}
+
+message Gap {
+  int64 start_ns = 1; // 斷線的時間，md 主機時鐘
+  int64 end_ns = 2;   // 重連完成的時間，md 主機時鐘
+  Cursor last = 3;    // 斷線前最後一則。沒有發佈過則不填（E04-D040）
+  Cursor first = 4;   // 重連後第一則。那則還沒進 ring 則不填（E04-D040）
+}
+
+// 這個 feed 最後套用的 (conn_epoch, seq) 的窗內 book（E04-D030、E04-D041）。窗外的檔不在這裡。
+// 不支援指定歷史 seq。簿還沒同步好時 ViewReply.error 是 not_synced，不帶 book。
+message BookSnapshot {
+  Meta meta = 1;
+  repeated Level bids = 2;
+  repeated Level asks = 3;
+  uint64 conn_epoch = 4;
+  uint64 seq = 5;
+  int64 md_ts_ns = 6;
+  uint32 uid = 7; // 商品（E08-D065）
+}
+
+// ---------- md.v1.fetch.{venue} ----------
+// 無狀態服務，轉發交易所的公開 REST。venue 是人讀的名字（E04-D018）。
+// queue group，名稱是 subject。每個 replica 只訂閱它連得到的 venue。
+
+message FetchRequest {
+  oneof req {
+    FetchKlines klines = 1;
+    FetchOpenInterest open_interest = 2; // 交易所不推送、只能查詢的值（E04-D001）
+  }
+}
+
+message FetchKlines {
+  string interval = 2; // 正規寫法：1m、4h、1mo
+  uint32 limit = 3;    // 最近 N 根已收盤的，1 到 5000；超出是 invalid。超過交易所單頁時由服務分頁（E04-D019）
+  uint32 uid = 4;      // 商品（E08-D065）。subject 是 md.v1.fetch.{venue}，用人讀的名字（E04-D056）；UID 的 venue 必須是它
+}
+
+message FetchOpenInterest {
+  uint32 uid = 2; // 商品（E08-D065）
+}
+
+message FetchReply {
+  string error = 1; // 空字串 = 成功；invalid | unsupported | rate_limited | venue_error
+  string reason = 2;
+  uint32 uid = 3; // 請求的商品（E08-D065）
+  oneof result {
+    Klines klines = 10;
+    OpenInterest open_interest = 11;
+  }
+}
+
+message Klines {
+  repeated Kline klines = 1; // 由舊到新，只有已收盤的
+}

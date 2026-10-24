@@ -1,0 +1,127 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.worker.v1;
+
+import "mftiko/common/v1/common.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/worker/v1;workerv1";
+
+// ---------- worker → shim ----------
+
+message WorkerUp {
+  oneof msg {
+    Hello hello = 1;
+    Done done = 2;
+    Stage stage = 3;
+    Beat beat = 4;
+    Report report = 5;
+    Relay relay = 6;
+    Exiting exiting = 7;
+    Stopped stopped = 8;
+    Applied applied = 9;
+  }
+}
+
+message Hello {
+  string kind = 1;               // session | account | conn
+  string release = 2;
+  repeated string contracts = 3; // 支援的 C5 契約，例如 "mdctl.v1"
+  int32 pid = 4;
+}
+
+enum Verb {
+  VERB_UNSPECIFIED = 0;
+  VERB_INIT = 1;
+  VERB_START = 2;
+}
+
+message Done {
+  Verb verb = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message Stage {
+  string name = 1;
+}
+
+message Beat {
+  uint64 seq = 1;
+  bytes progress = 2;
+}
+
+message Report {
+  string contract = 1;
+  bytes payload = 2; // 該平面 C5 的 Report，最新一份取代舊的
+}
+
+message Relay {
+  string contract = 1;
+  bytes corr_id = 2;
+  bytes payload = 3;
+}
+
+message Exiting {
+  mftiko.common.v1.Outcome outcome = 1;
+  string reason = 2;
+  string detail = 3;
+}
+
+message Stopped {
+  bool on_stop_completed = 1;
+}
+
+// worker 已經套用的 live config（DECISIONS E01-D011）：Init 成功之後回報 Init.live_digest，套用一則 Live 之後回報它的 digest。
+// 套用失敗就不送；agent 照它判斷 worker 手上是哪一份。
+message Applied {
+  string digest = 1;
+}
+
+// ---------- shim → worker ----------
+
+message WorkerDown {
+  oneof msg {
+    Init init = 1;
+    Start start = 2;
+    Stop stop = 3;
+    Relay relay = 4;
+    Undeliverable undeliverable = 5;
+    Controller controller = 6;
+    Live live = 7;
+  }
+}
+
+message Init {
+  string contract = 1;
+  bytes payload = 2; // 該平面 C5 的 InitPayload
+  uint32 deadline_ms = 3;
+  string live_digest = 4; // payload 裡初始 live config 的 digest；Init 成功之後以 Applied 回報
+}
+
+message Start {
+  string contract = 1;
+  bytes payload = 2; // 該平面 C5 的 StartPayload
+  uint32 deadline_ms = 3;
+}
+
+message Stop {
+  string reason = 1;
+  uint32 grace_ms = 2;
+}
+
+// live config：完整的期望狀態，不是增量；worker 以 diff 套用，收到和手上相同的就什麼都不做（DECISIONS E01-D011）。
+message Live {
+  string contract = 1;
+  bytes payload = 2; // 該平面 C5 的 live config
+  string digest = 3; // agent 算的，worker 不解讀，套用之後以 Applied 原樣回報
+}
+
+message Undeliverable {
+  bytes corr_id = 1;
+}
+
+message Controller {
+  bool attached = 1;
+  int64 epoch = 2;
+}
