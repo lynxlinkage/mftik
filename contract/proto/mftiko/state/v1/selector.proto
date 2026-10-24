@@ -1,0 +1,26 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.state.v1;
+
+import "mftiko/session/v1/selector.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/state/v1;statev1";
+
+// selector 的 ack 內容與 MD agent 的 selector 狀態。形狀在 E5 定（#7、#208），留在草案清單（DECISIONS E09-D091）。
+
+message Universe {
+  uint64 epoch = 1;
+  repeated string members = 2; // 成員是商品。今天是 UniversalTicker；改成商品 UID 是後續（E02-D003）。selector 本身沒有 UID
+  string current = 3;          // 只有 rolling_future。這是 selector，尚未定，不在 E02-D003 的範圍；selector 沒有 UID
+  repeated string topics = 4;
+}
+
+message SelectorState {
+  mftiko.session.v1.SelectorDecl spec = 1;
+  uint64 epoch = 2;
+  repeated string members = 3; // 同 Universe.members：商品。今天是 UniversalTicker
+  string current = 4;           // 同 Universe.current：selector，尚未定，不在 E02-D003；selector 沒有 UID
+  string center = 5; // 置中的 strike
+  int64 center_at_ns = 6;
+}

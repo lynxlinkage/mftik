@@ -1,0 +1,87 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.session.v1;
+
+import "mftiko/session/v1/selector.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/session/v1;sessionv1";
+
+// session 的宣告：使用者經 API server 寫進 etcd（§3.1）；controller 依它推導需求，STS agent 依它起 worker，策略在
+// InitPayload 拿到自己宣告的那一份（§6.1）。歸 STS 擁有；state.v1、stsctl.v1 與 API 的契約都 import 它（DECISIONS E00-D007）。
+// 商品在這裡寫 UniversalTicker，不寫 UID（E02-D003）。ticker 解成 UID 發生在這份 spec 載入時，不在這份宣告裡。
+
+message SessionSpec {
+  string name = 1;
+  map<string, string> labels = 2;
+  DesiredState desired_state = 3;
+  StrategyRef strategy = 4;
+  bytes params = 5; // 策略自己的參數，平台不解讀
+  repeated FeedDecl feeds = 6;
+  repeated SelectorDecl selectors = 7;
+  repeated AccountDecl accounts = 8;
+  RestartPolicy restart = 9; // 語意見 DECISIONS E08-D003
+  uint32 deps_timeout_s = 10; // 從 SessionDemand.issued_at_ns 起算。0 = 60 秒（E13-D002）
+  uint32 start_timeout_s = 11;
+  Limits limits = 12;
+  repeated InputDecl inputs = 13; // 資料 artifact（DECISIONS E09-D004）
+  // MD 事件在 buffer 裡的最長壽命，以 envelope 的 md_ts_ns 計（E08-D003）。0 = STS 的預設值。
+  // 跨 region 的 session 要比 WAN 延遲大。
+  uint32 recv_window_ms = 14;
+  // Stop 的 grace（E09-D018、E09-D062）。0 = STS 部署設定的預設，10 秒。
+  uint32 grace_ms = 16;
+}
+
+// 唯讀注入的資料 artifact，解到 $MFTIKO_INPUT_DIR/<name>/（§8.4）。
+message InputDecl {
+  string name = 1;       // 目錄名，^[a-z0-9][a-z0-9_-]{0,63}$，同一個 spec 內唯一
+  string digest = 2;     // 資料 artifact 的 OCI manifest digest（"sha256:…"）
+  string repository = 3; // 拉取用的 OCI repository
+}
+
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0;
+  DESIRED_STATE_RUNNING = 1;
+  DESIRED_STATE_ENDED = 2;
+}
+
+message StrategyRef {
+  string name = 1;
+  string code = 2;       // 策略 artifact 的 OCI image digest（"sha256:…"），session 生命週期內不變
+  string repository = 3; // 拉取用的 OCI repository
+}
+
+// 人寫的規格。feed key 裡是 UniversalTicker，不是 UID（E02-D003）。
+// ticker 解成 UID 發生在 spec 載入時（sym.GetRequest），不在這份宣告裡。
+message FeedDecl {
+  string feed = 1;        // 正規 feed key（<topic>.<UniversalTicker>）。載入邊界才解成 UID
+  string md_instance = 2; // API 驗證後填入
+}
+
+message AccountDecl {
+  string name = 1;
+  int64 api_id = 2;
+  string td_instance = 3;
+  // 這個 session 在這個帳號上可以使用的 algo_id，每個 1–1023（E06-D002）。
+  // 同一個帳號上不可與其他非 terminal 的 session 重疊：STS agent 檢查它自己的 session，跨 instance 的由使用者保證（E06-D016）。
+  repeated uint32 algo_ids = 4;
+}
+
+message RestartPolicy {
+  RestartMode mode = 1;
+  uint32 max_restarts = 2;
+  uint32 window_s = 3;
+}
+
+enum RestartMode {
+  RESTART_MODE_UNSPECIFIED = 0;
+  RESTART_MODE_NEVER = 1;
+  RESTART_MODE_ON_FAILURE = 2;
+}
+
+message Limits {
+  uint32 memory_mb = 1;
+  uint32 gomaxprocs = 2;
+  uint32 volume_mb = 3; // session volume 的上限（E09-D004）；0 = STS 的預設值。超過就以 FAILED 結束（volume_over_limit）
+  uint32 hook_timeout_s = 4; // 單一 hook 的硬上限（E08-D003）；0 = STS 的預設值。超過判定 HUNG
+}

@@ -1,0 +1,11 @@
+[package]
+name = "mftik-core"
+description = "Pure Rust STS core. No IO."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+mftik-proto = { path = "../mftik-proto" }

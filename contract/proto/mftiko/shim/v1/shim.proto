@@ -1,0 +1,178 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.shim.v1;
+
+import "mftiko/common/v1/common.proto";
+import "mftiko/worker/v1/worker.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/shim/v1;shimv1";
+
+// ---------- agent 啟動 shim（§4.6） ----------
+
+// agent exec shim 之後寫進它 stdin 的唯一一個 frame。
+message Launch {
+  string plane = 1;
+  string agent_instance = 2;
+  mftiko.common.v1.WorkerRef worker = 3;
+  string spec_hash = 4;     // agent 給的，shim 不解讀，Attached 原樣帶回
+  // 以下由 artifact 的 manifest 換算（§4.6 的對應表）
+  string path = 5;          // rootfs ＋ entrypoint[0]，絕對路徑
+  repeated string args = 6; // entrypoint[1:]；argv[0] 是 path
+  repeated string env = 7;  // manifest 的 env，之後是 §5.4 的平台變數；KEY=VALUE。shim 自己加上 MFTIKO_CTL_FD=3
+  string dir = 8;           // rootfs，絕對路徑；path 必須在它底下
+  Credential cred = 9;      // 平面決定，不來自 manifest；沒有就沿用 shim 的身分
+  string work_dir = 10;     // ${WORK_DIR}，絕對路徑；C3 的 socket 在 run/{plane}/{h}.sock（§4.1）
+  Output output = 11;       // worker 的 stdout、stderr 怎麼輪替（§4.5 S4）；沒有就用預設
+}
+
+message Credential {
+  uint32 uid = 1;
+  uint32 gid = 2;
+  repeated uint32 groups = 3; // 附加群組；空的表示沒有
+}
+
+// worker 的輸出寫在 log/{plane}/{h}.stdout、{h}.stderr，各自輪替（§4.5 S4）。0 表示用預設。
+message Output {
+  uint64 max_bytes = 1; // 一個檔案的上限；預設 64 MiB，不得小於 64 KiB
+  uint32 keep = 2;      // 每個 stream 保留幾個檔案，含目前寫的那個；預設 5，最多 100
+}
+
+// ---------- agent → shim ----------
+
+message ShimRequest {
+  uint64 id = 1;
+  oneof op {
+    Attach attach = 10;
+    Ack ack = 11;
+    Signal signal = 12;
+    mftiko.worker.v1.Init init = 13;
+    mftiko.worker.v1.Start start = 14;
+    Stop stop = 15;
+    mftiko.worker.v1.Relay relay = 16;
+    Release release = 17;
+    mftiko.worker.v1.Live live = 18;
+  }
+}
+
+message Attach {
+  string plane = 1;
+  string agent_instance = 2;
+  int64 epoch = 3;
+  string agent_release = 4;
+  repeated uint32 shim_majors = 5;
+  uint64 resume_from = 6;
+}
+
+message Ack {
+  uint64 seq = 1;
+}
+
+message Signal {
+  int32 signo = 1;
+}
+
+message Stop {
+  string reason = 1;
+  uint32 grace_ms = 2;
+  uint32 kill_after_ms = 3;
+}
+
+message Release {}
+
+// ---------- shim → agent ----------
+
+message ShimMessage {
+  oneof msg {
+    Response response = 1;
+    Event event = 2;
+    Preempted preempted = 3;
+  }
+}
+
+message Response {
+  uint64 id = 1;
+  bool ok = 2;
+  mftiko.common.v1.Error error = 3; // code 見 §4.2 的表
+  Attached attached = 4;
+}
+
+message Attached {
+  string shim_release = 1;
+  uint32 shim_major = 2; // 協商出的 major；0 表示沒有交集，只能 Signal（§4.2）
+  mftiko.common.v1.WorkerRef worker = 3;
+  string spec_hash = 4;
+  WorkerState state = 5;
+  string stage = 6; // 最後一個 Stage
+  int32 pid = 7;
+  int32 pgid = 8;
+  uint64 start_time = 9; // /proc/<pid>/stat 的 starttime，防 pid 重用
+  mftiko.worker.v1.Hello hello = 10;
+  uint64 oldest_seq = 11;
+  uint64 next_seq = 12; // 這份快照的時間點：反映了 seq < next_seq 的每一則事件，不含 seq ≥ next_seq 的任何一則（§4.4）
+  int64 last_beat_at_ns = 13;
+  Phase phase = 14; // 生命週期的階段（§4.3）；worker 結束後是結束前的最後一個
+  mftiko.worker.v1.Exiting exiting = 15; // worker 送的第一則 Exiting；沒送過就沒有（§4.4）
+  mftiko.common.v1.ExitInfo exit = 16;   // state 是 EXITED 時的 ExitInfo，與結束檔相同（§4.5 S3）
+  string applied_digest = 17;            // worker 最後一則 Applied 的 digest：它手上的 live config（E01-D011）；沒送過是空的
+}
+
+// shim 記下的生命週期階段（§4.3）。
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_NEW = 1;          // 還沒 Init
+  PHASE_INITIALIZING = 2; // Init 已轉給 worker，還沒 Done
+  PHASE_INITIALIZED = 3;  // Done(INIT, ok)
+  PHASE_STARTING = 4;     // Start 已轉給 worker，還沒 Done
+  PHASE_STARTED = 5;      // Done(START, ok)
+  PHASE_STOPPING = 6;     // 收到 Stop、shim 收到 SIGTERM、Done 失敗，或 worker 送了 Exiting
+}
+
+enum WorkerState {
+  WORKER_STATE_UNSPECIFIED = 0;
+  WORKER_STATE_STARTING = 1; // 已 exec，還沒 Hello
+  WORKER_STATE_RUNNING = 2;
+  WORKER_STATE_EXITED = 3;
+}
+
+message Event {
+  uint64 seq = 1;
+  int64 at_ns = 2;
+  bool gap = 3;
+  oneof kind {
+    Started started = 10;
+    mftiko.worker.v1.Hello hello = 11;
+    mftiko.worker.v1.Done done = 12;
+    mftiko.worker.v1.Stage stage = 13;
+    mftiko.worker.v1.Beat beat = 14;
+    mftiko.worker.v1.Report report = 15;
+    mftiko.worker.v1.Relay relay = 16;
+    mftiko.worker.v1.Exiting exiting = 17;
+    mftiko.worker.v1.Stopped stopped = 18;
+    Exited exited = 19;
+    mftiko.worker.v1.Applied applied = 20;
+  }
+}
+
+message Started {
+  int32 pid = 1;
+  int32 pgid = 2;
+  uint64 start_time = 3;
+}
+
+message Exited {
+  mftiko.common.v1.ExitInfo exit = 1;
+}
+
+// 結束檔 run/{plane}/{h}.exit.pb 的內容（§4.5 S3）：worker 被 reap、ExitInfo 合成之後寫入，Release 時刪除。
+message ExitRecord {
+  mftiko.common.v1.WorkerRef worker = 1; // 哪一個 incarnation
+  string spec_hash = 2;
+  int32 pid = 3;
+  uint64 start_time = 4;
+  mftiko.common.v1.ExitInfo exit = 5;
+}
+
+message Preempted {
+  int64 by_epoch = 1;
+}

@@ -1,0 +1,97 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.stsctl.v1;
+
+import "mftiko/common/v1/common.proto";
+import "mftiko/session/v1/session.proto";
+
+import "mftiko/stsctl/v1/selector.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/stsctl/v1;stsctlv1";
+
+message InitPayload {
+  string session_id = 1;
+  uint32 incarnation = 2;
+  string sts_instance = 3;
+  string name = 4;
+  mftiko.session.v1.StrategyRef strategy = 5;
+  bytes params = 6;
+  repeated mftiko.session.v1.FeedDecl feeds = 7;
+  repeated mftiko.session.v1.AccountDecl accounts = 8;
+  NatsCredentials nats = 9; // 這個 session 專屬的 NATS 憑證，只經 socketpair 送進去（DECISIONS E09-D006）
+  // 以下兩個是 STS agent 解析後的實值（DECISIONS E08-D003）：spec 寫 0 表示用預設，agent 換成它的預設值再填，
+  // 所以這裡不會是 0。SDK 不知道預設值；收到 0 是 agent 的錯，以 INIT_FAILED 結束。
+  uint32 recv_window_ms = 10; // MD 事件的最長壽命，prehook 用（SessionSpec.recv_window_ms）
+  uint32 hook_timeout_s = 11; // 單一 hook 的硬上限，watchdog 用（SessionSpec.limits.hook_timeout_s）
+}
+
+// STS agent 為這個 session 簽的 user JWT。權限見 PROTOCOL §7。
+message NatsCredentials {
+  string user_jwt = 1;
+  string seed = 2;         // NKey seed，只在進程記憶體裡
+  string inbox_prefix = 3; // _INBOX_{session_id}；SDK 以它設定 CustomInboxPrefix
+}
+
+message StartPayload {
+  Bindings bindings = 1;
+}
+
+message Command {
+  oneof cmd {
+    Bindings bindings = 1; // 綁定變化（selector 換成員、資源 DEAD 等）
+    Fail fail = 2;
+  }
+}
+
+message Fail {
+  string reason = 1;
+}
+
+// ack 的完整快照：controller 整理進 SessionDemand.bindings（§3.3），STS agent 轉成這個格式送給 worker。
+message Bindings {
+  mftiko.common.v1.Version version = 1; // STS agent 為每個 session 產生，不是 etcd revision
+  repeated FeedBinding feeds = 2;
+  repeated SelectorBinding selectors = 3;
+  repeated AccountBinding accounts = 4;
+}
+
+message FeedBinding {
+  string feed = 1;
+  string md_instance = 2;
+  string subject = 3;
+  BindingState state = 4;
+}
+
+message AccountBinding {
+  string name = 1;
+  int64 api_id = 2;
+  BindingState state = 3;
+  mftiko.common.v1.WorkerRef worker = 4;
+}
+
+message Report {
+  mftiko.common.v1.Version bindings_applied = 1;
+  string hook = 2;
+  uint64 hook_blocked_ms = 3;
+  uint64 hook_slow = 4;
+  repeated QueueStat queues = 5;
+}
+
+// name 是 td 或 md（E08-D003）。
+message QueueStat {
+  string name = 1;
+  uint32 depth = 2;
+  uint64 dropped = 3;    // md：因超過 recv_window_ms 或 buffer 滿而丟掉的則數
+  uint32 max_age_ms = 4; // 上一個回報週期內，交給 hook 的事件中最老的那則的年齡
+}
+
+// 綁定的狀態，對應 provider 的 ack（§3.5）。值與 state.v1.EntryState 相同；stsctl 自己定義，策略的契約才不綁在 etcd 的
+// schema 上（DECISIONS E00-D007）。
+enum BindingState {
+  BINDING_STATE_UNSPECIFIED = 0; // provider 沒有 ack（沉默）
+  BINDING_STATE_PENDING = 1;
+  BINDING_STATE_READY = 2;
+  BINDING_STATE_REJECTED = 3;
+  BINDING_STATE_DEAD = 4;
+}

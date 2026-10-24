@@ -1,0 +1,166 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.state.v1;
+
+import "mftiko/common/v1/common.proto";
+import "mftiko/session/v1/selector.proto";
+import "mftiko/session/v1/session.proto";
+import "mftiko/state/v1/selector.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/state/v1;statev1";
+
+// ---------- 帳號的宣告（API server 寫）----------
+
+message Account {
+  string name = 1;
+  // 帳號種類（DECISIONS E03-D001），不是 venue：BinancePM 可以交易 Binance、BinanceUM、BinanceCM 的商品。
+  // 兩個 enum 的名稱可能相同（帳號種類 BinanceUM 交易 venue BinanceUM），不可互查。
+  string kind = 2;
+  bytes sealed_credentials = 3; // AccountCredentials 以 TD instance 的公鑰封裝（E06-D013、§3.6）；etcd 裡不放明文
+  AccountSettings settings = 4;
+  bool enabled = 5;
+}
+
+// sealed_credentials 封裝前的明文（E06-D013）。只在封裝工具、API server 與 TD agent 的記憶體裡；不進 etcd、不進 log。
+// api_id 與 kind 一起封進去，解開之後與帳號的 key、宣告比對：一個帳號的密文搬到另一個帳號底下就解不出來用。
+message AccountCredentials {
+  int64 api_id = 1;
+  string kind = 2;
+  string key_type = 3; // hmac | ed25519
+  string key = 4;
+  string secret = 5; // HMAC secret，或 PEM 編碼的 ed25519 私鑰
+  string passphrase = 6; // OKX
+}
+
+message AccountSettings {
+  uint32 cancel_on_disconnect_s = 1; // 0 = 關閉
+  // 歷史補正（DECISIONS E06-D001）。
+  uint32 backfill_interval_s = 2; // 另加 jitter；0 = 預設。必須短於交易所成交歷史的保留期。誰用見 §10 P18，不是 TD agent
+  // 手動觸發：比上次處理過的值新，就提前跑一輪。誰跑見 §10 P18，不是 TD agent。重啟後可能多跑一次，無害。
+  int64 backfill_requested_at_ns = 3;
+}
+
+// ---------- STS agent 寫 ----------
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_PENDING = 1;
+  PHASE_WAITING = 2; // 等 ack
+  PHASE_STARTING = 3;
+  PHASE_RUNNING = 4;
+  PHASE_STOPPING = 5;
+  PHASE_RESTARTING = 6;
+  PHASE_DONE = 7;
+  PHASE_FAILED = 8;
+}
+
+message SessionStatus {
+  int64 observed_generation = 1;
+  Phase phase = 2;
+  repeated mftiko.common.v1.Condition conditions = 3;
+  uint32 incarnation = 4; // 顯示用；權威值在 /sts/{inst}/incarnation/{h}（PROTOCOL §3.2 W6）
+  uint32 restart_count = 5;
+  string reason = 6;
+  mftiko.common.v1.ExitInfo last_exit = 7;
+  int64 updated_at_ns = 8;
+  StateSnapshot state_out = 9; // session terminal 之後 volume 的快照（E09-D004）；推送完成前不填
+}
+
+message StateSnapshot {
+  string digest = 1;     // 資料 artifact 的 OCI manifest digest；新 session 以 InputDecl 引用
+  string repository = 2;
+  bool clean = 3;        // 最後一個 incarnation 的 ExitInfo.on_stop_completed
+  uint32 incarnation = 4;
+  int64 at_ns = 5;
+  uint64 size_bytes = 6;
+}
+
+// ---------- controller 寫（不綁 lease，DECISIONS E09-D001、E09-D007）----------
+
+// MD、TD 的需求項目（§3.3）。
+message DemandEntry {
+  oneof target {
+    string feed = 1;
+    mftiko.session.v1.SelectorDecl selector = 2;
+    int64 api_id = 3;
+  }
+  int64 spec_revision = 10; // 推導自哪一版 session spec；只供除錯，可能來自另一個 cluster，不做比較
+  repeated uint32 algo_ids = 11; // 只有帳號項目：同 AccountDecl.algo_ids。TD agent 不讀它（E06-D016）
+}
+
+// STS 的指派（§3.3）。STS agent 只跑有指派的 session。
+message SessionDemand {
+  mftiko.session.v1.DesiredState desired = 1; // RUNNING：spawn 並送 Init；ENDED：停掉 worker
+  bool start = 2;           // 所有 MD、TD 需求都 READY，STS agent 可以送 Start（E01-D007）
+  string end_reason = 3;    // desired 是 ENDED 時：ended_by_spec、deps_failed、deps_timeout、invalid_spec
+  repeated Binding bindings = 4;
+  int64 spec_revision = 5;  // 推導自哪一版 session spec；只供除錯
+  int64 updated_at_ns = 6;
+  int64 issued_at_ns = 7;   // 第一次寫這個指派的時間，之後不改；deps_timeout_s 從這裡起算（E13-D002）
+}
+
+// 一個需求項目目前的 ack，由 controller 從 provider 的 EntryStatus 抄來。
+message Binding {
+  oneof target {
+    string feed = 1; // feed key。spec 載入時才把其中的 ticker 解成 UID（E02-D003）；這個欄位今天仍是字串
+    string selector = 2; // SelectorDecl.name
+    int64 api_id = 3;
+  }
+  string instance = 4;    // 提供這個資源的 MD 或 TD instance
+  EntryStatus status = 5; // provider 沒有 ack（沉默）時不填
+}
+
+// ---------- provider agent 寫 ----------
+
+enum EntryState {
+  ENTRY_STATE_UNSPECIFIED = 0;
+  ENTRY_STATE_PENDING = 1;
+  ENTRY_STATE_READY = 2;
+  ENTRY_STATE_REJECTED = 3;
+  ENTRY_STATE_DEAD = 4;
+}
+
+// 不綁 lease（§3.2 W7）。provider 的 AgentRecord 不在時，是它最後寫下的狀態。
+message EntryStatus {
+  EntryState state = 1;
+  string reason = 2;
+  // feed：完整的 subject（md.v1.f.{inst}.{topic}.{ticker}，E04-D055）。NATS topic 用人讀的名字，不用 UID。selector：成員 subject 的前綴（md.v1.f.{inst}）；
+  // 帳號：td.order.{api_id}。由 provider 決定，訂閱端不自己組（PROTOCOL §7、DECISIONS E01-D006）。
+  string subject = 3;
+  mftiko.common.v1.WorkerRef worker = 4;
+  Universe universe = 5; // 只有 selector
+  int64 updated_at_ns = 6;
+}
+
+// ---------- agent 自己 ----------
+
+// 綁在選主 session 的 lease 上（§3.2 W7）：存在就表示這個 instance 有活著的 agent。
+message AgentRecord {
+  string plane = 1;
+  string instance = 2;
+  int64 epoch = 3;
+  string release = 4;
+  int64 started_at_ns = 5;
+  string host = 6;     // os.Hostname()，當選時寫入（E10-D092）。取不到則空字串。
+  string work_dir = 7; // 該行程的 WORK_DIR（E10-D092）。controller 沒有 WORK_DIR，留空。
+}
+
+// 不綁 lease（§3.2 W7），只在階段改變時寫；worker 確定不在之後由 agent 刪除。
+message WorkerStatus {
+  mftiko.common.v1.WorkerRef worker = 1;
+  string phase = 2; // STARTING | RUNNING | STOPPING | BACKOFF | EXITED | LOST
+  string stage = 3; // worker 回報的生命週期階段
+  string release = 4;
+  string shim_release = 5;
+  uint32 restarts = 6;
+  int64 rss_bytes = 7; // 寫入當下的值，只是快照：WorkerStatus 只在階段改變時寫（§3.2 W7）
+  int64 started_at_ns = 8;
+  mftiko.common.v1.ExitInfo last_exit = 9;
+}
+
+// ---------- MD agent 不能重新推導的狀態 ----------
+
+message Placement {
+  string conn = 1; // atom 所在的 conn worker key
+}

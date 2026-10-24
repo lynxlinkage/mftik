@@ -1,0 +1,61 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.tdctl.v1;
+
+import "mftiko/td/v1/td.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/tdctl/v1;tdctlv1";
+
+message InitPayload {
+  int64 api_id = 1;
+  string kind = 2; // 帳號種類（E03-D001），同 state.v1.Account.kind
+  string td_instance = 3;
+  uint32 cancel_on_disconnect_s = 4;
+  Credentials credentials = 5; // 交易所的憑證，只經 socketpair 送進去
+  NatsCredentials nats = 6; // 這個帳號專屬的 NATS 憑證，只經 socketpair 送進去（DECISIONS E06-D011）
+  // 交易所的 host，由 TD instance 依帳號種類設定（E06-D016，比照 MD 的 url，E04-D003）。空的是 adapter 的預設。
+  string rest_url = 7;
+  string stream_url = 8; // 私有 websocket
+  bool simulated = 9; // 交易所的模擬交易模式是旗標而不是另一個 host 時（OKX）
+}
+
+message Credentials {
+  string key_type = 1; // hmac | ed25519
+  string key = 2;
+  string secret = 3;
+  string passphrase = 4;
+}
+
+// TD agent 為這個 api_id 簽的 user JWT。權限見 PROTOCOL §7。
+message NatsCredentials {
+  string user_jwt = 1;
+  string seed = 2; // NKey seed，只在進程記憶體裡
+  string inbox_prefix = 3; // _INBOX_td_{api_id}；worker 以它設定 CustomInboxPrefix
+}
+
+// Start：建 HTTP 連線池、連私有 websocket、recon。全部完成才回 Done(START, ok)，之後才服務 td.order（E06-D010）。
+message StartPayload {}
+
+message Command {
+  oneof cmd {
+    Drain drain = 1;
+  }
+}
+
+// drain-replace 的第一步：不收新單，等在途 ack 收齊。一期沒有人送它，新單的拒單碼等 drain-replace 落地時再加（E06-D010）。
+message Drain {
+  uint32 deadline_ms = 1;
+}
+
+message Report {
+  mftiko.td.v1.AccountState state = 1; // 與 td.view 回覆的 state 相同（E06-D006）
+  string reason = 2;
+  int64 reconciled_at_ns = 3;
+  uint32 open_orders = 4;
+  uint32 inflight = 5;
+  bool draining = 6;
+  // 這個 incarnation 下過單的商品（UID，E02-D003）→ 第一次 Submit 的時間（DECISIONS E06-D001）。TD agent 據此建 backfill 的 scope。
+  // 新商品的第一筆單：worker 先送出含它的 Report，再送單。
+  map<uint32, int64> first_submit_ns = 7;
+}

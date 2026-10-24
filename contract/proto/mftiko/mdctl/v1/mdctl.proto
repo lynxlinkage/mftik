@@ -1,0 +1,87 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.mdctl.v1;
+
+import "mftiko/common/v1/common.proto";
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/mdctl/v1;mdctlv1";
+
+message InitPayload {
+  string venue = 1;
+  string route = 2; // 由 adapter 從解析後的商品推得（E04-D003、E02-D002）
+  uint32 n = 3;
+  string md_instance = 4;
+  // 實際連線的 URL。host 由 MD instance 的設定選：預設，或交易所提供的替代 endpoint（E04-D003）。換 URL 要換 incarnation。
+  string url = 6;
+  // 上次上報的 conn_epoch。0 表示還沒有上報過，第一次撥號用 1（E04-D009）。
+  uint64 conn_epoch = 7;
+  // 等快照時緩衝的筆數上限。0 表示 10000。到了就丟掉緩衝，進行中的快照作廢（E04-D024）。
+  uint32 book_buffer_max = 10;
+  // 等快照時緩衝的時間上限，毫秒。0 表示 10000。到了就丟掉緩衝，進行中的快照作廢（E04-D024）。
+  uint32 book_buffer_ms = 11;
+  // 每個 feed 的 tape 時間窗，毫秒。0 表示 10 分鐘。先到這個窗或 tape_max_events 就從最舊的砍（E04-D038、E04-D049）。
+  uint32 tape_window_ms = 12;
+  // 每個 feed 的 tape 筆數上限。0 表示 100000。
+  uint32 tape_max_events = 13;
+  // 這個 worker 全部 tape 的位元組上限。0 表示 256 MiB。訊息、slot、索引與 chunk 都算。超過時回收最舊的 64 KiB chunk（E04-D058）。
+  uint64 tape_budget_bytes = 14;
+}
+
+// Start 沒有 payload：連上 websocket，等第一份 Desired。
+message StartPayload {}
+
+message Command {
+  oneof cmd {
+    Desired desired = 1;
+  }
+}
+
+// 這條連線上該有的 atom，完整清單。
+message Desired {
+  mftiko.common.v1.Version version = 1;
+  repeated AtomAssignment atoms = 2;
+}
+
+message AtomAssignment {
+  string atom_id = 1;
+  repeated string feeds = 2; // 這個 atom 要發佈的 feed（atom → 事件 1:N）
+  bool record = 3;           // 忽略。錄不錄由 conn worker 依 topic 決定（E04-D047）。定案時保留（E04-D060）
+  // SYM 的 exchTicker。worker 從自己的活躍表讀。沒有這份表、而且 atom_id 已給時，用這裡的值。不從 channel 解析（E04-D026、E02-D002）。
+  string exch_ticker = 4;
+  // SYM 的 price_tick。跟 exch_ticker 同一張表、同一時刻。
+  // 缺或小於等於 0 時這本訂單簿只記日誌、不維護（E04-D033）。
+  double price_tick = 5;
+}
+
+message Report {
+  mftiko.common.v1.Version applied = 1;
+  uint64 conn_epoch = 2; // 每次重連 +1
+  ConnState state = 3;
+  string reason = 4;
+  double msg_rate = 6;
+  // 這條連線上每一筆 feed 的快照，完整清單。feed 是 topic.UniversalTicker。
+  // 不在活躍表，或這條 route 訂不了，是 REJECTED。在表上但不是 TRADABLE 是 PENDING，這輪不訂。
+  // channel 被交易所 ack 之後，掛在上面的每一筆 feed 是 SUBSCRIBED。
+  repeated FeedStatus feeds = 7;
+}
+
+enum ConnState {
+  CONN_STATE_UNSPECIFIED = 0;
+  CONN_STATE_CONNECTING = 1;
+  CONN_STATE_LIVE = 2;
+  CONN_STATE_DOWN = 3;
+}
+
+message FeedStatus {
+  string feed = 1; // topic.UniversalTicker
+  FeedState state = 2;
+  string reason = 3; // REJECTED 或還沒訂的 PENDING 才填
+}
+
+enum FeedState {
+  FEED_STATE_UNSPECIFIED = 0;
+  FEED_STATE_PENDING = 1;
+  FEED_STATE_SUBSCRIBED = 2; // 所在 channel 已被交易所 ack
+  FEED_STATE_REJECTED = 3; // 不在活躍表，或這條 route 訂不了
+}

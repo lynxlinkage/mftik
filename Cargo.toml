@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mftik-proto",
+    "crates/mftik-core",
+    "crates/mftik-py",
+]
+
+[workspace.package]
+version = "0.12.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+repository = "https://github.com/lynxlinkage/mftik"

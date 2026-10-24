@@ -1,0 +1,35 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.session.v1;
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/session/v1;sessionv1";
+
+// selector 的宣告。形狀在 E5 定（#7、#208），這份檔案留在草案清單，session.proto 定案時不跟著凍結（DECISIONS E09-D091）。
+
+message SelectorDecl {
+  string name = 1;
+  string md_instance = 2;
+  string venue = 3;
+  string underlying = 4;
+  repeated string topics = 5;
+  oneof kind {
+    OptionChain option_chain = 10;
+    RollingFuture rolling_future = 11;
+  }
+}
+
+message OptionChain {
+  string ref_feed = 1;
+  uint32 nearest_expiries = 2;
+  uint32 min_tte_s = 3;
+  uint32 atm_strikes = 4;
+  repeated string sides = 5; // "C"、"P"
+  uint32 recenter_strikes = 6;
+  uint32 recenter_min_dwell_s = 7;
+}
+
+message RollingFuture {
+  string tenor = 1; // weekly | monthly | quarterly
+  uint32 roll_before_s = 2;
+}
