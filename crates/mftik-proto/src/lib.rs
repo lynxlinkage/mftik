@@ -12,3 +12,6 @@ pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 pub mod wire {
     include!(concat!(env!("OUT_DIR"), "/mftiko.rs"));
 }
+
+#[cfg(test)]
+mod roundtrip;
