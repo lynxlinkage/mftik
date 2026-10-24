@@ -23,6 +23,7 @@ The Python API will be snake_case and one-to-one with the Go SDK.
 ```bash
 scripts/sync-proto          # copy again and rewrite SOURCE
 scripts/sync-proto --check  # fail if the tree or SOURCE drifts from the pin
+scripts/sync-proto-negative # require --check to fail on a drifted temporary copy
 ```
 
 ## Build
@@ -40,13 +41,16 @@ Python uses [uv](https://docs.astral.sh/uv/) and [maturin](https://www.maturin.r
 ```bash
 uv sync
 uv run maturin develop
-uv run ruff check
+uv run ruff check python
+uv run ruff format --check python
 ```
 
 `mftik` requires Python 3.11 or newer (abi3).
 
 ## CI
 
-GitHub Actions runs on `ubuntu-latest`. `cargo clippy --workspace --all-targets -- -D warnings` fails the build on warnings. The workflow also checks formatting, tests, and that the proto tree still matches the pinned commit.
+GitHub Actions runs on `ubuntu-latest`. `cargo clippy --workspace --all-targets -- -D warnings` fails the build on warnings. The workflow also checks formatting, tests, and that the proto tree still matches the pinned commit. [`scripts/sync-proto-negative`](scripts/sync-proto-negative) appends a line to a temporary copy of that tree and requires `scripts/sync-proto --check` to fail.
+
+The Python job syncs the locked uv tools, runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`python/smoke_import.py`](python/smoke_import.py).
 
 [`scripts/install-mftiko-conformance`](scripts/install-mftiko-conformance) is the `go install` of `mftiko-conformance` from the pinned mftiko commit. Those steps are in `.github/workflows/ci.yml` and are not executed until E05.
