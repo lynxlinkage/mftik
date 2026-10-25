@@ -89,6 +89,15 @@ Yi Te 於 #385 確認。E03 的共同決定，全文也附在 #404–#413。
 - E03-D008 並行與決策區段：E03-01、02、03、04 同時開工；E03-05 等 E03-02、E03-03；E03-06、07、08 等 E03-05；E03-09 等 E03-06、E03-07；E03-10 最後。各票的決策區段：E03-01 從 D011 起，E03-02 從 D021 起，依此類推，E03-10 從 D101 起。後合併的 PR 以 merge main 解 DECISIONS 衝突，不 rebase。
 - 與 Go 版語意不同之處，先回報再做。
 
+## 決定（2026-10-25，E03-D011–E03-D014）
+
+E03-01 mdpath。語意對齊 mftiko PROTOCOL §7.1、§9.2.9、§9.3.2、§9.3.5、§9.4.2–§9.4.4（E08-D005、E08-D046–E08-D049）與 `sdk/internal/mdpath`。
+
+- E03-D011 套用 binding：`mdpath::Path::apply` 吃 `stsctl.Bindings`，先擋 selector（不看版本），再驗 feed（`topic.ticker`、subject 非空、一個 key 一個 subject、一個 subject 一個 key），然後比版本。版本沒有比較新回 `Apply::Unchanged`，算成功。比較新回 `Apply::Staged`，內含照 subject 排序的 `Subscribe`。host 訂閱、有新訂閱就 flush，成功呼叫 `apply_bound`：這時才換集合、記 `bindings_applied`，回 `Unsubscribe`；失敗呼叫 `apply_aborted`：退訂這次新開的，集合與版本不變。這是 Go `Apply` 的順序（先訂、flush、換集合、再退訂，flush 失敗不算套用），拆成兩步讓 host 做 IO。`apply_bound` 或 `apply_aborted` 之前再 `apply` 回 `ApplyInProgress`；Go 以 mutex 排隊，這裡由 host 排隊。`FeedBinding.state`、`md_instance`、`accounts` 不讀，與 Go 相同。
+- E03-D012 訂閱與路由：每個訂閱有自己的 `SubId`。同一個 subject 上 feed key 改了，是新開一個訂閱、退訂舊的，兩個 id 不同。`route(sub, bytes)` 在 IO 執行緒用：不在集合裡 `Skip`；envelope 壞掉 `Md`，交給 dispatcher 計入 `dropped` 並記 log；`orderbook_delta` 是 `Book`，走 `push_book` 給 bookpath；沒有 hook 的 topic `Skip`，不解 payload；其他 `Md`。staged 的新訂閱一開始就收；要退訂的到 `apply_bound` 才停，與 Go 的 `live` 旗標相同。`Hooks::decode` 吃 dispatcher feed callback 的 bytes（已過 envelope 與 prehook），重讀 envelope、解 `FeedEvent`，回 `Hook`、`Skip`（`orderbook_delta`、空 oneof、該 topic 沒有 hook）或 `Log`。payload 解不開記 `md payload rejected: ...`，不交付、不算 envelope drop；文字是 prost 的（同 E02-D027）。
+- E03-D013 讀取：`tape`、`book_snapshot` 的 ticker，`fetch_klines`、`fetch_open_interest` 的 venue，都由呼叫端從 SYM `Info` 傳入，mdpath 不查 SYM，也不另存商品表。ticker 空字串回 `UnknownUid`。讀的是已 bound 的集合。回 `Request`：ticket、subject、編好的 body、`wait = recv_window`。host 以 ticket 呼叫 `on_reply`，交回回覆 bytes、`Timeout`、`NoResponder` 或其他失敗，拿到 `Delivery` 推上 TD buffer（E08-D048）。錯誤文字照 Go：`mdpath: md.view: ...`；逾時是 `context deadline exceeded`，沒有 responder 是 `nats: no responders available for request`；`md.fetch` 有 reason 時是 `error: reason`；沒有結果是 `empty tape`、`empty book`、`empty klines`、`empty open interest`。不認得或已回過的 ticket 回 `None`。
+- E03-D014 `close`：退訂集合與 staged 的新訂閱，丟掉在途讀取，之後的回覆回 `None`。之後 `apply`、`apply_bound`、讀取回 `Stopping`；selector、壞 feed、壞參數仍先回，順序同 Go。`route` 一律 `Skip`。`bindings_applied` 保留最後一份。Go 在 dispatcher 結束後才 `Close`，那時 TD buffer 已關，在途回覆同樣交不出去。
+
 ## 決定（2026-10-25，E03-D021–E03-D027）
 
 E03-02 C4 的 worker 端。語意對齊 mftiko `contract/wire/c4` 與 `sdk/run.go` 的 session 設定（PROTOCOL §5.2、§5.3、§9.2，E08-D003、E08-D006–E08-D009、E08-D037）。
