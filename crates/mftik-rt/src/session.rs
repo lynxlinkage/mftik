@@ -42,7 +42,7 @@ use crate::reader::{ReadEvent, spawn_reader};
 use crate::strategy::Strategy;
 use crate::timers::{TimerKey, Timers};
 
-/// `Hello.release`: this runtime's version.
+/// This runtime's version: `Hello.release` when [`run`] is given none.
 pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
 
 type Out = Arc<FrameWriter<CtlFd>>;
@@ -50,7 +50,16 @@ type Out = Arc<FrameWriter<CtlFd>>;
 /// Hosts `strategy` as a session worker: C4 on the control fd, NATS with the
 /// session's credentials, and the dispatcher on this thread. It does not
 /// return; the process ends with PROTOCOL §5.3's exit code (E03-D005).
-pub fn run<S: Strategy>(strategy: S) -> ! {
+///
+/// `release` is `Hello.release`, which the platform shows as
+/// `WorkerStatus.release`: the strategy's own version or revision, as Go
+/// reports the main module's (E03-D057). `None` or an empty string reports
+/// this runtime's [`RELEASE`].
+pub fn run<S: Strategy>(strategy: S, release: Option<&str>) -> ! {
+    let release = match release {
+        Some(r) if !r.is_empty() => r.to_owned(),
+        _ => RELEASE.to_owned(),
+    };
     // SAFETY: `run` is the session worker's entry point and takes the
     // control fd the shim handed over, once.
     let ctl = match unsafe { CtlFd::from_env() } {
@@ -60,7 +69,7 @@ pub fn run<S: Strategy>(strategy: S) -> ! {
             exit_with::<CtlFd>(None, err.exit_code())
         }
     };
-    serve(ctl, strategy)
+    serve(ctl, strategy, release)
 }
 
 /// What the C4 thread takes, in arrival order.
@@ -85,7 +94,7 @@ enum Job {
     OnStop,
 }
 
-fn serve<S: Strategy>(ctl: CtlFd, strategy: S) -> ! {
+fn serve<S: Strategy>(ctl: CtlFd, strategy: S, release: String) -> ! {
     let reading = ctl.try_clone();
     let out: Out = Arc::new(FrameWriter::new(ctl));
     let reading = match reading {
@@ -109,7 +118,7 @@ fn serve<S: Strategy>(ctl: CtlFd, strategy: S) -> ! {
     };
     let (jobs, queue) = mpsc::channel::<Job>();
     let driver = Driver {
-        machine: Machine::new(c4::Config::session(RELEASE, std::process::id() as i32)),
+        machine: Machine::new(c4::Config::session(&release, std::process::id() as i32)),
         out: Arc::clone(&out),
         plane: Arc::clone(&plane),
         clock,

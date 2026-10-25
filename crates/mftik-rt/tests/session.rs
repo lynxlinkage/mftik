@@ -22,6 +22,9 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
+/// `Hello.release` the test worker passes to `run` (E03-D057).
+const TEST_RELEASE: &str = "conform-test 1.2.3";
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use mftik_proto::wire::mftiko::common::v1::{Outcome, Version};
@@ -101,7 +104,7 @@ impl Strategy for Worker {
 #[test]
 fn worker_entry() {
     if env::var_os(WORKER_ENV).is_some() {
-        mftik_rt::run(Worker::default());
+        mftik_rt::run(Worker::default(), Some(TEST_RELEASE));
     }
 }
 
@@ -404,7 +407,7 @@ fn hello(shim: &mut Shim) {
                 ["worker.v1", "stsctl.v1", "md.v1", "td.v1"]
             );
             assert_eq!(hello.pid as u32, shim.child.id());
-            assert_eq!(hello.release, mftik_rt::RELEASE);
+            assert_eq!(hello.release, TEST_RELEASE);
         }
         other => panic!("want Hello, got {other:?}"),
     }
