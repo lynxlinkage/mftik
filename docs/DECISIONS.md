@@ -74,3 +74,25 @@ E02-02 本地簿。語意對齊 mftiko PROTOCOL §9.5（E08-D057–E08-D061）�
 - E02-D027 位元組：`on_message` 用 dispatcher 的 v1 envelope（不另寫 parser），digest 不查，再解 `FeedEvent`。壞 envelope 記 `book: envelope: ...`，不動任何游標。壞 payload 記 `book: payload: ...` 後返回；錯誤文字是 prost 的，與 Go `proto.Unmarshal` 的文字不同，游標同樣不動，下一則同商品的 delta 會因跳號重同步。uid 0 只記一次 `book: uid 0`。不是 `orderbook_delta` 的事件走斷號：未同步、floor 抬到該游標、立刻再要快照，不進退避。
 - E02-D028 prehook：bookpath 不因年齡拒收 delta。`push_book` 已經繞過 stale prehook，而且這個年齡不計入 `QueueStat.dropped`。host 把 book callback 的 bytes 交給 `on_message`。壞 envelope 由 dispatcher 先拒絕並計入 `dropped`，那些 bytes 到不了 bookpath。
 - E02-D029 `close` 之後 `view` 是 `None`。之後的 delta、快照回覆、計時器都忽略。不送取消；在途 `md.view` 的回覆丟掉。
+
+## 決定（2026-10-25，E03-D001–E03-D008）
+
+Yi Te 於 #385 確認。E03 的共同決定，全文也附在 #404–#413。
+
+- E03-D001 sans-IO 延伸：mdpath、C4 狀態機、symclient 的協定邏輯延續 E02-D001，做成純狀態機放 `mftik-core`。fd 3、NATS、OS 計時器、檔案系統放 `mftik-rt`。
+- E03-D002 crate：新增 `crates/mftik-rt`（tokio、async-nats）。`mftik-py` 之後只做 PyO3 綁定，E03 不碰 PyO3。
+- E03-D003 執行緒：dispatcher 跑在呼叫 `run` 的執行緒（Python 時是主執行緒）。tokio 用 current_thread runtime，獨占一條 IO 執行緒。Beat 是一條 std 執行緒，不經 tokio、不經 dispatcher。watchdog 沿用 E02。fd 3 的寫入共用一把寫鎖，一則 frame 寫完才放開。
+- E03-D004 時鐘：注入的 `now_ns` 是啟動時取一次 CLOCK_REALTIME，加上 CLOCK_MONOTONIC 的經過時間。dispatcher 在 hook 執行期間持續呼叫 `set_now_ns`。session 中途牆鐘被 step 時，prehook 與 OnBook 算出的年齡會差這一段；hook 預算與退避不受影響。這是與 Go（prehook 用牆鐘、時長用單調鐘）的已知差異，E02 的 API 不改。
+- E03-D005 結束：每種結束都先 flush fd 3，再 `libc::_exit(code)`，不跑 atexit 與 finalizer。對齊 Go 的 `os.Exit` 不跑 defer；watchdog 執行緒在別人持有 GIL 時呼叫 `exit` 會卡在 Python 的 finalize。
+- E03-D006 NATS：async-nats。認證用 `user_jwt` 加 nkey `seed` 簽章，`custom_inbox_prefix` 設成 `inbox_prefix`，位址是 `MFTIKO_NATS_URL`（§9.4.1、E09-D006）。
+- E03-D007 驗收：E03 以 Rust 版 conformance 標準策略跑 `mftiko-conformance`，每一項都要 pass。CI 的 conformance job 在 E03-10 打開。這取代 E01-D007 的「E05 才接上執行」；E05 改用 Python 版策略。
+- E03-D008 並行與決策區段：E03-01、02、03、04 同時開工；E03-05 等 E03-02、E03-03；E03-06、07、08 等 E03-05；E03-09 等 E03-06、E03-07；E03-10 最後。各票的決策區段：E03-01 從 D011 起，E03-02 從 D021 起，依此類推，E03-10 從 D101 起。後合併的 PR 以 merge main 解 DECISIONS 衝突，不 rebase。
+- 與 Go 版語意不同之處，先回報再做。
+
+## 決定（2026-10-25，E03-D031–E03-D033）
+
+E03-03 `mftik-rt` 的 fd 3 傳輸與 Beat。語意對齊 mftiko `contract/wire/frame`、`sdk.Run` 的 `ctlFD`、`contract/wire/c4` 的 beat（PROTOCOL §5.1、§9.2.1、§9.2.3）。C4 協定邏輯不在這裡（E03-D001）。
+
+- E03-D031 控制 fd：`MFTIKO_CTL_FD` 未設或空字串是 3；其餘照 Go `strconv.Atoi` 的語法（十進位、可帶正負號）。負數或解析失敗回 `CtlFdError::Env`，exit 10，對齊 `sdk.Run`。超出 i32 也是 exit 10；Go 的 `int` 是 64 位元，這段 Go 會接受（kernel 再取低 32 位），只差在實際不會出現的值。拿到 fd 立刻 `fcntl(F_SETFD, FD_CLOEXEC)`；失敗（fd 沒開）回 `CtlFdError::Fd`，exit 1。Go 的 `syscall.CloseOnExec` 不回報錯誤、`os.NewFile` 不檢查，之後 `Hello` 寫不出去以 `ExitOther`（1）結束，所以兩邊都是 exit 1、不送任何 frame。`CtlFd::from_env` 是 `unsafe`：它取得 fd 的所有權，呼叫端保證只呼叫一次、process 裡沒有別人擁有這個 fd。
+- E03-D032 frame：4 bytes big-endian 長度加 body，body 上限 1 MiB。寫入超過上限回 `TooLarge`，什麼都不寫；讀到 header 宣告超過上限回 `TooLarge`，不讀 body。frame 之間結束是 `Ok(None)`，header 或 body 中途結束是 `Truncated`（帶位置與位元組數）。body 解不開是 `Decode`，該 frame 已讀完、串流仍對齊。讀執行緒照 Go c4 的 reader：任何錯誤（含 `Decode`）回報一次就停，EOF 與錯誤由呼叫端都當成 shim 不在（§9.2.7）。未知欄位跳過，未知的 `WorkerDown` 種類以 `msg: None` 交出（§9.3）。`FrameWriter` 一把鎖涵蓋 encode 與整則寫出（E03-D003）。fd 3 用 `send(MSG_NOSIGNAL)` 寫，shim 消失時是 `EPIPE` 而不是 `SIGPIPE`，與 Go 對非 stdout fd 的行為相同；fd 不是 socket 時退回 `write(2)`。`seal` 先 flush，之後的 frame 一律回 `Sealed`，給 E03-D005 在 `_exit` 前用，避免 Beat 在 flush 之後才開始一則、被 exit 截斷。
+- E03-D033 Beat：一條 std 執行緒，只等 fd 3 的寫鎖，不等其他執行緒。照 Go 的 ticker：啟動後一個週期（1 秒）送第一則，`seq` 從 1 起、每送一則加一，`progress` 留空。寫入卡住跨過週期時，錯過的週期合併成一則立刻送，之後回到原本的格點。`stop` 之後不再開始新的一則；寫入失敗（含 `Sealed`）就結束，不重試。呼叫端在 `Hello` 之後啟動它（Go 在 `Hello` 送出後才起 beat goroutine）。
