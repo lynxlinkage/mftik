@@ -9,31 +9,39 @@
 //! a call site:
 //!
 //! - [`Wiring::apply_bindings`] is `mdpath.Apply` for `StartPayload`, `Live`,
-//!   and `Command.bindings`. Unwired, a decoded snapshot is accepted and
-//!   nothing is subscribed.
+//!   and `Command.bindings` (E03-06, `crate::md`). Before Init opens the MD
+//!   path it is Go's `bindings` error.
 //! - [`Wiring::listen_td`] and [`Wiring::recon`] are `tdpath.Listen` before
 //!   the gate and `tdpath.Recon` after OnStart. Unwired, they succeed and do
 //!   nothing. [`Wiring::unsubscribe_td`] is the dispatcher's `unsubscribe_td`.
 //! - [`Wiring::resolve`] and [`Wiring::info`] are `symclient`. Unwired, they
 //!   are [`Error::NotWired`].
-//! - The order calls and reads are `tdpath`, the market data reads are
-//!   `mdpath`, and the book is `bookpath`. Unwired, the calls are
+//! - The order calls and reads are `tdpath`. Unwired, the calls are
 //!   [`Error::NotWired`] and the reads find nothing, which is what Go
 //!   returns before those paths exist.
+//! - The market data reads are `mdpath` and the book is `bookpath`, in
+//!   `crate::md`. Before Init they are [`Error::Stopping`] and no book, as
+//!   Go's `sessCtx` with a nil path.
+//! - [`Wiring::row_stored`] is where the SYM path (E03-08) reports each row
+//!   symclient stores (`Effect::Stored`). [`Wiring::watch_bindings_applied`]
+//!   is what Report (E03-09) watches (§9.2.4).
 
-use mftik_core::book::OrderBook;
+use std::sync::{Arc, OnceLock};
+
 use mftik_core::mdpath::{ReadError, TapeQuery};
 use mftik_core::symbol::Info;
+use mftik_proto::wire::mftiko::common::v1::Version;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::stsctl::v1::Bindings;
 use mftik_proto::wire::mftiko::td::v1 as td;
+use tokio::sync::watch;
 
 use crate::call::CallCtx;
 use crate::context::Error;
+use crate::md::{self as mdwire, Books, Md, Rows};
 use crate::strategy::Order;
 
 /// Names in [`Error::NotWired`].
-pub const MD: &str = "md";
 pub const TD: &str = "td";
 pub const SYM: &str = "sym";
 
@@ -43,12 +51,51 @@ pub(crate) type Deliver<T> = Box<dyn FnOnce(Result<T, ReadError>) + Send>;
 
 /// The paths of one session. See the module docs.
 #[derive(Debug, Default)]
-pub(crate) struct Wiring {}
+pub(crate) struct Wiring {
+    md: OnceLock<Arc<Md>>,
+    rows: Arc<Rows>,
+    applied: watch::Sender<Option<Version>>,
+}
 
 impl Wiring {
-    pub(crate) fn apply_bindings(&self, bindings: &Bindings) -> Result<(), String> {
-        let _ = bindings;
+    /// Init opens the MD path once the dispatcher exists (Go `mdpath.Open`,
+    /// `bookpath.Open`).
+    pub(crate) fn open_md(&self, config: mdwire::Config) -> Result<(), String> {
+        let md = Md::open(config, Arc::clone(&self.rows), self.applied.clone())?;
+        let _ = self.md.set(md);
         Ok(())
+    }
+
+    pub(crate) fn md(&self) -> Option<&Arc<Md>> {
+        self.md.get()
+    }
+
+    pub(crate) fn apply_bindings(&self, bindings: &Bindings) -> Result<(), String> {
+        match self.md.get() {
+            Some(md) => md.apply(bindings),
+            None => Err("bindings".to_owned()),
+        }
+    }
+
+    /// symclient stored `info` (E03-08 calls this for every
+    /// `symclient::Effect::Stored`). Never blocks; any thread.
+    #[allow(dead_code)] // E03-08 calls it.
+    pub(crate) fn row_stored(&self, info: &Info) {
+        self.rows.stored(info);
+    }
+
+    /// `Report.bindings_applied` (§9.2.4): `None` before the first snapshot
+    /// is bound.
+    #[allow(dead_code)] // E03-09 reads it.
+    pub(crate) fn bindings_applied(&self) -> Option<Version> {
+        self.md.get().and_then(|md| md.bindings_applied())
+    }
+
+    /// Changes each time a snapshot with a newer version is bound; a
+    /// snapshot that is not newer does not change it.
+    #[allow(dead_code)] // E03-09 watches it.
+    pub(crate) fn watch_bindings_applied(&self) -> watch::Receiver<Option<Version>> {
+        self.applied.subscribe()
     }
 
     pub(crate) fn listen_td(&self) -> Result<(), String> {
@@ -128,8 +175,10 @@ impl Wiring {
         query: TapeQuery,
         deliver: Deliver<md::TapePage>,
     ) -> Result<(), Error> {
-        let _ = (uid, topic, query, deliver);
-        Err(Error::NotWired(MD))
+        self.md
+            .get()
+            .ok_or(Error::Stopping)?
+            .tape(uid, topic, query, deliver)
     }
 
     pub(crate) fn book_snapshot(
@@ -137,8 +186,10 @@ impl Wiring {
         uid: u32,
         deliver: Deliver<md::BookSnapshot>,
     ) -> Result<(), Error> {
-        let _ = (uid, deliver);
-        Err(Error::NotWired(MD))
+        self.md
+            .get()
+            .ok_or(Error::Stopping)?
+            .book_snapshot(uid, deliver)
     }
 
     pub(crate) fn fetch_klines(
@@ -148,8 +199,10 @@ impl Wiring {
         limit: u32,
         deliver: Deliver<md::Klines>,
     ) -> Result<(), Error> {
-        let _ = (uid, interval, limit, deliver);
-        Err(Error::NotWired(MD))
+        self.md
+            .get()
+            .ok_or(Error::Stopping)?
+            .fetch_klines(uid, interval, limit, deliver)
     }
 
     pub(crate) fn fetch_open_interest(
@@ -157,12 +210,15 @@ impl Wiring {
         uid: u32,
         deliver: Deliver<md::OpenInterest>,
     ) -> Result<(), Error> {
-        let _ = (uid, deliver);
-        Err(Error::NotWired(MD))
+        self.md
+            .get()
+            .ok_or(Error::Stopping)?
+            .fetch_open_interest(uid, deliver)
     }
 
-    pub(crate) fn book(&self, uid: u32) -> Option<&OrderBook> {
-        let _ = uid;
-        None
+    /// The local books, locked for the hook that asks (see `Context::book`).
+    /// `None` before Init opens the MD path.
+    pub(crate) fn lock_books(&self) -> Option<Books> {
+        self.md.get().map(|md| md.lock_books())
     }
 }

@@ -14,13 +14,13 @@
 //! where Go's take a Context and reach the strategy through the closure.
 //! They run on the dispatcher, one at a time, like any hook.
 //!
-//! The order calls and reads, the market data reads, the book, and SYM are
-//! wired by E03-06–E03-08; until then they return [`Error::NotWired`] or find
-//! nothing (see `wiring`).
+//! The order calls and reads, and SYM, are wired by E03-07 and E03-08; until
+//! then they return [`Error::NotWired`] or find nothing (see `wiring`). The
+//! market data reads and the book are the MD path's (E03-06).
 
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use mftik_core::book::OrderBook;
@@ -30,6 +30,7 @@ use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::td::v1 as td;
 
 use crate::call::CallCtx;
+use crate::md::Books;
 use crate::plane::Plane;
 use crate::strategy::{Order, Strategy};
 
@@ -50,8 +51,8 @@ pub enum Error {
     NoFeed,
     /// The session is stopping.
     Stopping,
-    /// The path behind this call is not in the runtime yet: `md` (E03-06),
-    /// `td` (E03-07), or `sym` (E03-08).
+    /// The path behind this call is not in the runtime yet: `td` (E03-07)
+    /// or `sym` (E03-08).
     NotWired(&'static str),
     /// Any other failure, with its text.
     Other(String),
@@ -79,11 +80,18 @@ impl std::error::Error for Error {}
 /// A hook's view of the session. See the module docs.
 pub struct Context<S> {
     plane: Arc<Plane<S>>,
+    /// The local books, locked by the first [`Context::book`] of this hook
+    /// until the hook returns, so a borrowed book cannot change under it.
+    /// Only the dispatcher thread takes that lock, between hooks.
+    books: OnceLock<Option<Books>>,
 }
 
 impl<S: Strategy> Context<S> {
     pub(crate) fn new(plane: Arc<Plane<S>>) -> Self {
-        Self { plane }
+        Self {
+            plane,
+            books: OnceLock::new(),
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -175,7 +183,10 @@ impl<S: Strategy> Context<S> {
     /// (E08-D057). It is borrowed from this hook's Context, so it cannot
     /// outlive the hook (E08-D003). `None` while it is not synced (E08-D060).
     pub fn book(&self, uid: u32) -> Option<&OrderBook> {
-        self.plane.wiring.book(uid)
+        self.books
+            .get_or_init(|| self.plane.wiring.lock_books())
+            .as_ref()?
+            .view(uid)
     }
 
     // ---------- reads (the answer runs `f` on the dispatcher) ----------

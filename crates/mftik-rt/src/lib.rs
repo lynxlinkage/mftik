@@ -19,8 +19,9 @@
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the
 //!   Beat thread (E03-D031–E03-D033).
 //!
-//! The MD, TD, and SYM paths are wired by E03-06–E03-08 and Report by E03-09;
-//! the plane's calls into them are in `wiring`.
+//! The MD path is in `md` (E03-06). The TD and SYM paths are wired by
+//! E03-07 and E03-08 and Report by E03-09; the plane's calls into the paths
+//! are in `wiring`.
 
 pub mod beat;
 pub mod call;
@@ -30,6 +31,7 @@ pub mod ctl;
 pub mod exit;
 pub mod frame;
 pub mod io;
+mod md;
 pub mod nats;
 mod plane;
 pub mod reader;
