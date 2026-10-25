@@ -1,13 +1,16 @@
 //! Pure Rust STS core.
 //!
 //! Algorithms land here and do not do IO. The Python SDK calls this crate
-//! through `mftik-py`. The session dispatcher is [`dispatch`]. The TD path
-//! is [`tdpath`].
+//! through `mftik-py`. The order book is [`book`]. Local sync is [`bookpath`].
+//! The session dispatcher is [`dispatch`]. The TD path is [`tdpath`].
+//! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
+//! [`volume`].
 
 pub mod dispatch;
 pub mod tdpath;
 
 pub mod book;
+pub mod bookpath;
 pub mod cloid;
 pub mod cloidgen;
 pub mod volume;

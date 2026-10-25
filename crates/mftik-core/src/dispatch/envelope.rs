@@ -7,6 +7,9 @@ use std::fmt;
 
 pub(crate) const SIZE: usize = 40;
 const VERSION: u8 = 1;
+const OFF_MD_TS: usize = 8;
+const OFF_EPOCH: usize = 16;
+const OFF_SEQ: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EnvelopeError {
@@ -40,9 +43,35 @@ impl fmt::Display for EnvelopeError {
 impl std::error::Error for EnvelopeError {}
 
 pub(crate) fn md_ts_ns(msg: &[u8]) -> Result<i64, EnvelopeError> {
+    Ok(parse(msg)?.md_ts_ns)
+}
+
+/// One v1 header. `payload` aliases `msg`. The digest is not checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Header<'a> {
+    pub md_ts_ns: i64,
+    pub conn_epoch: u64,
+    pub seq: u64,
+    pub payload: &'a [u8],
+}
+
+pub(crate) fn parse(msg: &[u8]) -> Result<Header<'_>, EnvelopeError> {
     reject(msg)?;
-    let bytes: [u8; 8] = msg[8..16].try_into().expect("40-byte header has md_ts_ns");
-    Ok(i64::from_le_bytes(bytes))
+    let md_ts_ns = i64::from_le_bytes(field(msg, OFF_MD_TS));
+    let conn_epoch = u64::from_le_bytes(field(msg, OFF_EPOCH));
+    let seq = u64::from_le_bytes(field(msg, OFF_SEQ));
+    Ok(Header {
+        md_ts_ns,
+        conn_epoch,
+        seq,
+        payload: &msg[SIZE..],
+    })
+}
+
+fn field<const N: usize>(msg: &[u8], offset: usize) -> [u8; N] {
+    msg[offset..offset + N]
+        .try_into()
+        .expect("reject guarantees a 40-byte header")
 }
 
 fn reject(msg: &[u8]) -> Result<(), EnvelopeError> {
@@ -67,9 +96,9 @@ fn reject(msg: &[u8]) -> Result<(), EnvelopeError> {
 pub(crate) fn encode_v1(md_ts_ns: i64, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; SIZE + payload.len()];
     out[0] = VERSION;
-    out[8..16].copy_from_slice(&md_ts_ns.to_le_bytes());
-    out[16..24].copy_from_slice(&1u64.to_le_bytes());
-    out[24..32].copy_from_slice(&1u64.to_le_bytes());
+    out[OFF_MD_TS..OFF_MD_TS + 8].copy_from_slice(&md_ts_ns.to_le_bytes());
+    out[OFF_EPOCH..OFF_EPOCH + 8].copy_from_slice(&1u64.to_le_bytes());
+    out[OFF_SEQ..OFF_SEQ + 8].copy_from_slice(&1u64.to_le_bytes());
     out[SIZE..].copy_from_slice(payload);
     out
 }
@@ -110,6 +139,19 @@ mod tests {
         let msg = encode_v1(1_700_000_000_000_000_000, b"a");
         assert_eq!(md_ts_ns(&msg).expect("header"), 1_700_000_000_000_000_000);
         assert_eq!(md_ts_ns(&encode_v1(0, b"")).expect("empty payload"), 0);
+    }
+
+    #[test]
+    fn parse_reads_the_cursor_and_payload_and_ignores_the_digest() {
+        let mut msg = encode_v1(9, b"xyz");
+        msg[OFF_EPOCH..OFF_EPOCH + 8].copy_from_slice(&4u64.to_le_bytes());
+        msg[OFF_SEQ..OFF_SEQ + 8].copy_from_slice(&5u64.to_le_bytes());
+        msg[32..40].copy_from_slice(&7u64.to_le_bytes());
+        let header = parse(&msg).expect("header");
+        assert_eq!(header.md_ts_ns, 9);
+        assert_eq!(header.conn_epoch, 4);
+        assert_eq!(header.seq, 5);
+        assert_eq!(header.payload, b"xyz");
     }
 
     #[test]

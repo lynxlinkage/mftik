@@ -304,6 +304,7 @@ version = "0.12.0"
 dependencies = [
  "criterion",
  "mftik-proto",
+ "prost",
 ]
 
 [[package]]

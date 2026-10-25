@@ -11,7 +11,7 @@
 //! written. The window sliding later does not bring a dropped level back.
 //!
 //! This is the ring from mftiko `sdk/book`. Snapshot sync, gaps, and `md.view`
-//! belong to bookpath. No IO.
+//! belong to [`crate::bookpath`]. No IO.
 //!
 //! ```
 //! use mftik_core::book::{tick, Level, OrderBook};
