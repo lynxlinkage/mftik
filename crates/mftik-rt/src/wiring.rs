@@ -27,8 +27,8 @@
 //! - Every row symclient stores (`Effect::Stored`) reaches the MD path's
 //!   rows, which is where bookpath gets `price_tick` and the reads get the
 //!   ticker and venue (E03-D065): [`Wiring::open_sym`] sets that callback.
-//!   [`Wiring::watch_bindings_applied`] is what Report (E03-09) watches
-//!   (§9.2.4).
+//!   [`Wiring::watch_bindings_applied`] is what Report watches (§9.2.4,
+//!   `crate::report`).
 
 use std::sync::{Arc, OnceLock};
 
@@ -112,14 +112,12 @@ impl Wiring {
 
     /// `Report.bindings_applied` (§9.2.4): `None` before the first snapshot
     /// is bound.
-    #[allow(dead_code)] // E03-09 reads it.
     pub(crate) fn bindings_applied(&self) -> Option<Version> {
         self.md.get().and_then(|md| md.bindings_applied())
     }
 
     /// Changes each time a snapshot with a newer version is bound; a
     /// snapshot that is not newer does not change it.
-    #[allow(dead_code)] // E03-09 watches it.
     pub(crate) fn watch_bindings_applied(&self) -> watch::Receiver<Option<Version>> {
         self.applied.subscribe()
     }

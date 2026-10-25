@@ -776,7 +776,7 @@ fn run_worker(url: &str, scenario: &str, deadline_ms: u32) -> Ran {
     let mut started = false;
     while let Some(up) = frames.read_message::<WorkerUp>().expect("read from worker") {
         let msg = up.msg.expect("a WorkerUp message");
-        if matches!(msg, worker_up::Msg::Beat(_)) {
+        if matches!(msg, worker_up::Msg::Beat(_) | worker_up::Msg::Report(_)) {
             continue;
         }
         let init_ok = matches!(&msg, worker_up::Msg::Done(done)

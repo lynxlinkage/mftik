@@ -578,6 +578,19 @@ impl<S: Strategy> Plane<S> {
         }
     }
 
+    /// Wakes `wake` each time a newer bindings snapshot is bound, from the
+    /// IO thread, until the receiver is gone (§9.2.4).
+    pub(crate) fn on_bindings_applied(&self, wake: mpsc::Sender<()>) {
+        let mut applied = self.wiring.watch_bindings_applied();
+        self.io.spawn(async move {
+            while applied.changed().await.is_ok() {
+                if wake.send(()).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
     /// Moves the dispatcher's clock to now, before something queues a hook,
     /// so the hook's start and an MD event's age are current (E03-D051).
     pub(crate) fn fresh_now(&self) {
