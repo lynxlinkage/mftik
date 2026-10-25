@@ -74,3 +74,26 @@ E02-02 本地簿。語意對齊 mftiko PROTOCOL §9.5（E08-D057–E08-D061）�
 - E02-D027 位元組：`on_message` 用 dispatcher 的 v1 envelope（不另寫 parser），digest 不查，再解 `FeedEvent`。壞 envelope 記 `book: envelope: ...`，不動任何游標。壞 payload 記 `book: payload: ...` 後返回；錯誤文字是 prost 的，與 Go `proto.Unmarshal` 的文字不同，游標同樣不動，下一則同商品的 delta 會因跳號重同步。uid 0 只記一次 `book: uid 0`。不是 `orderbook_delta` 的事件走斷號：未同步、floor 抬到該游標、立刻再要快照，不進退避。
 - E02-D028 prehook：bookpath 不因年齡拒收 delta。`push_book` 已經繞過 stale prehook，而且這個年齡不計入 `QueueStat.dropped`。host 把 book callback 的 bytes 交給 `on_message`。壞 envelope 由 dispatcher 先拒絕並計入 `dropped`，那些 bytes 到不了 bookpath。
 - E02-D029 `close` 之後 `view` 是 `None`。之後的 delta、快照回覆、計時器都忽略。不送取消；在途 `md.view` 的回覆丟掉。
+
+## 決定（2026-10-25，E03-D001–E03-D008）
+
+Yi Te 於 #385 確認。E03 的共同決定，全文也附在 #404–#413。
+
+- E03-D001 sans-IO 延伸：mdpath、C4 狀態機、symclient 的協定邏輯延續 E02-D001，做成純狀態機放 `mftik-core`。fd 3、NATS、OS 計時器、檔案系統放 `mftik-rt`。
+- E03-D002 crate：新增 `crates/mftik-rt`（tokio、async-nats）。`mftik-py` 之後只做 PyO3 綁定，E03 不碰 PyO3。
+- E03-D003 執行緒：dispatcher 跑在呼叫 `run` 的執行緒（Python 時是主執行緒）。tokio 用 current_thread runtime，獨占一條 IO 執行緒。Beat 是一條 std 執行緒，不經 tokio、不經 dispatcher。watchdog 沿用 E02。fd 3 的寫入共用一把寫鎖，一則 frame 寫完才放開。
+- E03-D004 時鐘：注入的 `now_ns` 是啟動時取一次 CLOCK_REALTIME，加上 CLOCK_MONOTONIC 的經過時間。dispatcher 在 hook 執行期間持續呼叫 `set_now_ns`。session 中途牆鐘被 step 時，prehook 與 OnBook 算出的年齡會差這一段；hook 預算與退避不受影響。這是與 Go（prehook 用牆鐘、時長用單調鐘）的已知差異，E02 的 API 不改。
+- E03-D005 結束：每種結束都先 flush fd 3，再 `libc::_exit(code)`，不跑 atexit 與 finalizer。對齊 Go 的 `os.Exit` 不跑 defer；watchdog 執行緒在別人持有 GIL 時呼叫 `exit` 會卡在 Python 的 finalize。
+- E03-D006 NATS：async-nats。認證用 `user_jwt` 加 nkey `seed` 簽章，`custom_inbox_prefix` 設成 `inbox_prefix`，位址是 `MFTIKO_NATS_URL`（§9.4.1、E09-D006）。
+- E03-D007 驗收：E03 以 Rust 版 conformance 標準策略跑 `mftiko-conformance`，每一項都要 pass。CI 的 conformance job 在 E03-10 打開。這取代 E01-D007 的「E05 才接上執行」；E05 改用 Python 版策略。
+- E03-D008 並行與決策區段：E03-01、02、03、04 同時開工；E03-05 等 E03-02、E03-03；E03-06、07、08 等 E03-05；E03-09 等 E03-06、E03-07；E03-10 最後。各票的決策區段：E03-01 從 D011 起，E03-02 從 D021 起，依此類推，E03-10 從 D101 起。後合併的 PR 以 merge main 解 DECISIONS 衝突，不 rebase。
+- 與 Go 版語意不同之處，先回報再做。
+
+## 決定（2026-10-25，E03-D011–E03-D014）
+
+E03-01 mdpath。語意對齊 mftiko PROTOCOL §7.1、§9.2.9、§9.3.2、§9.3.5、§9.4.2–§9.4.4（E08-D005、E08-D046–E08-D049）與 `sdk/internal/mdpath`。
+
+- E03-D011 套用 binding：`mdpath::Path::apply` 吃 `stsctl.Bindings`，先擋 selector（不看版本），再驗 feed（`topic.ticker`、subject 非空、一個 key 一個 subject、一個 subject 一個 key），然後比版本。版本沒有比較新回 `Apply::Unchanged`，算成功。比較新回 `Apply::Staged`，內含照 subject 排序的 `Subscribe`。host 訂閱、有新訂閱就 flush，成功呼叫 `apply_bound`：這時才換集合、記 `bindings_applied`，回 `Unsubscribe`；失敗呼叫 `apply_aborted`：退訂這次新開的，集合與版本不變。這是 Go `Apply` 的順序（先訂、flush、換集合、再退訂，flush 失敗不算套用），拆成兩步讓 host 做 IO。`apply_bound` 或 `apply_aborted` 之前再 `apply` 回 `ApplyInProgress`；Go 以 mutex 排隊，這裡由 host 排隊。`FeedBinding.state`、`md_instance`、`accounts` 不讀，與 Go 相同。
+- E03-D012 訂閱與路由：每個訂閱有自己的 `SubId`。同一個 subject 上 feed key 改了，是新開一個訂閱、退訂舊的，兩個 id 不同。`route(sub, bytes)` 在 IO 執行緒用：不在集合裡 `Skip`；envelope 壞掉 `Md`，交給 dispatcher 計入 `dropped` 並記 log；`orderbook_delta` 是 `Book`，走 `push_book` 給 bookpath；沒有 hook 的 topic `Skip`，不解 payload；其他 `Md`。staged 的新訂閱一開始就收；要退訂的到 `apply_bound` 才停，與 Go 的 `live` 旗標相同。`Hooks::decode` 吃 dispatcher feed callback 的 bytes（已過 envelope 與 prehook），重讀 envelope、解 `FeedEvent`，回 `Hook`、`Skip`（`orderbook_delta`、空 oneof、該 topic 沒有 hook）或 `Log`。payload 解不開記 `md payload rejected: ...`，不交付、不算 envelope drop；文字是 prost 的（同 E02-D027）。
+- E03-D013 讀取：`tape`、`book_snapshot` 的 ticker，`fetch_klines`、`fetch_open_interest` 的 venue，都由呼叫端從 SYM `Info` 傳入，mdpath 不查 SYM，也不另存商品表。ticker 空字串回 `UnknownUid`。讀的是已 bound 的集合。回 `Request`：ticket、subject、編好的 body、`wait = recv_window`。host 以 ticket 呼叫 `on_reply`，交回回覆 bytes、`Timeout`、`NoResponder` 或其他失敗，拿到 `Delivery` 推上 TD buffer（E08-D048）。錯誤文字照 Go：`mdpath: md.view: ...`；逾時是 `context deadline exceeded`，沒有 responder 是 `nats: no responders available for request`；`md.fetch` 有 reason 時是 `error: reason`；沒有結果是 `empty tape`、`empty book`、`empty klines`、`empty open interest`。不認得或已回過的 ticket 回 `None`。
+- E03-D014 `close`：退訂集合與 staged 的新訂閱，丟掉在途讀取，之後的回覆回 `None`。之後 `apply`、`apply_bound`、讀取回 `Stopping`；selector、壞 feed、壞參數仍先回，順序同 Go。`route` 一律 `Skip`。`bindings_applied` 保留最後一份。Go 在 dispatcher 結束後才 `Close`，那時 TD buffer 已關，在途回覆同樣交不出去。
