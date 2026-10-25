@@ -916,12 +916,15 @@ impl Shared {
         }
     }
 
+    // Starting or ending a hook wakes no one. Only the watchdog reads
+    // `hook_on`, and it can only fire once the injected clock has moved past
+    // the budget, which `set_now_ns` announces. A wake per hook was two
+    // context switches per TD entry, most of a 65536-entry drain (E03-D102).
     fn begin_hook(&self) -> i64 {
         let mut state = lock(&self.mu);
         let start = state.now_ns;
         state.hook_on = true;
         state.hook_start_ns = start;
-        self.cv.notify_all();
         start
     }
 
@@ -929,7 +932,6 @@ impl Shared {
         let mut state = lock(&self.mu);
         state.hook_on = true;
         state.hook_start_ns = start;
-        self.cv.notify_all();
     }
 
     fn finish_hook(&self, start: i64) {
@@ -941,7 +943,6 @@ impl Shared {
             if slow {
                 state.hook_slow += 1;
             }
-            self.cv.notify_all();
             slow
         };
         if slow {

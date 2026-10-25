@@ -1,0 +1,18 @@
+[package]
+name = "mftik-conform"
+description = "The Rust standard conformance strategy (PROTOCOL §9.8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "conform"
+path = "src/main.rs"
+
+[dependencies]
+mftik-proto = { path = "../../crates/mftik-proto" }
+mftik-rt = { path = "../../crates/mftik-rt" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
