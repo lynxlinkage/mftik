@@ -164,6 +164,19 @@ fn comm_names() -> Vec<String> {
     names
 }
 
+/// Thread names, once one of them is `name`. A new thread renames itself after it starts,
+/// so for a moment it still carries its parent's name; poll instead of reading once.
+fn comm_names_with(name: &str) -> Vec<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let names = comm_names();
+        if names.iter().any(|n| n == name) || std::time::Instant::now() >= deadline {
+            return names;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn constants_match_the_session_contract() {
     assert_eq!(TD_CAP, 65536);
@@ -569,7 +582,7 @@ fn the_watchdog_publishes_hung_when_the_injected_budget_is_used_up() {
     gate.wait_entered();
     dispatcher.set_now_ns(T0 + 1000);
     assert_eq!(recv_end(&rx), RunEnd::Hung);
-    let names = comm_names();
+    let names = comm_names_with(&dispatcher.shared.watch_name);
     assert!(
         names
             .iter()
@@ -1495,7 +1508,7 @@ fn drive_runs_hooks_drain_and_on_stop_on_the_driving_thread() {
         }
     );
     assert_eq!(dispatcher.run(), recv_end(&wait_run_on(&dispatcher)));
-    let names = comm_names();
+    let names = comm_names_with(&dispatcher.shared.watch_name);
     assert!(
         names
             .iter()
