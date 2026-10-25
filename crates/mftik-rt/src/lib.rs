@@ -14,6 +14,7 @@
 //!   table on the IO thread. [`io`]: the tokio `current_thread` runtime.
 //! - [`nats`]: the connection with the session's credentials, retried inside
 //!   `deadline_ms` (E03-D006, E08-D050). [`call`]: a plane call's context.
+//! - [`sym`]: the SYM path, `symclient` over NATS (E03-08).
 //! - [`volume`]: the strategy's atomic volume writes and read order
 //!   (§9.1.4).
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the
@@ -35,6 +36,7 @@ mod plane;
 pub mod reader;
 mod session;
 mod strategy;
+pub mod sym;
 pub mod timers;
 pub mod volume;
 mod wiring;
