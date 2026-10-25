@@ -14,6 +14,7 @@ Decisions for this repo are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 | `mftik-core` | `crates/mftik-core` | Pure Rust algorithms. No IO. |
 | `mftik-py` | `crates/mftik-py` | PyO3 module. The import name is `mftik`. |
 | `mftik-rt` | `crates/mftik-rt` | Session worker runtime: fd 3, C4, the dispatcher, NATS, and timers. `Strategy` and `Context`. |
+| `mftik-conform` | `examples/conform` | The Rust standard conformance strategy (PROTOCOL §9.8), the `conform` binary. |
 
 The Python API will be snake_case and one-to-one with the Go SDK.
 
@@ -54,4 +55,10 @@ GitHub Actions runs on `ubuntu-latest`. `cargo clippy --workspace --all-targets 
 
 The Python job syncs the locked uv tools, runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`python/smoke_import.py`](python/smoke_import.py).
 
-[`scripts/install-mftiko-conformance`](scripts/install-mftiko-conformance) is the `go install` of `mftiko-conformance` from the pinned mftiko commit. Those steps are in `.github/workflows/ci.yml` and are not executed until E05.
+The `mftiko-conformance` job runs the suite on every pull request. [`scripts/install-mftiko-conformance`](scripts/install-mftiko-conformance) is the `go install` of `mftiko-conformance` from the pinned mftiko commit. The job runs it against the Rust standard strategy [`examples/conform`](examples/conform), keeps `report.json` as an artifact, and fails on any failed check. To run it locally (Go 1.26 or newer):
+
+```bash
+GOBIN="$PWD/bin" scripts/install-mftiko-conformance
+cargo build --release -p mftik-conform
+bin/mftiko-conformance -json report.json -- target/release/conform
+```

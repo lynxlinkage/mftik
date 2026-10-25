@@ -5,6 +5,7 @@ members = [
     "crates/mftik-core",
     "crates/mftik-py",
     "crates/mftik-rt",
+    "examples/conform",
 ]
 
 [workspace.package]

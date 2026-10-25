@@ -70,15 +70,30 @@ jobs:
       - name: Drifted proto fails the consistency check
         run: bash scripts/sync-proto-negative
 
-  # E01-D007: the install steps are prepared. E05 removes `if` and runs the suite.
+  # E03-D007: the Rust standard strategy (examples/conform) against the
+  # pinned mftiko-conformance. Any fail fails the job; the report is kept.
   mftiko-conformance:
     name: mftiko-conformance
     runs-on: ubuntu-latest
-    if: false
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          cache: false
       - name: Install mftiko-conformance from the pinned mftiko commit
-        run: bash scripts/install-mftiko-conformance
+        run: |
+          GOBIN="$RUNNER_TEMP/conformance-bin" bash scripts/install-mftiko-conformance
+          echo "$RUNNER_TEMP/conformance-bin" >> "$GITHUB_PATH"
+      - name: Build the conform strategy
+        run: cargo build --release -p mftik-conform
+      - name: Run mftiko-conformance
+        run: mftiko-conformance -json report.json -- target/release/conform
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mftiko-conformance-report
+          path: report.json
+          if-no-files-found: warn

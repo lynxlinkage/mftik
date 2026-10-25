@@ -2,7 +2,7 @@
 # E01-D007: install mftiko-conformance from the pinned mftiko commit.
 # The commit is the one recorded by scripts/sync-proto in contract/proto/SOURCE.
 # Requires Go 1.26 or newer (the pinned module's go directive).
-# This does not run the suite. E05 connects execution.
+# This does not run the suite; CI's mftiko-conformance job does (E03-D007).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
