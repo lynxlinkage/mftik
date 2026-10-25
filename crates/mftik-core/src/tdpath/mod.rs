@@ -47,13 +47,12 @@
 //! The counter is E02-05. [`encode`] is the platform layout; OMS reads the algo
 //! field back out of an id.
 
-mod cloid;
 mod path;
 
 #[cfg(test)]
 mod tests;
 
-pub use cloid::encode;
+pub use crate::cloid::encode;
 pub use path::{
     AccountDecl, BalanceEvent, Bound, ClientOrderIdError, ClientOrderIds, Config, Effect, Error,
     FillEvent, HOLD_CAP, Hook, NewOrder, OpenError, OrderEvent, Origin, Path, PositionEvent,

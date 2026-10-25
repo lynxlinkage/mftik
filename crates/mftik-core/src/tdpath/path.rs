@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use mftik_proto::wire::mftiko::{common::v1 as common, td::v1 as td};
 
-use super::cloid::algo_of;
+use crate::cloid::algo_of;
 
 /// Held `td.evt` messages across every account. One more fails the session
 /// (PROTOCOL §9.6, E08-D041). The dispatcher FIFO uses the same cap.
