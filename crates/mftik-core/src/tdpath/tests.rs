@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use mftik_proto::wire::mftiko::{common::v1 as common, td::v1 as td};
 
-use super::cloid::{EPOCH_MS, encode};
 use super::{
     AccountDecl, Bound, ClientOrderIdError, ClientOrderIds, Config, Effect, Error, HOLD_CAP, Hook,
     NewOrder, OpenError, Origin, Path, REASON_HOLD_FULL, REASON_OFFLINE, RECON_BACKOFF_MAX,
     RECON_BACKOFF_MIN, ReconOutcome, RejectedRequest, RoundOutcome, RoundTicket, evt_subject,
     order_subject, view_subject,
 };
+use crate::cloid::{self, EPOCH_MS};
 
 const NOW_MS: i64 = EPOCH_MS + 1_000;
 const WINDOW: Duration = Duration::from_millis(500);
@@ -42,7 +42,8 @@ impl ClientOrderIds for Mint {
         }
         self.calls += 1;
         self.seq += 1;
-        encode(algo_id, now_ms, self.seq).map_err(ClientOrderIdError::Other)
+        cloid::encode(algo_id, now_ms, self.seq)
+            .map_err(|err| ClientOrderIdError::Other(err.to_string()))
     }
 }
 
@@ -63,7 +64,8 @@ impl ClientOrderIds for Script {
         }
         let seq = self.seqs[self.at];
         self.at += 1;
-        encode(algo_id, now_ms, seq).map_err(ClientOrderIdError::Other)
+        cloid::encode(algo_id, now_ms, seq)
+            .map_err(|err| ClientOrderIdError::Other(err.to_string()))
     }
 }
 
@@ -279,7 +281,7 @@ fn baseline(path: &mut Path, api_id: i64, inc: u32, seq: u64, batch: u32) {
 }
 
 fn id_of(algo: u32, seq: u32) -> String {
-    encode(algo, NOW_MS, seq).unwrap()
+    cloid::encode(algo, NOW_MS, seq).unwrap()
 }
 
 #[test]
