@@ -238,16 +238,20 @@ impl<S: Strategy> Plane<S> {
         });
 
         let connecting = call.clone();
+        let on_reconnect = self.wiring.sym_reconnect_hook();
         let client = self
             .io
             .block_on(async move {
                 let dial = |timeout| {
                     let (url, creds) = (url.clone(), creds.clone());
-                    async move { nats::dial(&url, &creds, timeout).await }
+                    let on_reconnect = Some(Arc::clone(&on_reconnect));
+                    async move { nats::dial(&url, &creds, timeout, on_reconnect).await }
                 };
                 nats::connect(&connecting, dial, &note).await
             })
             .map_err(|nats::Ended| CallError::Cancelled)?;
+        self.wiring
+            .open_sym(&self.io, self.clock, &self.timers, &client, Arc::new(note));
         let _ = self.nats.set(client);
 
         let disp = self.new_dispatcher(recv_window, hook_timeout);
@@ -706,10 +710,10 @@ mod tests {
             bindings: Some(Bindings::default()),
         };
         assert_eq!(plane.start_call(&start.encode_to_vec(), &call), Ok(()));
-        // resolve is allowed in OnStart; SYM is not wired yet.
+        // resolve is allowed in OnStart; without Init there is no SYM.
         assert_eq!(
             seen(&plane),
-            vec![format!("start {:?}", Some(Error::NotWired("sym")))]
+            vec![format!("start {:?}", Some(Error::Stopping))]
         );
         assert!(!plane.resolve_allowed());
         // After exit or fail, Start succeeds without OnStart.
@@ -815,7 +819,7 @@ mod tests {
             assert_eq!(ctx.volume_dir(), "");
             assert_eq!(ctx.input_dir("model"), "");
             assert_eq!(ctx.resolve("BTC"), Err(Error::NotInInit));
-            assert_eq!(ctx.info(1), Err(Error::NotWired("sym")));
+            assert_eq!(ctx.info(1), Err(Error::UnknownUid));
             assert_eq!(ctx.cancel(7, "1"), Err(Error::NotWired("td")));
             assert!(ctx.open_orders(7, 0).is_empty());
             assert!(ctx.position(7, 1).is_none());
