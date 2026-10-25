@@ -5,7 +5,8 @@
 //! The session dispatcher is [`dispatch`]. The TD path is [`tdpath`].
 //! The MD path is [`mdpath`].
 //! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
-//! [`volume`]. The worker end of C4 is [`c4`].
+//! [`volume`]. The worker end of C4 is [`c4`]. Instrument rows are
+//! [`symbol`], and the session SYM client is [`symclient`].
 
 pub mod c4;
 pub mod dispatch;
@@ -16,6 +17,8 @@ pub mod book;
 pub mod bookpath;
 pub mod cloid;
 pub mod cloidgen;
+pub mod symbol;
+pub mod symclient;
 pub mod volume;
 
 /// Crate name, so other workspace crates can link this shell.
