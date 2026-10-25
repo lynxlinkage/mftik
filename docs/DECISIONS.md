@@ -89,6 +89,18 @@ Yi Te 於 #385 確認。E03 的共同決定，全文也附在 #404–#413。
 - E03-D008 並行與決策區段：E03-01、02、03、04 同時開工；E03-05 等 E03-02、E03-03；E03-06、07、08 等 E03-05；E03-09 等 E03-06、E03-07；E03-10 最後。各票的決策區段：E03-01 從 D011 起，E03-02 從 D021 起，依此類推，E03-10 從 D101 起。後合併的 PR 以 merge main 解 DECISIONS 衝突，不 rebase。
 - 與 Go 版語意不同之處，先回報再做。
 
+## 決定（2026-10-25，E03-D021–E03-D027）
+
+E03-02 C4 的 worker 端。語意對齊 mftiko `contract/wire/c4` 與 `sdk/run.go` 的 session 設定（PROTOCOL §5.2、§5.3、§9.2，E08-D003、E08-D006–E08-D009、E08-D037）。
+
+- E03-D021 介面：`c4::Machine` 吃 `hello`、`on_down`（解好的 `WorkerDown`）、`on_eof`、`on_sigterm`、`on_timer`，以及 plane 呼叫的結果 `init_returned`、`start_returned`、`run_returned`、`live_returned`、`on_stop_returned`，每次帶注入的 `now_ns`；吐 `Effect`：`Send`、`StartBeat`／`StopBeat`、`CallInit`／`CallStart`／`CallRun`／`CallLive`／`CallRelay`／`CallOnStop`、`Cancel`、`ArmTimer`、`Log`、`Exit`。`Config::session` 是 kind `session`、contract `stsctl.v1`、contracts `worker.v1`、`stsctl.v1`、`md.v1`、`td.v1`、`init_carries_live`；pid 由 host 傳入。session plane 的 Relay 回聲（`sdk/plane.go`）併進狀態機：Init 成功後的 `Relay` 先原樣送回 corr 與 payload，再交給 plane。`dispatch::RunEnd` 轉 `RunResult`：`Done` 是正常返回、`Failed` 是 `Exit(FAILED)`、`Crashed` 是錯誤、`Hung` 是 `Exit(HUNG, hook timeout)`；`StopError` 的 `Deadline`、`Cancelled` 轉 `CallError::Cancelled`。
+- E03-D022 計時：Init、Start 的 `deadline_ms` 與自行結束時 OnStop 的 hook 預算，由狀態機以 `ArmTimer` 請 host 排；token 對得上就照辦，不重讀時鐘。plane 呼叫因 context 結束而返回時回 `CallError::Cancelled`（Go 的 `ctx.Err()`）：Init、Start 在注入時間已過 deadline 時算 `deadline`；OnStop 已過 hook 預算時 exit 21、不送 `Stopped`（Go 的 `timeoutResult`、`hookHung`）。結果與計時器誰先到算誰，晚到的忽略。讀到 Stop、EOF 或 SIGTERM 之後 deadline 不再生效，等 hook 返回（Go 的 `runLimited`）。grace 的期限只交給 OnStop，狀態機照樣等它，grace 到期由 shim 結束進程（E08-D009）。
+- E03-D023 Beat：`Hello` 之後 `StartBeat`；第一則 Stop、EOF 或 SIGTERM 時 `StopBeat`，對齊 Go 的 beat goroutine 跟著 `life` 結束。deadline 與自行結束不停 Beat，由 `Exit` 一起結束。
+- E03-D024 寫入失敗：`Send` 帶 `fatal`。`Hello`、Init 的 `Applied`、`Done(INIT, ok)`、`Done(START, ok)`、`Stage(running)` 寫不出去，host 以 exit 1 結束，後面的 effect 不做（Go 回 `ExitOther`）；其他寫入錯誤忽略。
+- E03-D025 順序：一次只套用一則 Live，依到達順序。Init 成功之前收到的 Live 在 `Done(INIT, ok)` 之前套用完，之後才到的排在 `Done(INIT, ok)` 之後。Init 進行中收到的 `Start` 或第二則 `Init` 只記第一則，Init 成功後才處理；同時已讀到 Stop 時 Stop 優先（Go 在這裡隨機），以 DONE 結束，不呼叫 OnStart 與 OnStop。Start 接下之後的 `Init`、`Start` 忽略（Go 不再讀）。`Exiting` 送出之後 Live、Relay 照樣交給 plane（Go 的讀取 goroutine 讀到 `Serve` 返回為止）。Init 成功之前的 Stop、EOF、SIGTERM 以 DONE、exit 0 結束；Live 先留著；Relay 丟掉；`Controller` 任何時候都記下；`Undeliverable` 忽略（stsctl 沒有 worker 對 agent 的請求，E09-D003）。這幾點照 Go，與 PROTOCOL §5.2 E08-D037 的字面不同，列在 E03-02 PR 的「需要決定」。
+- E03-D026 文字：reason 與 log 對齊 Go：`c4: start before init`、`c4: init after init`、`contract X`、`deadline`、`signal`（SIGTERM，或 reason 空的 Stop）、`shim closed`（EOF）；`CallError::Cancelled` 的文字是 `context canceled`。`Exiting` 的 reason 取第一則 Stop 或 EOF 的；SIGTERM 不記 reason，之後的 Stop 仍可設定。`init_carries_live` 時 `live_digest` 是空的也送 `Applied("")`，對齊 Go。
+- E03-D027 EOF 之後的 OnStop（Yi Te 於 #415 確認，與 Go 不同，照 PROTOCOL §9.5.5）：fd 3 讀到 EOF 之後，沒有人能從外面結束這個進程，所以 OnStop 一律有上限，超過就 exit 21、不送 `Stopped`，`Exiting` 不改。讀過 `Stop` 的用那則 grace 的剩餘（shim 在時由 shim 執行，shim 不在由 worker 自己執行）；沒有的用 `hook_timeout_s`。SIGTERM 或 `Stop` 之後 OnStop 已在跑、還沒有上限時才讀到 EOF，就在讀到時補上同一個上限。`hook_timeout_s` 為 0 時不限時。Go 的 c4 在 EOF 之後不限時。
+
 ## 決定（2026-10-25，E03-D031–E03-D033）
 
 E03-03 `mftik-rt` 的 fd 3 傳輸與 Beat。語意對齊 mftiko `contract/wire/frame`、`sdk.Run` 的 `ctlFD`、`contract/wire/c4` 的 beat（PROTOCOL §5.1、§9.2.1、§9.2.3）。C4 協定邏輯不在這裡（E03-D001）。
