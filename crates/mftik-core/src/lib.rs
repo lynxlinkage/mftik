@@ -5,8 +5,9 @@
 //! The session dispatcher is [`dispatch`]. The TD path is [`tdpath`].
 //! The MD path is [`mdpath`].
 //! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
-//! [`volume`].
+//! [`volume`]. The worker end of C4 is [`c4`].
 
+pub mod c4;
 pub mod dispatch;
 pub mod mdpath;
 pub mod tdpath;

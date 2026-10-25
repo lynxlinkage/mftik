@@ -13,6 +13,7 @@ Decisions for this repo are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 | `mftik-proto` | `crates/mftik-proto` | Prost types for the pinned mftiko protos. Generated code stays out of git. |
 | `mftik-core` | `crates/mftik-core` | Pure Rust algorithms. No IO. |
 | `mftik-py` | `crates/mftik-py` | PyO3 module. The import name is `mftik`. |
+| `mftik-rt` | `crates/mftik-rt` | Session worker IO. C4 frames on fd 3 and the Beat thread. |
 
 The Python API will be snake_case and one-to-one with the Go SDK.
 
