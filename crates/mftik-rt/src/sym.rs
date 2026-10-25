@@ -347,10 +347,11 @@ async fn subscribe(
         .subscribe(subject.to_owned())
         .await
         .map_err(|err| err.to_string())?;
-    match tokio::time::timeout(SUBSCRIBE_FLUSH, nats.flush()).await {
-        Ok(Ok(())) => Ok(sub),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Err("nats: timeout".to_owned()),
+    // A round trip, not a socket flush (E03-D076).
+    match crate::nats::barrier(nats, SUBSCRIBE_FLUSH).await {
+        Ok(()) => Ok(sub),
+        Err(err) if err == "timeout" => Err("nats: timeout".to_owned()),
+        Err(err) => Err(err),
     }
 }
 

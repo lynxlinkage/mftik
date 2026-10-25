@@ -154,6 +154,38 @@ fn attempt_timeout(call: &CallCtx) -> Duration {
     }
 }
 
+/// The subject of [`barrier`]'s round trip (E03-D062, E03-D076). The session
+/// may publish on `md.v1.fetch.>` (E08-D018), and no venue is `_flush` (a
+/// venue is an uppercase letter and alphanumerics, PROTOCOL §2), so the
+/// server answers with no responders.
+pub const BARRIER_SUBJECT: &str = "md.v1.fetch._flush";
+
+/// Go's `FlushTimeout`: returns once the server has read everything this
+/// connection sent before the call, SUBs included, within `timeout`.
+///
+/// async-nats's `flush` only writes the socket. A request is answered only
+/// after the server has read every SUB before it on the same connection, so
+/// writing, then waiting for any answer to a request on [`BARRIER_SUBJECT`]
+/// (no responders counts), is the PING/PONG Go waits for. A timeout or a
+/// connection error fails it, with the text after `flush: `.
+pub async fn barrier(client: &Client, timeout: Duration) -> Result<(), String> {
+    let round_trip = async {
+        client.flush().await.map_err(|err| err.to_string())?;
+        let probe = async_nats::Request::new()
+            .payload(bytes::Bytes::new())
+            .timeout(Some(timeout));
+        match client.send_request(BARRIER_SUBJECT, probe).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == async_nats::client::RequestErrorKind::NoResponders => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    };
+    match tokio::time::timeout(timeout, round_trip).await {
+        Ok(result) => result,
+        Err(_) => Err("timeout".to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;

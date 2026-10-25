@@ -20,9 +20,9 @@
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the
 //!   Beat thread (E03-D031–E03-D033).
 //!
-//! The MD path is in `md` (E03-06). The TD and SYM paths are wired by
-//! E03-07 and E03-08 and Report by E03-09; the plane's calls into the paths
-//! are in `wiring`.
+//! The MD path is in `md` (E03-06), the TD path in `td` (E03-07), and the
+//! SYM path in `sym` (E03-08); Report is E03-09. The plane's calls into the
+//! paths are in `wiring`.
 
 pub mod beat;
 pub mod call;
@@ -40,6 +40,7 @@ pub mod reader;
 mod session;
 mod strategy;
 pub mod sym;
+mod td;
 pub mod timers;
 pub mod volume;
 mod wiring;

@@ -49,6 +49,7 @@ use crate::clock::Clock;
 use crate::context::Error;
 use crate::dcell::DispatcherCell;
 use crate::io::Io;
+use crate::nats;
 use crate::timers::{TimerKey, Timers};
 use crate::wiring::Deliver;
 
@@ -57,15 +58,6 @@ mod tests;
 
 /// How long the flush after new subscribes may take, Go's `flushTimeout`.
 pub(crate) const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The subject of the flush's round trip (E03-D062). async-nats's `flush`
-/// only writes the socket; a request answers only after the server has read
-/// every SUB before it, which is what Go's PING/PONG `FlushTimeout` waits
-/// for. The session may publish on `md.v1.fetch.>` (E08-D018), and no venue
-/// is `_flush` (a venue is an uppercase letter and alphanumerics, PROTOCOL
-/// §2), so the server answers with no responders. Any answer ends the flush;
-/// a timeout or a connection error fails it.
-pub(crate) const FLUSH_SUBJECT: &str = "md.v1.fetch._flush";
 
 /// OnBook, through the plane (Go `bookHook`).
 pub(crate) type BookSink = Arc<dyn Fn(bookpath::Update) + Send + Sync>;
@@ -567,27 +559,12 @@ async fn read_feed(
     }
 }
 
-/// Writes the socket, then waits for the server to answer a request sent
-/// after the SUBs (see [`FLUSH_SUBJECT`]), within [`FLUSH_TIMEOUT`].
+/// [`nats::barrier`] within [`FLUSH_TIMEOUT`]: the new SUBs are on the
+/// server (E03-D062).
 async fn flush(client: &async_nats::Client) -> Result<(), String> {
-    let round_trip = async {
-        client
-            .flush()
-            .await
-            .map_err(|err| format!("mdpath: flush: {err}"))?;
-        let probe = async_nats::Request::new()
-            .payload(Bytes::new())
-            .timeout(Some(FLUSH_TIMEOUT));
-        match client.send_request(FLUSH_SUBJECT, probe).await {
-            Ok(_) => Ok(()),
-            Err(err) if err.kind() == async_nats::client::RequestErrorKind::NoResponders => Ok(()),
-            Err(err) => Err(format!("mdpath: flush: {err}")),
-        }
-    };
-    match tokio::time::timeout(FLUSH_TIMEOUT, round_trip).await {
-        Ok(result) => result,
-        Err(_) => Err("mdpath: flush: timeout".to_owned()),
-    }
+    nats::barrier(client, FLUSH_TIMEOUT)
+        .await
+        .map_err(|err| format!("mdpath: flush: {err}"))
 }
 
 /// One `md.view` or `md.fetch` request that waits `wait`.

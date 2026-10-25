@@ -15,14 +15,22 @@ mod common;
 
 use std::env;
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use common::*;
+use mftik_proto::wire::mftiko::common::v1 as cv1;
 use mftik_proto::wire::mftiko::common::v1::Outcome;
+use mftik_proto::wire::mftiko::session::v1::AccountDecl;
 use mftik_proto::wire::mftiko::stsctl::v1::{Command as StsCommand, InitPayload};
+use mftik_proto::wire::mftiko::td::v1 as td;
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
-use mftik_rt::{Context, HookError, Strategy};
+use mftik_rt::{
+    Context, Handlers, HookError, Order, OrderEvent, OrderHandler, ReconEvent, ReconHandler,
+    Strategy,
+};
 use nkeys::KeyPair;
 use prost::Message;
 
@@ -79,6 +87,46 @@ impl Strategy for Worker {
 
     fn on_stop(&mut self, _ctx: &Context<Self>) {
         self.line("OnStop");
+    }
+
+    fn handlers(&self, h: &mut Handlers<Self>) {
+        h.recon().order();
+    }
+}
+
+/// The `td` scenario: the first OnRecon submits; with no `td.order`
+/// responder the order comes back as a 101 local reject.
+impl ReconHandler for Worker {
+    fn on_recon(&mut self, ctx: &Context<Self>, ev: ReconEvent) {
+        self.line(&format!(
+            "OnRecon {} {} {}",
+            ev.td.api_id, ev.td.incarnation, ev.td.seq
+        ));
+        let id = ctx
+            .submit(Order {
+                api_id: ev.td.api_id,
+                algo_id: 1,
+                uid: 1001,
+                side: cv1::Side::Buy,
+                order_type: cv1::OrderType::Limit,
+                tif: cv1::TimeInForce::Gtc,
+                qty: Some(1.0),
+                quote_qty: None,
+                price: Some(1.0),
+                recv_window_ms: 0,
+                reduce_only: false,
+                params: Default::default(),
+            })
+            .expect("submit");
+        assert_eq!(ctx.open_orders(ev.td.api_id, 1).len(), 1, "{id}");
+    }
+}
+
+impl OrderHandler for Worker {
+    fn on_order(&mut self, ctx: &Context<Self>, ev: OrderEvent) {
+        let seen = ctx.order(ev.td.api_id, &ev.order.client_order_id).is_some();
+        self.line(&format!("OnOrder {} {} {seen}", ev.td.api_id, ev.code));
+        ctx.exit();
     }
 }
 
@@ -281,4 +329,72 @@ fn a_hook_past_hook_timeout_is_hung_and_exits_while_it_runs() {
     let ended = shim.end();
     assert_eq!(ended.code, Some(21), "{}", ended.stderr);
     assert_eq!(hooks(&ended), ["OnInit", "gate", "OnStart", "Hang"]);
+}
+
+/// The TD path end to end: Init opens it with the AccountDecl, Start
+/// listens and asks td.view after OnStart, OnRecon carries the subject's
+/// api_id, and a Submit with no td.order responder is a 101 reject.
+#[test]
+fn td_recon_then_a_submit_without_a_responder() {
+    let nats = start_nats();
+    let io = mftik_rt::io::Io::start().expect("peer io");
+    let (url, creds) = (nats.url.clone(), nats.creds.clone());
+    let peer = io
+        .block_on(async move { mftik_rt::nats::dial(&url, &creds, FUSE, None).await })
+        .expect("peer connects");
+    let views = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&views);
+    let client = peer.clone();
+    let mut sub = io
+        .block_on(async move { client.subscribe("td.view.7").await })
+        .expect("subscribe td.view");
+    io.spawn(async move {
+        while let Some(msg) = futures_util::StreamExt::next(&mut sub).await {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let reply = td::ViewReply {
+                incarnation: 3,
+                seq: 5,
+                cancel_batch: 1,
+                reply: Some(td::view_reply::Reply::Recon(td::Recon::default())),
+                ..Default::default()
+            };
+            let _ = peer
+                .publish(msg.reply.expect("reply"), reply.encode_to_vec().into())
+                .await;
+        }
+    });
+    let mut shim = Shim::spawn(&nats.url);
+    hello(&mut shim);
+    let mut payload = init_payload(&nats.creds, "td");
+    payload.accounts = vec![AccountDecl {
+        api_id: 7,
+        algo_ids: vec![1],
+        ..Default::default()
+    }];
+    init(&shim, payload, 5000);
+    expect_applied(&mut shim, "live-1");
+    expect_done(&mut shim, Verb::Init, true, "");
+    start(&shim);
+    expect_done(&mut shim, Verb::Start, true, "");
+    match shim.expect() {
+        worker_up::Msg::Stage(stage) => assert_eq!(stage.name, "running"),
+        other => panic!("want Stage(running), got {other:?}"),
+    }
+    expect_ending(&mut shim, Outcome::Done, "", Some(true));
+    let ended = shim.end();
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    assert_eq!(
+        hooks(&ended),
+        [
+            "OnInit",
+            "gate",
+            "OnStart",
+            "OnRecon 7 3 5",
+            "OnOrder 7 101 true",
+            "OnStop"
+        ]
+    );
+    assert_same_thread(&ended);
+    assert!(ended.stderr.contains("td.view: queued"), "{}", ended.stderr);
+    assert_eq!(views.load(Ordering::SeqCst), 1);
 }

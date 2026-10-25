@@ -23,6 +23,7 @@ use mftik_core::c4::CallError;
 use mftik_core::dispatch::{self, Dispatcher, Timer};
 use mftik_core::mdpath::{self, Data};
 use mftik_core::tdpath;
+use mftik_proto::wire::mftiko::session::v1::AccountDecl;
 use mftik_proto::wire::mftiko::stsctl::v1::{
     Bindings, Command, InitPayload, StartPayload, command,
 };
@@ -35,6 +36,7 @@ use crate::io::Io;
 use crate::md;
 use crate::nats;
 use crate::strategy::{BookUpdate, Feed, Handlers, HookError, Strategy};
+use crate::td;
 use crate::timers::{TimerKey, Timers};
 use crate::wiring::Wiring;
 
@@ -253,12 +255,14 @@ impl<S: Strategy> Plane<S> {
             .map_err(|nats::Ended| CallError::Cancelled)?;
         self.wiring
             .open_sym(&self.io, self.clock, &self.timers, &client, Arc::new(note));
-        let _ = self.nats.set(client);
+        let _ = self.nats.set(client.clone());
 
         let disp = self.new_dispatcher(recv_window, hook_timeout);
         let _ = self.disp.set(disp.clone());
         self.start_clock(disp.clone());
-        self.open_md(disp, recv_window)?;
+        self.open_md(disp.clone(), recv_window)?;
+        self.open_td(init.accounts, recv_window, client, disp)
+            .map_err(CallError::Failed)?;
 
         if call.is_done() {
             return Err(CallError::Cancelled);
@@ -445,8 +449,7 @@ impl<S: Strategy> Plane<S> {
     }
 
     /// tdpath's `Hook` to its handler (Go `tdHooks`). The TD path calls it
-    /// (E03-07) after the state already includes the event (E08-D053).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// after the state already includes the event (E08-D053).
     pub(crate) fn deliver_td(self: &Arc<Self>, hook: tdpath::Hook) {
         let h = &self.handlers;
         macro_rules! deliver {
@@ -464,6 +467,33 @@ impl<S: Strategy> Plane<S> {
             tdpath::Hook::Recon(ev) => deliver!(h.recon, ev),
             tdpath::Hook::Reject(ev) => deliver!(h.reject, ev),
         }
+    }
+
+    /// Go's `tdpath.Open` in Init (E03-07).
+    fn open_td(
+        self: &Arc<Self>,
+        accounts: Vec<AccountDecl>,
+        recv_window: Duration,
+        client: async_nats::Client,
+        disp: Dispatcher,
+    ) -> Result<(), String> {
+        let plane = Arc::downgrade(self);
+        self.wiring.open_td(td::Config {
+            session_id: self.session.get().map(|s| s.id.clone()).unwrap_or_default(),
+            recv_window,
+            accounts,
+            nats: client,
+            io: self.io.clone(),
+            timers: self.timers.clone(),
+            clock: self.clock,
+            disp,
+            deliver: Arc::new(move |hook| {
+                if let Some(plane) = plane.upgrade() {
+                    plane.deliver_td(hook);
+                }
+            }),
+            log: Arc::new(note),
+        })
     }
 
     fn new_dispatcher(
@@ -929,7 +959,7 @@ mod tests {
             assert_eq!(ctx.input_dir("model"), "");
             assert_eq!(ctx.resolve("BTC"), Err(Error::NotInInit));
             assert_eq!(ctx.info(1), Err(Error::UnknownUid));
-            assert_eq!(ctx.cancel(7, "1"), Err(Error::NotWired("td")));
+            assert_eq!(ctx.cancel(7, "1"), Err(Error::Stopping));
             assert!(ctx.open_orders(7, 0).is_empty());
             assert!(ctx.position(7, 1).is_none());
             assert_eq!(
