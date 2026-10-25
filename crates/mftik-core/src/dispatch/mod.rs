@@ -9,11 +9,14 @@
 //! injected clock says the running hook has used up `hook_timeout`. The host
 //! then sends `Exiting(HUNG, "hook timeout")` and exits 21, and it does not
 //! run the strategy `on_stop` (E02-D002, PROTOCOL §9.5).
+//! [`Dispatcher::drive`] runs the same loop on the calling thread instead, and
+//! another thread waits with [`Dispatcher::wait_run`] (E03-D003).
 //!
 //! Hooks may call [`Dispatcher::push_td`], [`Dispatcher::push_md`],
 //! [`Dispatcher::push_book`], [`Dispatcher::exit`], [`Dispatcher::fail`],
 //! [`Dispatcher::set_now_ns`], [`Dispatcher::stats`], and [`Timer::fire`].
-//! They must not call [`Dispatcher::run`], [`Dispatcher::on_stop`], or
+//! They must not call [`Dispatcher::run`], [`Dispatcher::drive`],
+//! [`Dispatcher::wait_run`], [`Dispatcher::on_stop`], or
 //! [`Dispatcher::wait_exited`]: those wait for this same thread.
 
 pub(crate) mod envelope;
@@ -504,6 +507,38 @@ impl Dispatcher {
         if start {
             self.spawn_threads();
         }
+        self.shared.wait_result()
+    }
+
+    /// Run the dispatcher loop on the calling thread instead of a spawned one
+    /// (E03-D003). Only the watchdog thread is spawned.
+    ///
+    /// Hooks, the TD drain, and the strategy callback all run on this thread.
+    /// It returns when the loop has left: after [`Dispatcher::on_stop`] has its
+    /// result, or after the hook that made the session [`RunEnd::Hung`]
+    /// returns. Another thread reads the ending with [`Dispatcher::wait_run`]
+    /// and then calls [`Dispatcher::on_stop`]. Returns at once when
+    /// [`Dispatcher::run`] or `drive` has already started the loop.
+    pub fn drive(&self) {
+        {
+            let mut state = lock(&self.shared.mu);
+            if state.run_started {
+                return;
+            }
+            state.run_started = true;
+        }
+        let shared = Arc::clone(&self.shared);
+        let watch_name = self.shared.watch_name.clone();
+        thread::Builder::new()
+            .name(watch_name)
+            .spawn(move || shared.watch())
+            .expect("spawn watchdog thread");
+        self.shared.drive();
+    }
+
+    /// Block until the session should send `Exiting`, as [`Dispatcher::run`],
+    /// without starting the loop. Pairs with [`Dispatcher::drive`].
+    pub fn wait_run(&self) -> RunEnd {
         self.shared.wait_result()
     }
 
