@@ -32,6 +32,7 @@ use crate::call::CallCtx;
 use crate::clock::Clock;
 use crate::context::{Context, Error};
 use crate::io::Io;
+use crate::md;
 use crate::nats;
 use crate::strategy::{BookUpdate, Feed, Handlers, HookError, Strategy};
 use crate::timers::{TimerKey, Timers};
@@ -256,7 +257,8 @@ impl<S: Strategy> Plane<S> {
 
         let disp = self.new_dispatcher(recv_window, hook_timeout);
         let _ = self.disp.set(disp.clone());
-        self.start_clock(disp);
+        self.start_clock(disp.clone());
+        self.open_md(disp, recv_window)?;
 
         if call.is_done() {
             return Err(CallError::Cancelled);
@@ -266,6 +268,41 @@ impl<S: Strategy> Plane<S> {
         self.resolve_allowed.store(false, Ordering::SeqCst);
         hook_result(result)?;
         Ok(hook_timeout)
+    }
+
+    /// Go's `mdpath.Open` and `bookpath.Open` (E03-06).
+    fn open_md(self: &Arc<Self>, disp: Dispatcher, recv_window: Duration) -> Result<(), CallError> {
+        let Some(client) = self.nats.get().cloned() else {
+            return Err(failed("nats"));
+        };
+        let plane = Arc::downgrade(self);
+        self.wiring
+            .open_md(md::Config {
+                io: self.io.clone(),
+                clock: self.clock,
+                timers: self.timers.clone(),
+                disp,
+                nats: client,
+                recv_window,
+                hooks: self.handlers.md_hooks(),
+                on_book: Arc::new(move |update| {
+                    if let Some(plane) = plane.upgrade() {
+                        plane.deliver_book(update);
+                    }
+                }),
+                log: Arc::new(note),
+            })
+            .map_err(CallError::Failed)
+    }
+
+    /// The dispatcher's feed callback: one `md.f` message past the prehook,
+    /// decoded for its hook (E03-D012).
+    fn on_feed(self: &Arc<Self>, msg: &[u8]) {
+        match self.handlers.md_hooks().decode(msg) {
+            mdpath::Decoded::Hook(event) => self.deliver_md(event),
+            mdpath::Decoded::Skip => {}
+            mdpath::Decoded::Log(line) => note(&line),
+        }
     }
 
     /// The plane's Start.
@@ -363,10 +400,9 @@ impl<S: Strategy> Plane<S> {
         }
     }
 
-    /// One decoded market data event to its hook (Go `mdHooks`). The MD
-    /// path's feed callback calls it (E03-06). An event without a registered
+    /// One decoded market data event to its hook (Go `mdHooks`). The
+    /// dispatcher's feed callback calls it. An event without a registered
     /// hook is dropped; mdpath skips those before decoding (E08-D005).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn deliver_md(self: &Arc<Self>, event: mdpath::Event) {
         let md = event.md;
         let h = &self.handlers;
@@ -391,9 +427,8 @@ impl<S: Strategy> Plane<S> {
         }
     }
 
-    /// bookpath's `Hook` to OnBook (Go `bookHook`). The book path calls it
-    /// (E03-06); the book is kept whether or not OnBook is registered.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// bookpath's `Hook` to OnBook (Go `bookHook`). The MD path calls it;
+    /// the book is kept whether or not OnBook is registered.
     pub(crate) fn deliver_book(self: &Arc<Self>, update: bookpath::Update) {
         if let Some(hook) = self.handlers.book {
             let ev = BookUpdate {
@@ -439,6 +474,7 @@ impl<S: Strategy> Plane<S> {
         let on_stop = Arc::downgrade(self);
         let unsubscribe = Arc::downgrade(self);
         let fire_plane = Arc::downgrade(self);
+        let (feed_plane, book_plane) = (Arc::downgrade(self), Arc::downgrade(self));
         let (arm_ids, arm_timers) = (Arc::clone(&self.dispatch_timers), self.timers.clone());
         let (disarm_ids, disarm_timers) = (Arc::clone(&self.dispatch_timers), self.timers.clone());
         Dispatcher::new(dispatch::Config {
@@ -457,9 +493,16 @@ impl<S: Strategy> Plane<S> {
                     plane.wiring.unsubscribe_td();
                 }
             })),
-            // The MD path installs these (E03-06).
-            feed: None,
-            book: None,
+            feed: Some(Box::new(move |msg| {
+                if let Some(plane) = feed_plane.upgrade() {
+                    plane.on_feed(msg);
+                }
+            })),
+            book: Some(Box::new(move |msg| {
+                if let Some(md) = book_plane.upgrade().and_then(|p| p.wiring.md().cloned()) {
+                    md.on_book_message(msg);
+                }
+            })),
             log: Some(Arc::new(note)),
             arm_timer: Some(Arc::new(move |id, deadline_ns| {
                 let Some(timer) = lock(&arm_ids).get(&id).cloned() else {
@@ -573,6 +616,7 @@ mod tests {
     use std::time::Instant;
 
     use mftik_core::tdpath::{FillEvent, Td};
+    use mftik_proto::wire::mftiko::common::v1::Version;
     use mftik_proto::wire::mftiko::md::v1 as md;
     use mftik_proto::wire::mftiko::stsctl::v1::NatsCredentials;
     use mftik_proto::wire::mftiko::td::v1 as td;
@@ -698,6 +742,25 @@ mod tests {
         assert!(seen(&plane).is_empty());
     }
 
+    /// The MD path on a client that never connects: enough for snapshots
+    /// without feeds, which subscribe nothing.
+    fn open_offline<S: Strategy>(plane: &Arc<Plane<S>>) {
+        let client = plane
+            .io
+            .block_on(async {
+                async_nats::ConnectOptions::new()
+                    .retry_on_initial_connect()
+                    .connect("nats://127.0.0.1:1")
+                    .await
+            })
+            .expect("offline client");
+        let _ = plane.nats.set(client);
+        let window = Duration::from_millis(500);
+        let disp = plane.new_dispatcher(window, Duration::from_secs(1));
+        let _ = plane.disp.set(disp.clone());
+        plane.open_md(disp, window).expect("md path");
+    }
+
     #[test]
     fn start_needs_bindings_and_runs_on_start_after_the_gate() {
         let plane = plane();
@@ -709,6 +772,13 @@ mod tests {
         let start = StartPayload {
             bindings: Some(Bindings::default()),
         };
+        // Before Init opens the MD path, as Go's nil mdpath.
+        assert_eq!(
+            plane.start_call(&start.encode_to_vec(), &call),
+            Err(CallError::Failed("bindings".into()))
+        );
+        assert!(seen(&plane).is_empty());
+        open_offline(&plane);
         assert_eq!(plane.start_call(&start.encode_to_vec(), &call), Ok(()));
         // resolve is allowed in OnStart; without Init there is no SYM.
         assert_eq!(
@@ -716,6 +786,11 @@ mod tests {
             vec![format!("start {:?}", Some(Error::Stopping))]
         );
         assert!(!plane.resolve_allowed());
+        assert_eq!(
+            plane.wiring.bindings_applied(),
+            Some(Default::default()),
+            "a snapshot without a version is epoch 0, seq 0"
+        );
         // After exit or fail, Start succeeds without OnStart.
         plane.set_asked();
         assert_eq!(plane.start_call(&start.encode_to_vec(), &call), Ok(()));
@@ -729,7 +804,40 @@ mod tests {
             plane.live(b"\xff"),
             Err(CallError::Failed("bindings".into()))
         );
-        assert_eq!(plane.live(&Bindings::default().encode_to_vec()), Ok(()));
+        assert_eq!(
+            plane.live(&Bindings::default().encode_to_vec()),
+            Err(CallError::Failed("bindings".into()))
+        );
+        open_offline(&plane);
+        let mut watch = plane.wiring.watch_bindings_applied();
+        let v = |seq| Bindings {
+            version: Some(Version { epoch: 1, seq }),
+            ..Default::default()
+        };
+        assert_eq!(plane.live(&v(2).encode_to_vec()), Ok(()));
+        assert!(watch.has_changed().expect("watch"));
+        assert_eq!(
+            *watch.borrow_and_update(),
+            Some(Version { epoch: 1, seq: 2 })
+        );
+        // Not newer: success, so C4 sends Applied, and no change to report.
+        assert_eq!(plane.live(&v(1).encode_to_vec()), Ok(()));
+        assert_eq!(plane.live(&v(2).encode_to_vec()), Ok(()));
+        assert!(!watch.has_changed().expect("watch"));
+        let selector = Bindings {
+            selectors: vec![Default::default()],
+            ..v(3)
+        };
+        assert_eq!(
+            plane.live(&selector.encode_to_vec()),
+            Err(CallError::Failed(
+                "mdpath: selectors are not supported".into()
+            ))
+        );
+        assert_eq!(
+            plane.wiring.bindings_applied(),
+            Some(Version { epoch: 1, seq: 2 })
+        );
     }
 
     #[test]
@@ -753,6 +861,7 @@ mod tests {
         let io = Io::start().expect("io thread");
         let clock = Clock::new();
         let plane = Plane::start(Panics, io.clone(), clock, Timers::new(io, clock)).expect("plane");
+        open_offline(&plane);
         assert_eq!(
             plane.on_stop_direct(),
             Err(CallError::Failed("hook panic: boom".into()))
@@ -825,7 +934,7 @@ mod tests {
             assert!(ctx.position(7, 1).is_none());
             assert_eq!(
                 ctx.fetch_open_interest(1, |_, _, _| {}),
-                Err(Error::NotWired("md"))
+                Err(Error::Stopping)
             );
             // No dispatcher yet: these are dropped, as Go.
             ctx.after(Duration::ZERO, |s, _| s.seen.push("after".into()));

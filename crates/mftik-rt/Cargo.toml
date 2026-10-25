@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 async-nats = { version = "0.50.0", default-features = false, features = ["nkeys", "ring"] }
+bytes = "1.12.1"
 futures-util = { version = "0.3.34", default-features = false }
 libc = "0.2.191"
 mftik-core = { path = "../mftik-core" }
