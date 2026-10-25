@@ -12,7 +12,16 @@
 //!   takes SIGTERM with signal-hook (C4 itself does not, E08-D006), and
 //!   `mftik-io` is the tokio runtime with NATS and the timer table;
 //! - a short-lived thread waits for Run's ending (`Dispatcher::wait_run`) and
-//!   one for OnStop through the dispatcher, so the C4 thread keeps reading.
+//!   one for OnStop through the dispatcher, so the C4 thread keeps reading;
+//! - `mftik-report` sends `stsctl.Report` from Run's start until `Exiting`
+//!   ([`crate::report`]).
+//!
+//! The ending follows PROTOCOL §5.3 and §9.2.5 (E08-D003): the dispatcher
+//! stops taking MD and lets the hook in progress return, `Exiting` goes out,
+//! `DONE` and `FAILED` hand the TD buffer to its hooks, OnStop runs, then
+//! `Stopped` and the exit. `HUNG` sends `Exiting` and exits 21 while the hook
+//! still runs, without OnStop (E03-D005). C4 orders the frames, the
+//! dispatcher the hooks; this driver only stops Report first.
 //!
 //! Every exit, the C4 `Exit` effect, a fatal write, a control fd that cannot
 //! be taken, a runtime that cannot start, or a thread that died, goes
@@ -25,8 +34,8 @@ use std::thread;
 use std::time::Duration;
 
 use mftik_core::c4::{self, CallError, Effect, Machine, RunResult, TimerToken};
-use mftik_core::dispatch::StopRequest;
-use mftik_proto::wire::mftiko::worker::v1::WorkerDown;
+use mftik_core::dispatch::{Dispatcher, StopRequest};
+use mftik_proto::wire::mftiko::worker::v1::{WorkerDown, worker_up};
 use signal_hook::consts::SIGTERM;
 use signal_hook::iterator::Signals;
 
@@ -39,6 +48,7 @@ use crate::frame::FrameWriter;
 use crate::io::Io;
 use crate::plane::{Plane, note};
 use crate::reader::{ReadEvent, spawn_reader};
+use crate::report::{self, Reporter};
 use crate::strategy::Strategy;
 use crate::timers::{TimerKey, Timers};
 
@@ -126,6 +136,7 @@ fn serve<S: Strategy>(ctl: CtlFd, strategy: S, release: String) -> ! {
         events: events.clone(),
         jobs,
         beat: None,
+        report: None,
     };
     let c4_out = Arc::clone(&out);
     let spawned = thread::Builder::new()
@@ -198,6 +209,7 @@ struct Driver<S> {
     events: Sender<Event>,
     jobs: Sender<Job>,
     beat: Option<BeatThread>,
+    report: Option<Reporter>,
 }
 
 impl<S: Strategy> Driver<S> {
@@ -247,6 +259,12 @@ impl<S: Strategy> Driver<S> {
         for effect in effects {
             match effect {
                 Effect::Send { msg, fatal: must } => {
+                    // No Report after Exiting (§5.3).
+                    if let Some(worker_up::Msg::Exiting(_)) = &msg.msg
+                        && let Some(report) = &self.report
+                    {
+                        report.close();
+                    }
                     if let Err(err) = self.out.send(&msg)
                         && must
                     {
@@ -318,10 +336,28 @@ impl<S: Strategy> Driver<S> {
         };
         self.plane.begin_run();
         self.job(Job::Run);
+        self.start_report(disp.clone());
         let events = self.events.clone();
         self.waiter("mftik-run", move || {
             let _ = events.send(Event::RunReturned(disp.wait_run().into()));
         });
+    }
+
+    /// Report from Run's start (E03-D091). A thread that cannot start leaves
+    /// the session without Reports; it is not a reason to end it.
+    fn start_report(&mut self, disp: Dispatcher) {
+        let plane = Arc::clone(&self.plane);
+        let source = report::Source {
+            stats: Box::new(move || disp.stats()),
+            bindings_applied: Box::new(move || plane.wiring.bindings_applied()),
+        };
+        match Reporter::spawn(Arc::clone(&self.out), source) {
+            Ok(reporter) => {
+                self.plane.on_bindings_applied(reporter.waker());
+                self.report = Some(reporter);
+            }
+            Err(err) => note(&format!("report thread: {err}")),
+        }
     }
 
     fn call_on_stop(&mut self, deadline_ns: Option<i64>) {

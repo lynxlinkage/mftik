@@ -22,7 +22,9 @@ use std::{env, fs};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use mftik_proto::wire::mftiko::common::v1::{Outcome, Version};
-use mftik_proto::wire::mftiko::stsctl::v1::{Bindings, InitPayload, NatsCredentials, StartPayload};
+use mftik_proto::wire::mftiko::stsctl::v1::{
+    Bindings, InitPayload, NatsCredentials, Report, StartPayload,
+};
 use mftik_proto::wire::mftiko::worker::v1::{
     self as worker, Verb, WorkerDown, WorkerUp, worker_down, worker_up,
 };
@@ -194,6 +196,10 @@ pub struct Shim {
     pub frames: FrameReader<UnixStream>,
     pub out: FrameWriter<UnixStream>,
     pub beats: u64,
+    /// Every Report so far, with when it was read.
+    pub reports: Vec<(Instant, Report)>,
+    /// `Exiting` has been read: no Report may follow it (§5.3).
+    pub exiting: bool,
     pub volume: TempDir,
 }
 
@@ -240,6 +246,8 @@ impl Shim {
             frames: FrameReader::new(ours),
             out: FrameWriter::new(write),
             beats: 0,
+            reports: Vec::new(),
+            exiting: false,
             volume,
         }
     }
@@ -250,16 +258,57 @@ impl Shim {
             .expect("send to worker");
     }
 
-    /// The next frame that is not Beat. `None` at EOF.
+    /// The next frame that is not Beat or Report. `None` at EOF.
     pub fn next(&mut self) -> Option<worker_up::Msg> {
         loop {
             let up: WorkerUp = self.frames.read_message().expect("read from worker")?;
-            match up.msg.expect("a WorkerUp message") {
-                worker_up::Msg::Beat(beat) => {
-                    self.beats += 1;
-                    assert_eq!(beat.seq, self.beats, "beat seq");
+            if let Some(other) = self.take(up.msg.expect("a WorkerUp message")) {
+                if matches!(other, worker_up::Msg::Exiting(_)) {
+                    self.exiting = true;
                 }
-                other => return Some(other),
+                return Some(other);
+            }
+        }
+    }
+
+    /// Counts a Beat and keeps a Report; anything else is handed back.
+    fn take(&mut self, msg: worker_up::Msg) -> Option<worker_up::Msg> {
+        match msg {
+            worker_up::Msg::Beat(beat) => {
+                self.beats += 1;
+                assert_eq!(beat.seq, self.beats, "beat seq");
+                None
+            }
+            worker_up::Msg::Report(report) => {
+                assert!(!self.exiting, "a Report after Exiting");
+                assert_eq!(report.contract, "stsctl.v1");
+                let payload = Report::decode(report.payload.as_slice()).expect("stsctl Report");
+                self.reports.push((Instant::now(), payload));
+                None
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Reads until a Report that `want` accepts arrives, and returns it.
+    /// Other frames are not expected meanwhile.
+    #[track_caller]
+    pub fn wait_report(&mut self, want: impl Fn(&Report) -> bool) -> Report {
+        loop {
+            let up: WorkerUp = self
+                .frames
+                .read_message()
+                .expect("read from worker")
+                .expect("worker closed fd 3 early");
+            let seen = self.reports.len();
+            if let Some(other) = self.take(up.msg.expect("a WorkerUp message")) {
+                panic!("unexpected {other:?} while waiting for a Report");
+            }
+            if self.reports.len() > seen {
+                let report = &self.reports[seen].1;
+                if want(report) {
+                    return report.clone();
+                }
             }
         }
     }
@@ -278,12 +327,8 @@ impl Shim {
                 .read_message()
                 .expect("read from worker")
                 .expect("worker closed fd 3 early");
-            match up.msg.expect("a WorkerUp message") {
-                worker_up::Msg::Beat(beat) => {
-                    self.beats += 1;
-                    assert_eq!(beat.seq, self.beats, "beat seq");
-                }
-                other => panic!("unexpected {other:?} while waiting for Beat"),
+            if let Some(other) = self.take(up.msg.expect("a WorkerUp message")) {
+                panic!("unexpected {other:?} while waiting for Beat");
             }
         }
     }
