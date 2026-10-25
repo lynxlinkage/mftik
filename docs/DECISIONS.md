@@ -140,7 +140,7 @@ E03-05 `mftik-rt` 的 runtime 骨架。語意對齊 mftiko `sdk/run.go`、`plane
 - E03-D056 接線縫：`wiring::Wiring` 是 plane 呼叫各路徑的地方，位置同 `sdk/plane.go`。本票未接線時：bindings 解得開就算套用（不訂閱，`Live` 照樣回 `Applied`），listen TD、Recon 成功不做事，下單、撤單、`resolve`、`info`、MD 讀取回 `NotWired`，`order`／`open_orders`／`position`／`balance`／`book` 找不到。`resolve` 的 OnInit／OnStart 窗口已在 Context 檢查。hook 分派（Go `mdHooks`、`tdHooks`、`bookHook`）已寫在 plane，等 E03-06、E03-07 呼叫。整合測試以 socketpair 當控制 fd、真的 nats-server（釘 v2.15.0，與 mftiko go.mod 相同），operator、account、user JWT 在測試裡用 nkeys 簽，走 `user_jwt` 加 seed 的正式認證；找不到 nats-server（`MFTIK_NATS_SERVER` 或 `PATH`）測試失敗，不跳過，CI 的 rust job 以 `go install` 裝同一版。
 - E03-D057 `Hello.release`（Yi Te 於 #418 確認）：`run(strategy, release)` 由策略傳入自己的版本或 revision，平台以 `WorkerStatus.release` 顯示，對應 Go 回報主模組版本或 VCS revision。`None` 或空字串時用 mftik-rt 的 `RELEASE`。
 
-## 決定（2026-10-25，E03-D061–E03-D068）
+## 決定（2026-10-25，E03-D061–E03-D069）
 
 E03-06 把 mdpath、bookpath 接到 NATS 與 dispatcher（`crates/mftik-rt/src/md/`）。語意對齊 mftiko `sdk/plane.go`（`applyBindings`、`handleCommand`、`Live`、`bookSnapshot`、`bookHook`）、`sdk/sessctx.go` 的讀取、`sdk/internal/mdpath`、`sdk/internal/bookpath`（PROTOCOL §7.1、§9.2.9、§9.3.2、§9.3.5、§9.4.2–§9.4.4、§9.5）。
 
@@ -152,3 +152,14 @@ E03-06 把 mdpath、bookpath 接到 NATS 與 dispatcher（`crates/mftik-rt/src/m
 - E03-D066 測試：`src/md/tests.rs` 對真的 nats-server（不設認證）與同一進程裡的假 MD 對端，直接驅動 `Md` 與在自己執行緒上 `drive` 的 dispatcher：binding 先訂後換集合、退訂、訂閱失敗與 selector 不改版本；prehook 丟太舊的、壞 envelope 計入 `dropped`、壞 payload 不算；小 ring 丟最舊；book 由 `md.view` 同步、`not_synced` 退避 1 秒、斷號與 `reset` 重同步、沒有商品列時不要快照、`row_stored` 之後才要；讀取逾時、no responder、回覆錯誤、同步拒絕，回覆都在 dispatcher 執行緒。`tests/md.rs` 經 `mftik_rt::run` 端到端：Start 的 binding 在 gate 前訂好、`md.f` 經 prehook 到 OnTrade、Live 換集合回 `Applied`、selector 不回。nats-server 與假 shim 的 helper 從 `tests/session.rs` 移到 `tests/common/`。
 - E03-D067 本地簿不加鎖（Yi Te 於 #420 確認）：bookpath 只在 dispatcher 執行緒上動（E03-D064），與 Go 的 `bookpath` 一樣不需要鎖（E08-D003）。它放在 `DispatcherCell` 裡：第一個碰到它的執行緒就是擁有者，其他執行緒碰到就 panic；裡面是 `RefCell`，hook 拿著簿時又去改簿也是當場 panic，不會變成死結再被 watchdog 判成 HUNG。`Context::book` 回 `BookView`（Go 是 `BookView`），deref 成 `OrderBook`，借自這個 hook 的 Context，不能帶出 hook；簿只在 hook 之間改，所以拿著的時候不會變。
 - E03-D068 訂閱緩衝（Yi Te 於 #420 確認）：async-nats 每個訂閱預設最多緩衝 65536 則，超過就以 slow consumer 丟掉；Go 的 nats.go 沒有則數上限。連線設 `subscription_capacity` 為 2^20（`nats::SUBSCRIPTION_CAPACITY`）。訂閱的 task 收到就複製進 dispatcher，只有 IO 執行緒被餓住時才會積，該丟的地方是 32 MiB 的 MD ring 與 TD buffer（§9.5.2），不是 NATS client。tokio 的有界 channel 依需要配置，不會一開始就佔滿。
+- E03-D069 SYM 接到 MD（合併 #419 與 #420 時）：`Wiring::open_sym` 在打開 SYM 路徑之前設 `Sym::on_stored`，把 symclient 每次 `Stored` 的那一列交給 MD 路徑的 `Rows`（E03-D065），bookpath 因此拿到 `price_tick`，讀取拿到 ticker 與 venue。沒有這一步，本地簿不會同步。
+
+## 決定（2026-10-25，E03-D081–E03-D085）
+
+E03-08 SYM 接線。語意對齊 mftiko PROTOCOL §7.3、§9.4 第 8 條（E08-D004、E08-D022–E08-D026）與 `sdk/internal/symclient/nats.go`、`sdk/plane.go`、`sdk/sessctx.go`。協定邏輯仍在 `mftik-core::symclient`（E03-D041–E03-D045），這裡只做 IO。
+
+- E03-D081 等待時間（Yi Te 於 #411 確認）：`mftik_rt::sym::Sym` 執行 symclient 的 effect。帶 `resolve: Some(id)` 的 `Request`，等到該 resolve 所在 hook 的期限（Init／Start 的 `deadline_ms`），沒有期限才用 effect 的 5 秒；hook 的 context 被取消（Stop）時立刻結束。背景重拿（`resolve: None`）用 5 秒。resolve 的執行緒只等 `Resolved{id}`，回覆、通知、計時器都在 IO 執行緒處理，所以結果可以來自別的請求的回覆。逾時、取消、沒有 responder 的文字照 Go：`context deadline exceeded`、`context canceled`、`nats: no responders available for request`（與 E03-D013 相同），symclient 再加上 `symclient: request sym: ` 前綴。
+- E03-D082 訂閱與計時器：`Subscribe` 先 subscribe 再 flush（最多 5 秒，Go 的 `FlushTimeout`），flush 回來才 `on_subscribed`，之後的訊息依到達順序交給 `on_changed`。約 5 分鐘的比對是 timer 表的 `TimerKey::Sym`。
+- E03-D083 `Stored` 的通知：`Sym::on_stored(Arc<dyn Fn(u32, &Info)>)` 是給 MD 路徑（E03-06）的縫：每個 `Stored{uid}` 呼叫一次，帶當時存的列，E03-06 在裡面做 `bookpath.resolve(uid, info.price_tick())`（E03-D045）。session 中它在 IO 執行緒、依存入順序呼叫，不可阻塞、不可呼叫 resolve。再設一次會取代前一個。
+- E03-D084 重連：`nats::dial` 多收一個 `Reconnected` callback，掛在 async-nats 的 `event_callback`。async-nats 第一次連上也報 `Connected`，所以每條連線第一個 `Connected` 跳過，之後每個都呼叫 `Sym::on_reconnect`，對應 Go 的 `ReconnectHandler` 呼叫 `Client.Reconnect`。`Sym` 在 Init 連上 NATS 之後才 `open`，之前的重連不做事。
+- E03-D085 錯誤對應（Go `asSDK`）：`NotInInit`、`UnknownUid` 對應 `Error` 同名；`Closed`（還沒有連線，或 client 已關）是 `Stopping`，對應 Go `p.sym == nil` 的 `ErrStopping`；其他（`NotFound`、`InvalidTicker`、`Failed`）是 `Error::Other`，文字不變，所以策略回傳查不到的錯誤時 `INIT_FAILED` 的 reason 是 `symbol: no such instrument: not_found`。`info` 在 Init 之前回 `UnknownUid`（Go 是 `ErrStopping`；Init 之前沒有 hook，策略拿不到 Context，不影響行為）。

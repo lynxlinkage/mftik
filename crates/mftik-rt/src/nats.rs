@@ -13,12 +13,17 @@
 //! dial cut to what is left of the deadline, a dial waiting at most 1 s. A
 //! dial error is not passed on, because its text can quote the credentials;
 //! the log says `nats connect failed`.
+//!
+//! [`dial`] takes the [`Reconnected`] callback that Go's `nats.ReconnectHandler`
+//! is: every connect after the first calls it, and the SYM path passes it on to
+//! `symclient` (PROTOCOL §7.3, E03-D084).
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_nats::{AuthError, Client, ConnectOptions};
+use async_nats::{AuthError, Client, ConnectOptions, Event};
 use mftik_proto::wire::mftiko::stsctl::v1::NatsCredentials;
 
 use crate::call::CallCtx;
@@ -50,13 +55,35 @@ pub const SUBSCRIPTION_CAPACITY: usize = 1 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ended;
 
+/// Called on the IO thread each time the connection is back after a loss. It
+/// must not block.
+pub type Reconnected = Arc<dyn Fn() + Send + Sync>;
+
 /// One dial with the session's credentials. A seed that is not an nkey seed
-/// fails the dial, as `nats.UserJWTAndSeed` does.
-pub async fn dial(url: &str, creds: &NatsCredentials, timeout: Duration) -> Option<Client> {
+/// fails the dial, as `nats.UserJWTAndSeed` does. `on_reconnect` runs on each
+/// reconnect of the connection this dial makes, not on its first connect.
+pub async fn dial(
+    url: &str,
+    creds: &NatsCredentials,
+    timeout: Duration,
+    on_reconnect: Option<Reconnected>,
+) -> Option<Client> {
     let key_pair = Arc::new(nkeys::KeyPair::from_seed(&creds.seed).ok()?);
+    let connected_once = Arc::new(AtomicBool::new(false));
     let options = ConnectOptions::with_jwt(creds.user_jwt.clone(), move |nonce| {
         let key_pair = Arc::clone(&key_pair);
         async move { key_pair.sign(&nonce).map_err(AuthError::new) }
+    })
+    .event_callback(move |event| {
+        // async-nats reports the first connect as `Connected` too.
+        let reconnect =
+            matches!(event, Event::Connected) && connected_once.swap(true, Ordering::SeqCst);
+        let on_reconnect = on_reconnect.clone().filter(|_| reconnect);
+        async move {
+            if let Some(f) = on_reconnect {
+                f();
+            }
+        }
     })
     .name(CLIENT_NAME)
     .custom_inbox_prefix(&creds.inbox_prefix)

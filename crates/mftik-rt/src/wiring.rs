@@ -14,22 +14,27 @@
 //! - [`Wiring::listen_td`] and [`Wiring::recon`] are `tdpath.Listen` before
 //!   the gate and `tdpath.Recon` after OnStart. Unwired, they succeed and do
 //!   nothing. [`Wiring::unsubscribe_td`] is the dispatcher's `unsubscribe_td`.
-//! - [`Wiring::resolve`] and [`Wiring::info`] are `symclient`. Unwired, they
-//!   are [`Error::NotWired`].
+//! - [`Wiring::resolve`] and [`Wiring::info`] are `symclient`, driven by
+//!   [`crate::sym::Sym`] (E03-08). Init opens it on the session's connection
+//!   with [`Wiring::open_sym`]; the connection's reconnects reach it through
+//!   [`Wiring::sym_reconnect_hook`].
 //! - The order calls and reads are `tdpath`. Unwired, the calls are
 //!   [`Error::NotWired`] and the reads find nothing, which is what Go
 //!   returns before those paths exist.
 //! - The market data reads are `mdpath` and the book is `bookpath`, in
 //!   `crate::md`. Before Init they are [`Error::Stopping`] and no book, as
 //!   Go's `sessCtx` with a nil path.
-//! - [`Wiring::row_stored`] is where the SYM path (E03-08) reports each row
-//!   symclient stores (`Effect::Stored`). [`Wiring::watch_bindings_applied`]
-//!   is what Report (E03-09) watches (§9.2.4).
+//! - Every row symclient stores (`Effect::Stored`) reaches the MD path's
+//!   rows, which is where bookpath gets `price_tick` and the reads get the
+//!   ticker and venue (E03-D065): [`Wiring::open_sym`] sets that callback.
+//!   [`Wiring::watch_bindings_applied`] is what Report (E03-09) watches
+//!   (§9.2.4).
 
 use std::sync::{Arc, OnceLock};
 
 use mftik_core::mdpath::{ReadError, TapeQuery};
 use mftik_core::symbol::Info;
+use mftik_core::symclient;
 use mftik_proto::wire::mftiko::common::v1::Version;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::stsctl::v1::Bindings;
@@ -37,13 +42,17 @@ use mftik_proto::wire::mftiko::td::v1 as td;
 use tokio::sync::watch;
 
 use crate::call::CallCtx;
+use crate::clock::Clock;
 use crate::context::Error;
+use crate::io::Io;
 use crate::md::{self as mdwire, BookView, Md, Rows};
+use crate::nats::Reconnected;
 use crate::strategy::Order;
+use crate::sym::{Log, Sym};
+use crate::timers::Timers;
 
 /// Names in [`Error::NotWired`].
 pub const TD: &str = "td";
-pub const SYM: &str = "sym";
 
 /// Hands a read's result to its callback. The path pushes it on the TD
 /// buffer (E08-D048).
@@ -55,9 +64,34 @@ pub(crate) struct Wiring {
     md: OnceLock<Arc<Md>>,
     rows: Arc<Rows>,
     applied: watch::Sender<Option<Version>>,
+    pub(crate) sym: Sym,
 }
 
 impl Wiring {
+    /// Init has the session's connection: the SYM path starts using it.
+    /// Each row it stores is handed to the MD path's rows first, so bookpath
+    /// has the row's `price_tick` and the reads its ticker and venue
+    /// (E03-D065, E03-D069).
+    pub(crate) fn open_sym(
+        &self,
+        io: &Io,
+        clock: Clock,
+        timers: &Timers,
+        nats: &async_nats::Client,
+        log: Log,
+    ) {
+        let rows = Arc::clone(&self.rows);
+        self.sym
+            .on_stored(Arc::new(move |_uid: u32, info: &Info| rows.stored(info)));
+        self.sym.open(io, clock, timers, nats, log);
+    }
+
+    /// What the connection calls on each reconnect (Go's
+    /// `ReconnectHandler`, PROTOCOL §7.3).
+    pub(crate) fn sym_reconnect_hook(&self) -> Reconnected {
+        self.sym.reconnect_hook()
+    }
+
     /// Init opens the MD path once the dispatcher exists (Go `mdpath.Open`,
     /// `bookpath.Open`).
     pub(crate) fn open_md(&self, config: mdwire::Config) -> Result<(), String> {
@@ -75,13 +109,6 @@ impl Wiring {
             Some(md) => md.apply(bindings),
             None => Err("bindings".to_owned()),
         }
-    }
-
-    /// symclient stored `info` (E03-08 calls this for every
-    /// `symclient::Effect::Stored`). Never blocks; any thread.
-    #[allow(dead_code)] // E03-08 calls it.
-    pub(crate) fn row_stored(&self, info: &Info) {
-        self.rows.stored(info);
     }
 
     /// `Report.bindings_applied` (§9.2.4): `None` before the first snapshot
@@ -114,13 +141,11 @@ impl Wiring {
     /// `call` is the hook's context: the resolve waits until its deadline
     /// when it has one (E03-D041 on #411).
     pub(crate) fn resolve(&self, call: &CallCtx, ticker: &str) -> Result<Info, Error> {
-        let _ = (call, ticker);
-        Err(Error::NotWired(SYM))
+        self.sym.resolve(call, ticker).map_err(sym_error)
     }
 
     pub(crate) fn info(&self, uid: u32) -> Result<Info, Error> {
-        let _ = uid;
-        Err(Error::NotWired(SYM))
+        self.sym.info(uid).map_err(sym_error)
     }
 
     pub(crate) fn submit(&self, order: Order) -> Result<String, Error> {
@@ -216,9 +241,21 @@ impl Wiring {
             .fetch_open_interest(uid, deliver)
     }
 
-    /// The local books, locked for the hook that asks (see `Context::book`).
-    /// `None` before Init opens the MD path.
+    /// One synced local book for the hook that asks (see `Context::book`,
+    /// E03-D067). `None` before Init opens the MD path.
     pub(crate) fn book(&self, uid: u32) -> Option<BookView<'_>> {
         self.md.get()?.book(uid)
+    }
+}
+
+/// Go's `asSDK` for symclient errors. `Closed` (no connection yet, or the
+/// client closed) is `Stopping`, as Go's `p.sym == nil` (E03-D085). Other
+/// errors keep their text.
+fn sym_error(err: symclient::Error) -> Error {
+    match err {
+        symclient::Error::NotInInit => Error::NotInInit,
+        symclient::Error::UnknownUid => Error::UnknownUid,
+        symclient::Error::Closed => Error::Stopping,
+        other => Error::Other(other.to_string()),
     }
 }

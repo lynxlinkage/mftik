@@ -94,6 +94,7 @@ impl Peer {
                 &nats.url,
                 &nats.creds,
                 Duration::from_secs(5),
+                None,
             ))
             .expect("peer connects");
         Peer { rt, client }
