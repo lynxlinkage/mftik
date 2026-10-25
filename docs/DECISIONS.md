@@ -75,7 +75,6 @@ E02-02 本地簿。語意對齊 mftiko PROTOCOL §9.5（E08-D057–E08-D061）�
 - E02-D028 prehook：bookpath 不因年齡拒收 delta。`push_book` 已經繞過 stale prehook，而且這個年齡不計入 `QueueStat.dropped`。host 把 book callback 的 bytes 交給 `on_message`。壞 envelope 由 dispatcher 先拒絕並計入 `dropped`，那些 bytes 到不了 bookpath。
 - E02-D029 `close` 之後 `view` 是 `None`。之後的 delta、快照回覆、計時器都忽略。不送取消；在途 `md.view` 的回覆丟掉。
 
-
 ## 決定（2026-10-25，E03-D001–E03-D008）
 
 Yi Te 於 #385 確認。E03 的共同決定，全文也附在 #404–#413。
@@ -101,3 +100,11 @@ E03-02 C4 的 worker 端。語意對齊 mftiko `contract/wire/c4` 與 `sdk/run.g
 - E03-D025 順序：一次只套用一則 Live，依到達順序。Init 成功之前收到的 Live 在 `Done(INIT, ok)` 之前套用完，之後才到的排在 `Done(INIT, ok)` 之後。Init 進行中收到的 `Start` 或第二則 `Init` 只記第一則，Init 成功後才處理；同時已讀到 Stop 時 Stop 優先（Go 在這裡隨機），以 DONE 結束，不呼叫 OnStart 與 OnStop。Start 接下之後的 `Init`、`Start` 忽略（Go 不再讀）。`Exiting` 送出之後 Live、Relay 照樣交給 plane（Go 的讀取 goroutine 讀到 `Serve` 返回為止）。Init 成功之前的 Stop、EOF、SIGTERM 以 DONE、exit 0 結束；Live 先留著；Relay 丟掉；`Controller` 任何時候都記下；`Undeliverable` 忽略（stsctl 沒有 worker 對 agent 的請求，E09-D003）。這幾點照 Go，與 PROTOCOL §5.2 E08-D037 的字面不同，列在 E03-02 PR 的「需要決定」。
 - E03-D026 文字：reason 與 log 對齊 Go：`c4: start before init`、`c4: init after init`、`contract X`、`deadline`、`signal`（SIGTERM，或 reason 空的 Stop）、`shim closed`（EOF）；`CallError::Cancelled` 的文字是 `context canceled`。`Exiting` 的 reason 取第一則 Stop 或 EOF 的；SIGTERM 不記 reason，之後的 Stop 仍可設定。`init_carries_live` 時 `live_digest` 是空的也送 `Applied("")`，對齊 Go。
 - E03-D027 EOF 之後的 OnStop（Yi Te 於 #415 確認，與 Go 不同，照 PROTOCOL §9.5.5）：fd 3 讀到 EOF 之後，沒有人能從外面結束這個進程，所以 OnStop 一律有上限，超過就 exit 21、不送 `Stopped`，`Exiting` 不改。讀過 `Stop` 的用那則 grace 的剩餘（shim 在時由 shim 執行，shim 不在由 worker 自己執行）；沒有的用 `hook_timeout_s`。SIGTERM 或 `Stop` 之後 OnStop 已在跑、還沒有上限時才讀到 EOF，就在讀到時補上同一個上限。`hook_timeout_s` 為 0 時不限時。Go 的 c4 在 EOF 之後不限時。
+
+## 決定（2026-10-25，E03-D031–E03-D033）
+
+E03-03 `mftik-rt` 的 fd 3 傳輸與 Beat。語意對齊 mftiko `contract/wire/frame`、`sdk.Run` 的 `ctlFD`、`contract/wire/c4` 的 beat（PROTOCOL §5.1、§9.2.1、§9.2.3）。C4 協定邏輯不在這裡（E03-D001）。
+
+- E03-D031 控制 fd：`MFTIKO_CTL_FD` 未設或空字串是 3；其餘照 Go `strconv.Atoi` 的語法（十進位、可帶正負號）。負數或解析失敗回 `CtlFdError::Env`，exit 10，對齊 `sdk.Run`。超出 i32 也是 exit 10；Go 的 `int` 是 64 位元，這段 Go 會接受（kernel 再取低 32 位），只差在實際不會出現的值。拿到 fd 立刻 `fcntl(F_SETFD, FD_CLOEXEC)`；失敗（fd 沒開）回 `CtlFdError::Fd`，exit 1。Go 的 `syscall.CloseOnExec` 不回報錯誤、`os.NewFile` 不檢查，之後 `Hello` 寫不出去以 `ExitOther`（1）結束，所以兩邊都是 exit 1、不送任何 frame。`CtlFd::from_env` 是 `unsafe`：它取得 fd 的所有權，呼叫端保證只呼叫一次、process 裡沒有別人擁有這個 fd。
+- E03-D032 frame：4 bytes big-endian 長度加 body，body 上限 1 MiB。寫入超過上限回 `TooLarge`，什麼都不寫；讀到 header 宣告超過上限回 `TooLarge`，不讀 body。frame 之間結束是 `Ok(None)`，header 或 body 中途結束是 `Truncated`（帶位置與位元組數）。body 解不開是 `Decode`，該 frame 已讀完、串流仍對齊。讀執行緒照 Go c4 的 reader：任何錯誤（含 `Decode`）回報一次就停，EOF 與錯誤由呼叫端都當成 shim 不在（§9.2.7）。未知欄位跳過，未知的 `WorkerDown` 種類以 `msg: None` 交出（§9.3）。`FrameWriter` 一把鎖涵蓋 encode 與整則寫出（E03-D003）。fd 3 用 `send(MSG_NOSIGNAL)` 寫，shim 消失時是 `EPIPE` 而不是 `SIGPIPE`，與 Go 對非 stdout fd 的行為相同；fd 不是 socket 時退回 `write(2)`。`seal` 先 flush，之後的 frame 一律回 `Sealed`，給 E03-D005 在 `_exit` 前用，避免 Beat 在 flush 之後才開始一則、被 exit 截斷。
+- E03-D033 Beat：一條 std 執行緒，只等 fd 3 的寫鎖，不等其他執行緒。照 Go 的 ticker：啟動後一個週期（1 秒）送第一則，`seq` 從 1 起、每送一則加一，`progress` 留空。寫入卡住跨過週期時，錯過的週期合併成一則立刻送，之後回到原本的格點。`stop` 之後不再開始新的一則；寫入失敗（含 `Sealed`）就結束，不重試。呼叫端在 `Hello` 之後啟動它（Go 在 `Hello` 送出後才起 beat goroutine）。
