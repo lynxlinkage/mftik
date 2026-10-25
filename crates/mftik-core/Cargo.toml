@@ -9,3 +9,10 @@ repository.workspace = true
 
 [dependencies]
 mftik-proto = { path = "../mftik-proto" }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "book"
+harness = false
