@@ -39,6 +39,13 @@ pub const CONNECT_ATTEMPT: Duration = Duration::from_secs(1);
 /// The log line for a failed dial.
 pub const CONNECT_FAILED: &str = "nats connect failed";
 
+/// Messages one subscription may hold before async-nats drops them as a slow
+/// consumer. Go's nats.go buffers without a message limit; async-nats
+/// defaults to 65536. The subscription tasks copy each message straight into
+/// the dispatcher, so this only fills when the IO thread is starved, and
+/// drops belong in the 32 MiB MD ring and the TD buffer, not here (E03-D068).
+pub const SUBSCRIPTION_CAPACITY: usize = 1 << 20;
+
 /// The Init context ended before a dial succeeded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ended;
@@ -54,6 +61,7 @@ pub async fn dial(url: &str, creds: &NatsCredentials, timeout: Duration) -> Opti
     .name(CLIENT_NAME)
     .custom_inbox_prefix(&creds.inbox_prefix)
     .max_reconnects(None)
+    .subscription_capacity(SUBSCRIPTION_CAPACITY)
     .connection_timeout(timeout);
     // connection_timeout bounds the TCP and TLS steps; the timeout here
     // bounds the whole handshake as well.
