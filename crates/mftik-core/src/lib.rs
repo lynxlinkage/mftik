@@ -4,8 +4,9 @@
 //! through `mftik-py`. The order book is [`book`]. Local sync is [`bookpath`].
 //! The session dispatcher is [`dispatch`]. The TD path is [`tdpath`].
 //! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
-//! [`volume`].
+//! [`volume`]. The worker end of C4 is [`c4`].
 
+pub mod c4;
 pub mod dispatch;
 pub mod tdpath;
 
