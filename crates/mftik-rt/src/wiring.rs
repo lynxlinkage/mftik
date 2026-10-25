@@ -38,7 +38,7 @@ use tokio::sync::watch;
 
 use crate::call::CallCtx;
 use crate::context::Error;
-use crate::md::{self as mdwire, Books, Md, Rows};
+use crate::md::{self as mdwire, BookView, Md, Rows};
 use crate::strategy::Order;
 
 /// Names in [`Error::NotWired`].
@@ -218,7 +218,7 @@ impl Wiring {
 
     /// The local books, locked for the hook that asks (see `Context::book`).
     /// `None` before Init opens the MD path.
-    pub(crate) fn lock_books(&self) -> Option<Books> {
-        self.md.get().map(|md| md.lock_books())
+    pub(crate) fn book(&self, uid: u32) -> Option<BookView<'_>> {
+        self.md.get()?.book(uid)
     }
 }

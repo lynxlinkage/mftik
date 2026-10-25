@@ -151,10 +151,23 @@ impl Default for Opts {
     }
 }
 
+/// Best bid and ask of a synced book. On the dispatcher thread only (E03-D067).
 fn view_of(md: &Md, uid: u32) -> Option<(f64, f64)> {
-    let books = md.lock_books();
-    let ob = books.view(uid)?;
+    let ob = md.book(uid)?;
     Some((ob.price(ob.best_bid_tick()?), ob.price(ob.best_ask_tick()?)))
+}
+
+/// [`view_of`] from the test thread: asked on the dispatcher thread, as a TD
+/// entry, since the books belong to that thread.
+fn view_from_test(md: &Arc<Md>, uid: u32) -> Option<(f64, f64)> {
+    let (tx, rx) = mpsc::channel();
+    let on_dispatcher = Arc::clone(md);
+    md.disp
+        .push_td(move || {
+            let _ = tx.send(view_of(&on_dispatcher, uid));
+        })
+        .ok()?;
+    rx.recv_timeout(Duration::from_secs(5)).ok().flatten()
 }
 
 impl Rig {
@@ -655,7 +668,9 @@ fn the_book_syncs_from_md_view_and_resyncs_after_a_gap_and_a_reset() {
         _ => None,
     });
     let started = Instant::now();
-    rig.wait_for("synced", || view_of(&rig.md, UID) == Some((100.5, 101.0)));
+    rig.wait_for("synced", || {
+        view_from_test(&rig.md, UID) == Some((100.5, 101.0))
+    });
     assert!(started.elapsed() >= Duration::from_millis(900));
     assert_eq!(requests(), 2);
     assert_eq!(
@@ -674,7 +689,7 @@ fn the_book_syncs_from_md_view_and_resyncs_after_a_gap_and_a_reset() {
     lock(&answers).push_back(book_reply(UID, 20, &[(99.0, 1.0)], &[(103.0, 1.0)]));
     rig.publish(BOOK_SUBJECT, delta(UID, 14, &[(1.0, 1.0)], &[], false));
     rig.wait_for("resynced", || {
-        requests() == 3 && view_of(&rig.md, UID) == Some((99.0, 103.0))
+        requests() == 3 && view_from_test(&rig.md, UID) == Some((99.0, 103.0))
     });
     rig.publish(BOOK_SUBJECT, delta(UID, 21, &[(99.5, 1.0)], &[], false));
     let ((seq, view), skipped) = rig.until(book_seq);
@@ -685,7 +700,7 @@ fn the_book_syncs_from_md_view_and_resyncs_after_a_gap_and_a_reset() {
     lock(&answers).push_back(book_reply(UID, 30, &[(98.0, 1.0)], &[(104.0, 1.0)]));
     rig.publish(BOOK_SUBJECT, delta(UID, 22, &[(1.0, 1.0)], &[], true));
     rig.wait_for("reset", || {
-        requests() == 4 && view_of(&rig.md, UID) == Some((98.0, 104.0))
+        requests() == 4 && view_from_test(&rig.md, UID) == Some((98.0, 104.0))
     });
     rig.publish(
         BOOK_SUBJECT,
@@ -734,7 +749,7 @@ fn the_book_waits_for_a_stored_row_and_a_failed_view_backs_off() {
         _ => None,
     });
     rig.wait_for("synced after the backoff", || {
-        view_of(&rig.md, uid) == Some((10.0, 11.0))
+        view_from_test(&rig.md, uid) == Some((10.0, 11.0))
     });
     assert_eq!(lock(&asked).len(), 2);
     rig.publish(subject, delta(uid, 4, &[(10.01, 1.0)], &[], false));

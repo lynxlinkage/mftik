@@ -26,14 +26,16 @@
 //!   [`Rows::stored`] for every `symclient::Effect::Stored`; this path never
 //!   asks SYM (E08-D023, E08-D059).
 
+use std::cell::Ref;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use mftik_core::book::Level;
+use mftik_core::book::{Level, OrderBook};
 use mftik_core::bookpath::{self, Snapshot, SnapshotReply, TimerToken};
 use mftik_core::dispatch::Dispatcher;
 use mftik_core::mdpath::{self, Apply, Delivery, Reply, Request, RequestError, SubId, TapeQuery};
@@ -41,10 +43,11 @@ use mftik_core::symbol::Info;
 use mftik_proto::wire::mftiko::common::v1::Version;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::stsctl::v1::Bindings;
-use tokio::sync::{OwnedMutexGuard, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 use crate::clock::Clock;
 use crate::context::Error;
+use crate::dcell::DispatcherCell;
 use crate::io::Io;
 use crate::timers::{TimerKey, Timers};
 use crate::wiring::Deliver;
@@ -69,10 +72,6 @@ pub(crate) type BookSink = Arc<dyn Fn(bookpath::Update) + Send + Sync>;
 
 /// One log line (Go `note`).
 pub(crate) type Log = Arc<dyn Fn(&str) + Send + Sync>;
-
-/// The local books, locked by a hook's Context for the rest of the hook
-/// (see `Context::book`).
-pub(crate) type Books = OwnedMutexGuard<bookpath::Path>;
 
 /// What [`Md::open`] needs. Init makes it once the dispatcher exists.
 pub(crate) struct Config {
@@ -148,6 +147,28 @@ impl Rows {
     }
 }
 
+/// A synced local book, borrowed for the rest of a hook (`Context::book`).
+///
+/// Go's `Book` returns a `BookView`; this is the same idea. It derefs to
+/// [`OrderBook`]. Holding it past the hook is not possible (it borrows the
+/// Context), and the books do not change while it is alive: they change only
+/// between hooks, on the same thread (E03-D067).
+pub struct BookView<'a>(Ref<'a, OrderBook>);
+
+impl Deref for BookView<'_> {
+    type Target = OrderBook;
+
+    fn deref(&self) -> &OrderBook {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BookView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BookView").finish_non_exhaustive()
+    }
+}
+
 /// One session's MD path. See the module docs.
 pub(crate) struct Md {
     io: Io,
@@ -164,9 +185,10 @@ pub(crate) struct Md {
     applying: Mutex<()>,
     /// The live NATS subscriptions; sending stops one.
     subs: Mutex<HashMap<SubId, oneshot::Sender<()>>>,
-    /// Locked on the dispatcher thread only: the book callback, the TD
-    /// entries of snapshot replies and timers, and a hook's Context.
-    books: Arc<tokio::sync::Mutex<bookpath::Path>>,
+    /// Touched on the dispatcher thread only, without a lock: the book
+    /// callback, the TD entries of snapshot replies and timers, and a hook's
+    /// Context (E03-D064, E03-D067).
+    books: DispatcherCell<bookpath::Path>,
     me: Weak<Md>,
 }
 
@@ -206,7 +228,7 @@ impl Md {
             path: Mutex::new(path),
             applying: Mutex::new(()),
             subs: Mutex::default(),
-            books: Arc::new(tokio::sync::Mutex::new(books)),
+            books: DispatcherCell::new(books),
             me: me.clone(),
         }))
     }
@@ -319,13 +341,17 @@ impl Md {
         self.perform_book(effects);
     }
 
-    /// The local books for a hook's Context. On the dispatcher thread only.
-    pub(crate) fn lock_books(&self) -> Books {
-        Arc::clone(&self.books).blocking_lock_owned()
+    /// One synced local book for a hook (E08-D057, E08-D060). On the
+    /// dispatcher thread only; the view must be dropped before the books
+    /// change, which is between hooks (E03-D067).
+    pub(crate) fn book(&self, uid: u32) -> Option<BookView<'_>> {
+        Ref::filter_map(self.books.borrow(), |books| books.view(uid))
+            .ok()
+            .map(BookView)
     }
 
     fn with_books<R>(&self, f: impl FnOnce(&mut bookpath::Path, i64) -> R) -> R {
-        let mut books = self.books.blocking_lock();
+        let mut books = self.books.borrow_mut();
         for (uid, tick) in self.rows.take_ticks() {
             books.resolve(uid, tick);
         }

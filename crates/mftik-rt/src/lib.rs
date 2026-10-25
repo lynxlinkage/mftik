@@ -28,6 +28,7 @@ pub mod call;
 pub mod clock;
 mod context;
 pub mod ctl;
+mod dcell;
 pub mod exit;
 pub mod frame;
 pub mod io;
@@ -42,6 +43,7 @@ pub mod volume;
 mod wiring;
 
 pub use context::{Context, Error, Poster};
+pub use md::BookView;
 pub use mftik_core::book::OrderBook;
 pub use mftik_core::mdpath::{ReadError, TapeQuery};
 pub use mftik_core::symbol::Info;
