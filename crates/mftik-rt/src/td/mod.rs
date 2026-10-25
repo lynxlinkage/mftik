@@ -227,10 +227,11 @@ impl TdPath {
                     .map_err(|err| err.to_string())?;
                 subs.push((api_id, sub));
             }
-            match tokio::time::timeout(FLUSH_TIMEOUT, nats.flush()).await {
-                Ok(Ok(())) => Ok(subs),
-                Ok(Err(err)) => Err(err.to_string()),
-                Err(_) => Err("nats: flush timeout".to_owned()),
+            // A round trip, not a socket flush: the SUBs are on the server
+            // before the gate (E03-D062, E03-D076).
+            match crate::nats::barrier(&nats, FLUSH_TIMEOUT).await {
+                Ok(()) => Ok(subs),
+                Err(err) => Err(format!("nats: flush: {err}")),
             }
         });
         let subs = match subscribed {

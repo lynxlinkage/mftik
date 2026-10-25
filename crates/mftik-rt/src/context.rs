@@ -14,22 +14,22 @@
 //! where Go's take a Context and reach the strategy through the closure.
 //! They run on the dispatcher, one at a time, like any hook.
 //!
-//! The order calls and reads, the market data reads, the book, and SYM are
-//! wired by E03-06–E03-08; until then they return [`Error::NotWired`] or find
-//! nothing (see `wiring`).
+//! The order calls and reads, and SYM, are wired by E03-07 and E03-08; until
+//! then they return [`Error::NotWired`] or find nothing (see `wiring`). The
+//! market data reads and the book are the MD path's (E03-06).
 
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mftik_core::book::OrderBook;
 use mftik_core::mdpath::{ReadError, TapeQuery};
 use mftik_core::symbol::Info;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::td::v1 as td;
 
 use crate::call::CallCtx;
+use crate::md::BookView;
 use crate::plane::Plane;
 use crate::strategy::{Order, Strategy};
 
@@ -50,8 +50,8 @@ pub enum Error {
     NoFeed,
     /// The session is stopping.
     Stopping,
-    /// The path behind this call is not in the runtime yet: `md` (E03-06),
-    /// `td` (E03-07), or `sym` (E03-08).
+    /// The path behind this call is not in the runtime yet: `td` (E03-07)
+    /// or `sym` (E03-08).
     NotWired(&'static str),
     /// Any other failure, with its text.
     Other(String),
@@ -172,9 +172,11 @@ impl<S: Strategy> Context<S> {
     }
 
     /// The local book of an instrument once md.view's snapshot is in place
-    /// (E08-D057). It is borrowed from this hook's Context, so it cannot
-    /// outlive the hook (E08-D003). `None` while it is not synced (E08-D060).
-    pub fn book(&self, uid: u32) -> Option<&OrderBook> {
+    /// (E08-D057), as a view that derefs to [`OrderBook`](crate::OrderBook). It is borrowed
+    /// from this hook's Context, so it cannot outlive the hook (E08-D003),
+    /// and the books change only between hooks, so it does not change under
+    /// you (E03-D067). `None` while it is not synced (E08-D060).
+    pub fn book(&self, uid: u32) -> Option<BookView<'_>> {
         self.plane.wiring.book(uid)
     }
 

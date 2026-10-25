@@ -14,33 +14,39 @@
 //!   table on the IO thread. [`io`]: the tokio `current_thread` runtime.
 //! - [`nats`]: the connection with the session's credentials, retried inside
 //!   `deadline_ms` (E03-D006, E08-D050). [`call`]: a plane call's context.
+//! - [`sym`]: the SYM path, `symclient` over NATS (E03-08).
 //! - [`volume`]: the strategy's atomic volume writes and read order
 //!   (§9.1.4).
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the
 //!   Beat thread (E03-D031–E03-D033).
 //!
-//! The MD, TD, and SYM paths are wired by E03-06–E03-08 and Report by E03-09;
-//! the plane's calls into them are in `wiring`. The TD path is `td`.
+//! The MD path is in `md` (E03-06), the TD path in `td` (E03-07), and the
+//! SYM path in `sym` (E03-08); Report is E03-09. The plane's calls into the
+//! paths are in `wiring`.
 
 pub mod beat;
 pub mod call;
 pub mod clock;
 mod context;
 pub mod ctl;
+mod dcell;
 pub mod exit;
 pub mod frame;
 pub mod io;
+mod md;
 pub mod nats;
 mod plane;
 pub mod reader;
 mod session;
 mod strategy;
+pub mod sym;
 mod td;
 pub mod timers;
 pub mod volume;
 mod wiring;
 
 pub use context::{Context, Error, Poster};
+pub use md::BookView;
 pub use mftik_core::book::OrderBook;
 pub use mftik_core::mdpath::{ReadError, TapeQuery};
 pub use mftik_core::symbol::Info;
