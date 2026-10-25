@@ -251,6 +251,27 @@ mod tests {
     }
 
     #[test]
+    fn layout_word_one_second_after_the_epoch() {
+        // ver 1, algo 1, 1000 ms after the epoch, seq 0.
+        let id = encode(1, EPOCH_MS + 1000, 0).unwrap();
+        assert_eq!(id, "1154047404514713600");
+        assert_eq!(algo_of(&id), Some(1));
+        assert_eq!(algo_of(&encode(2, EPOCH_MS + 1000, 0).unwrap()), Some(2));
+        assert_eq!(
+            algo_of(&encode(ALGO_MAX, EPOCH_MS + (TS_SPAN - 1), SEQ_MAX).unwrap()),
+            Some(ALGO_MAX)
+        );
+        for raw in ["manual", "", "0", "01", "12x"] {
+            assert_eq!(algo_of(raw), None, "{raw}");
+        }
+        assert!(encode(0, EPOCH_MS, 0).is_err());
+        assert!(encode(ALGO_MAX + 1, EPOCH_MS, 0).is_err());
+        assert!(encode(1, EPOCH_MS - 1, 0).is_err());
+        assert!(encode(1, EPOCH_MS + TS_SPAN, 0).is_err());
+        assert!(encode(1, EPOCH_MS, SEQ_MAX + 1).is_err());
+    }
+
+    #[test]
     fn encode_rejects_a_field_that_does_not_fit() {
         let cases = [
             (0, EPOCH_MS, 0),

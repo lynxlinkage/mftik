@@ -1,7 +1,11 @@
 //! Pure Rust STS core.
 //!
 //! Algorithms land here and do not do IO. The Python SDK calls this crate
-//! through `mftik-py`.
+//! through `mftik-py`. The session dispatcher is [`dispatch`]. The TD path
+//! is [`tdpath`].
+
+pub mod dispatch;
+pub mod tdpath;
 
 pub mod cloid;
 pub mod cloidgen;
