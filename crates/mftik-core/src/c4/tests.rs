@@ -780,13 +780,20 @@ fn shutdown_first_halt_names_the_reason() {
 
 #[test]
 fn shutdown_eof_is_a_graceful_stop() {
-    // PROTOCOL §4.5 S2. Like Go, EOF is a stop with no grace and no hook budget.
+    // PROTOCOL §4.5 S2: EOF is a graceful stop. Unlike Go, OnStop takes the hook budget,
+    // because nothing outside the worker can end it any more (§9.5.5, E03-D027).
     let mut m = running(HOOK);
     assert_eq!(m.on_eof(NOW), vec![Effect::StopBeat, Effect::Cancel]);
-    assert_eq!(
-        m.run_returned(NOW, RunResult::Returned),
-        vec![exiting(Outcome::Done, REASON_SHIM_CLOSED), on_stop(None)]
-    );
+    let end = NOW + 2 * SEC;
+    let fx = m.run_returned(end, RunResult::Returned);
+    assert_eq!(fx.len(), 3);
+    assert_eq!(fx[0], exiting(Outcome::Done, REASON_SHIM_CLOSED));
+    let token = arm(TimerKind::OnStopBudget, HOOK, end + SEC, &fx[1]);
+    assert_eq!(fx[2], on_stop(Some(end + SEC)));
+    // Past the budget: exit 21, no Stopped, Exiting unchanged.
+    assert_eq!(m.on_timer(end + SEC, token), vec![Effect::Exit(EXIT_HUNG)]);
+    assert!(m.on_stop_returned(end + 30 * SEC, Ok(())).is_empty());
+    assert_eq!(m.exit_code(), Some(EXIT_HUNG));
 
     let mut m = machine();
     assert_eq!(
@@ -797,6 +804,94 @@ fn shutdown_eof_is_a_graceful_stop() {
             stopped(false),
             Effect::Exit(EXIT_DONE),
         ]
+    );
+}
+
+#[test]
+fn shutdown_eof_on_stop_within_budget() {
+    let mut m = running(HOOK);
+    m.on_eof(NOW);
+    let fx = m.run_returned(NOW, RunResult::Returned);
+    let token = arm(TimerKind::OnStopBudget, HOOK, NOW + SEC, &fx[1]);
+    assert_eq!(
+        m.on_stop_returned(NOW + SEC / 2, Ok(())),
+        vec![stopped(true), Effect::Exit(EXIT_DONE)]
+    );
+    assert!(m.on_timer(NOW + SEC, token).is_empty());
+
+    // OnStop that notices the budget ran out: exit 21.
+    let mut m = running(HOOK);
+    m.on_eof(NOW);
+    m.run_returned(NOW, RunResult::Returned);
+    assert_eq!(
+        m.on_stop_returned(NOW + SEC, Err(CallError::Cancelled)),
+        vec![Effect::Exit(EXIT_HUNG)]
+    );
+}
+
+#[test]
+fn shutdown_eof_after_sigterm_bounds_the_running_on_stop() {
+    // SIGTERM has no grace, so OnStop starts unbounded; EOF while it runs arms the budget.
+    let mut m = running(HOOK);
+    m.on_sigterm(NOW);
+    assert_eq!(
+        m.run_returned(NOW, RunResult::Returned),
+        vec![exiting(Outcome::Done, REASON_SIGNAL), on_stop(None)]
+    );
+    let gone = NOW + 2 * SEC;
+    let fx = m.on_eof(gone);
+    assert_eq!(fx.len(), 1);
+    let token = arm(TimerKind::OnStopBudget, HOOK, gone + SEC, &fx[0]);
+    assert_eq!(m.on_timer(gone + SEC, token), vec![Effect::Exit(EXIT_HUNG)]);
+    assert!(m.on_eof(gone + 2 * SEC).is_empty());
+}
+
+#[test]
+fn shutdown_eof_after_stop_keeps_the_grace() {
+    // A Stop was read: grace stays OnStop's deadline. Once the shim is gone, the worker
+    // ends the process when that grace runs out, as the shim would have.
+    let mut m = running(HOOK);
+    m.on_down(NOW, stop_msg("bye", 5000));
+    assert_eq!(
+        m.run_returned(NOW, RunResult::Returned),
+        vec![exiting(Outcome::Done, "bye"), on_stop(Some(NOW + 5 * SEC))]
+    );
+    let fx = m.on_eof(NOW + SEC);
+    assert_eq!(fx.len(), 1);
+    let token = arm(
+        TimerKind::OnStopBudget,
+        Duration::from_secs(4),
+        NOW + 5 * SEC,
+        &fx[0],
+    );
+    assert_eq!(
+        m.on_timer(NOW + 5 * SEC, token),
+        vec![Effect::Exit(EXIT_HUNG)]
+    );
+
+    // EOF before OnStop starts: the budget is armed with OnStop, at the end of grace.
+    let mut m = running(HOOK);
+    m.on_down(NOW, stop_msg("bye", 5000));
+    assert!(m.on_eof(NOW).is_empty());
+    let fx = m.run_returned(NOW + SEC, RunResult::Returned);
+    assert_eq!(fx.len(), 3);
+    assert_eq!(fx[0], exiting(Outcome::Done, "bye"));
+    arm(
+        TimerKind::OnStopBudget,
+        Duration::from_secs(4),
+        NOW + 5 * SEC,
+        &fx[1],
+    );
+    assert_eq!(fx[2], on_stop(Some(NOW + 5 * SEC)));
+}
+
+#[test]
+fn shutdown_eof_with_zero_hook_timeout_is_no_limit() {
+    let mut m = running(Duration::ZERO);
+    m.on_eof(NOW);
+    assert_eq!(
+        m.run_returned(NOW, RunResult::Returned),
+        vec![exiting(Outcome::Done, REASON_SHIM_CLOSED), on_stop(None)]
     );
 }
 

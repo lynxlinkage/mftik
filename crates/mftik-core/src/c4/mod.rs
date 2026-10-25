@@ -54,6 +54,10 @@
 //! before `Init` succeeds is held, a `Relay` before then is dropped, and
 //! `Controller` is recorded at any time. PROTOCOL §5.2 words E08-D037 more
 //! broadly; see E03-D025.
+//!
+//! Unlike Go, and as PROTOCOL §9.5.5 says, OnStop after fd 3 EOF is bounded:
+//! by the rest of a `Stop`'s grace if one was read, otherwise by
+//! `hook_timeout_s`, past which the worker exits 21 (E03-D027).
 
 #[cfg(test)]
 mod tests;
@@ -324,6 +328,8 @@ pub struct Machine {
     stop_reason: Option<String>,
     /// When the first `Stop` was read, and its `grace_ms` (Go `noteStop`).
     grace: Option<(i64, u32)>,
+    /// fd 3 reached EOF. Nothing outside the worker can end it any more (E03-D027).
+    shim_gone: bool,
     controller: Option<Controller>,
 
     armed: Option<TimerToken>,
@@ -348,6 +354,7 @@ impl Machine {
             stopping: false,
             stop_reason: None,
             grace: None,
+            shim_gone: false,
             controller: None,
             armed: None,
             next_timer: 0,
@@ -430,8 +437,13 @@ impl Machine {
         out
     }
 
-    /// fd 3 reached EOF: the shim is gone, stop gracefully (PROTOCOL §4.5 S2, §9.2.7). Like a
-    /// `Stop` without grace, so OnStop has no deadline.
+    /// fd 3 reached EOF: the shim is gone, stop gracefully (PROTOCOL §4.5 S2, §9.2.7).
+    ///
+    /// With the shim gone nothing else can end the process, so from here on OnStop always has
+    /// a budget past which the worker exits 21 without `Stopped`: the rest of a `Stop`'s grace
+    /// if one was read, otherwise `hook_timeout_s` (PROTOCOL §9.5.5, E03-D027). An OnStop that
+    /// is already running without a budget (after SIGTERM, or a `Stop`) gets one now. Go leaves
+    /// OnStop unbounded here.
     pub fn on_eof(&mut self, now_ns: i64) -> Vec<Effect> {
         let mut out = Vec::new();
         if !self.begin(now_ns) {
@@ -440,7 +452,20 @@ impl Machine {
         if self.stop_reason.is_none() {
             self.stop_reason = Some(REASON_SHIM_CLOSED.to_owned());
         }
+        self.shim_gone = true;
         self.halt(&mut out);
+        if let Phase::OnStop {
+            code,
+            budget_ns: None,
+        } = self.phase
+            && let (_, Some(at)) = self.stop_limit(false)
+        {
+            out.push(self.arm(TimerKind::OnStopBudget, at));
+            self.phase = Phase::OnStop {
+                code,
+                budget_ns: Some(at),
+            };
+        }
         out
     }
 
@@ -823,8 +848,8 @@ impl Machine {
     }
 
     /// `Exiting`, then OnStop when `on_stop`, then `Stopped`, then the exit (PROTOCOL §5.3).
-    /// `self_end` is the plane ending on its own: the only ending whose OnStop takes the hook
-    /// budget (E08-D009).
+    /// `self_end` is the plane ending on its own. That ending, and any ending after fd 3
+    /// reached EOF, gives OnStop the hook budget (E08-D009, E03-D027).
     fn finish(
         &mut self,
         outcome: Outcome,
@@ -859,15 +884,16 @@ impl Machine {
 
     /// OnStop's deadline, and the budget past which exit 21 does not wait for it.
     ///
-    /// A `Stop` was read: the rest of its grace, waited for; the shim ends the process when
-    /// grace runs out. The plane ended on its own: the hook budget, not waited for. Otherwise
-    /// (SIGTERM, EOF, a Start failure) there is no deadline (E08-D009).
+    /// A `Stop` was read: the rest of its grace, waited for while the shim is there to end the
+    /// process when grace runs out; once the shim is gone, the worker ends it at the same
+    /// point. The plane ended on its own, or the shim is gone: the hook budget, not waited
+    /// for. Otherwise (SIGTERM, a Start failure) there is no deadline (E08-D009, E03-D027).
     fn stop_limit(&self, self_end: bool) -> (Option<i64>, Option<i64>) {
         if let Some((read_ns, grace_ms)) = self.grace {
             let deadline = read_ns.saturating_add(i64::from(grace_ms).saturating_mul(NS_PER_MS));
-            return (Some(deadline), None);
+            return (Some(deadline), self.shim_gone.then_some(deadline));
         }
-        if self_end && self.hook_timeout_ns > 0 {
+        if (self_end || self.shim_gone) && self.hook_timeout_ns > 0 {
             let deadline = self.now_ns.saturating_add(self.hook_timeout_ns);
             return (Some(deadline), Some(deadline));
         }
