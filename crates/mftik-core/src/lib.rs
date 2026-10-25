@@ -4,7 +4,8 @@
 //! through `mftik-py`. The order book is [`book`]. Local sync is [`bookpath`].
 //! The session dispatcher is [`dispatch`]. The TD path is [`tdpath`].
 //! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
-//! [`volume`].
+//! [`volume`]. Instrument rows are [`symbol`], and the session SYM client is
+//! [`symclient`].
 
 pub mod dispatch;
 pub mod tdpath;
@@ -13,6 +14,8 @@ pub mod book;
 pub mod bookpath;
 pub mod cloid;
 pub mod cloidgen;
+pub mod symbol;
+pub mod symclient;
 pub mod volume;
 
 /// Crate name, so other workspace crates can link this shell.
