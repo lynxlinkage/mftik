@@ -1440,3 +1440,107 @@ fn hooks_on_the_way_to_a_normal_stop_share_one_thread() {
     assert!(ids.iter().all(|id| *id == ids[0]));
     assert_ne!(ids[0], thread::current().id());
 }
+
+/// `drive` on a test thread, as `run` would be on the caller's thread (E03-D003).
+fn drive_on(dispatcher: &Dispatcher) -> thread::JoinHandle<ThreadId> {
+    let driving = dispatcher.clone();
+    thread::Builder::new()
+        .name("test-drive".into())
+        .spawn(move || {
+            driving.drive();
+            thread::current().id()
+        })
+        .expect("spawn drive")
+}
+
+fn wait_run_on(dispatcher: &Dispatcher) -> Receiver<RunEnd> {
+    let (tx, rx) = mpsc::channel();
+    let waiting = dispatcher.clone();
+    thread::spawn(move || {
+        let _ = tx.send(waiting.wait_run());
+    });
+    rx
+}
+
+#[test]
+fn drive_runs_hooks_drain_and_on_stop_on_the_driving_thread() {
+    let ids = Arc::new(Mutex::new(Vec::new()));
+    let ids_stop = Arc::clone(&ids);
+    let dispatcher = build(|config| {
+        config.on_stop = Some(Box::new(move |_| {
+            lock(&ids_stop).push(thread::current().id());
+            Ok(())
+        }));
+    });
+    // The waiter starts first: wait_run does not start the loop.
+    let rx = wait_run_on(&dispatcher);
+    assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    let ids_hook = Arc::clone(&ids);
+    let dispatcher_hook = dispatcher.clone();
+    dispatcher
+        .push_td(move || {
+            lock(&ids_hook).push(thread::current().id());
+            dispatcher_hook.fail("bye");
+        })
+        .expect("hook");
+    let ids_td = Arc::clone(&ids);
+    dispatcher
+        .push_td(move || lock(&ids_td).push(thread::current().id()))
+        .expect("td");
+    let driver = drive_on(&dispatcher);
+    assert_eq!(
+        recv_end(&rx),
+        RunEnd::Failed {
+            reason: "bye".into()
+        }
+    );
+    assert_eq!(dispatcher.run(), recv_end(&wait_run_on(&dispatcher)));
+    let names = comm_names();
+    assert!(
+        names
+            .iter()
+            .any(|name| name == &dispatcher.shared.watch_name),
+        "watchdog thread missing from {names:?}"
+    );
+    assert!(stop(&dispatcher).is_ok());
+    let driver_id = driver.join().expect("drive thread");
+    let ids = lock(&ids).clone();
+    assert_eq!(ids, vec![driver_id; 3]);
+}
+
+#[test]
+fn drive_publishes_hung_while_the_hook_holds_the_driving_thread() {
+    let (gate, _opener) = Gate::pair();
+    let gate_hold = Arc::clone(&gate);
+    let strategy_stopped = Arc::new(AtomicBool::new(false));
+    let strategy_hook = Arc::clone(&strategy_stopped);
+    let dispatcher = build(|config| {
+        config.hook_timeout = Duration::from_nanos(1000);
+        config.on_stop = Some(Box::new(move |_| {
+            strategy_hook.store(true, Ordering::Relaxed);
+            Ok(())
+        }));
+    });
+    dispatcher.push_td(move || gate_hold.hold()).expect("hold");
+    let driver = drive_on(&dispatcher);
+    let rx = wait_run_on(&dispatcher);
+    gate.wait_entered();
+    dispatcher.set_now_ns(T0 + 1000);
+    assert_eq!(recv_end(&rx), RunEnd::Hung);
+    assert!(!driver.is_finished());
+    gate.open();
+    driver.join().expect("drive thread");
+    assert_eq!(dispatcher.on_stop(&StopRequest::new(None)), Ok(()));
+    assert!(!strategy_stopped.load(Ordering::Relaxed));
+}
+
+#[test]
+fn drive_after_run_returns_at_once() {
+    let dispatcher = build(|_| {});
+    let rx = start(&dispatcher);
+    dispatcher.exit();
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    // The loop is already started; drive does not start a second one.
+    dispatcher.drive();
+    assert!(stop(&dispatcher).is_ok());
+}

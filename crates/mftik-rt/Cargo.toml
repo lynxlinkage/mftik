@@ -1,6 +1,6 @@
 [package]
 name = "mftik-rt"
-description = "Session worker IO: C4 frames on fd 3 and the Beat thread."
+description = "Session worker runtime: fd 3, C4, the dispatcher, NATS, and timers."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,16 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-nats = { version = "0.50.0", default-features = false, features = ["nkeys", "ring"] }
 libc = "0.2.191"
+mftik-core = { path = "../mftik-core" }
 mftik-proto = { path = "../mftik-proto" }
+nkeys = "0.4.5"
 prost = "0.14.4"
+signal-hook = "0.4.5"
+tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
 
 [dev-dependencies]
+base64 = "0.23.1"
+tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros", "test-util"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
