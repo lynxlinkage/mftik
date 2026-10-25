@@ -20,7 +20,7 @@
 //!   Beat thread (E03-D031–E03-D033).
 //!
 //! The MD, TD, and SYM paths are wired by E03-06–E03-08 and Report by E03-09;
-//! the plane's calls into them are in `wiring`.
+//! the plane's calls into them are in `wiring`. The TD path is `td`.
 
 pub mod beat;
 pub mod call;
@@ -35,6 +35,7 @@ mod plane;
 pub mod reader;
 mod session;
 mod strategy;
+mod td;
 pub mod timers;
 pub mod volume;
 mod wiring;

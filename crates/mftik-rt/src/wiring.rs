@@ -11,15 +11,19 @@
 //! - [`Wiring::apply_bindings`] is `mdpath.Apply` for `StartPayload`, `Live`,
 //!   and `Command.bindings`. Unwired, a decoded snapshot is accepted and
 //!   nothing is subscribed.
-//! - [`Wiring::listen_td`] and [`Wiring::recon`] are `tdpath.Listen` before
-//!   the gate and `tdpath.Recon` after OnStart. Unwired, they succeed and do
-//!   nothing. [`Wiring::unsubscribe_td`] is the dispatcher's `unsubscribe_td`.
+//! - [`Wiring::open_td`] is `tdpath.Open` in Init. [`Wiring::listen_td`] and
+//!   [`Wiring::recon`] are `tdpath.Listen` before the gate and `tdpath.Recon`
+//!   after OnStart. [`Wiring::unsubscribe_td`] is the dispatcher's
+//!   `unsubscribe_td`. The TD path is `crate::td` (E03-07).
 //! - [`Wiring::resolve`] and [`Wiring::info`] are `symclient`. Unwired, they
 //!   are [`Error::NotWired`].
-//! - The order calls and reads are `tdpath`, the market data reads are
-//!   `mdpath`, and the book is `bookpath`. Unwired, the calls are
-//!   [`Error::NotWired`] and the reads find nothing, which is what Go
-//!   returns before those paths exist.
+//! - The order calls and reads are `tdpath`: before Init opens it they are
+//!   [`Error::Stopping`] and find nothing, as Go's with a nil path. The
+//!   market data reads are `mdpath` and the book is `bookpath`. Unwired, the
+//!   calls are [`Error::NotWired`] and the reads find nothing, which is what
+//!   Go returns before those paths exist.
+
+use std::sync::OnceLock;
 
 use mftik_core::book::OrderBook;
 use mftik_core::mdpath::{ReadError, TapeQuery};
@@ -31,10 +35,10 @@ use mftik_proto::wire::mftiko::td::v1 as td;
 use crate::call::CallCtx;
 use crate::context::Error;
 use crate::strategy::Order;
+use crate::td::{self as tdwire, TdPath};
 
 /// Names in [`Error::NotWired`].
 pub const MD: &str = "md";
-pub const TD: &str = "td";
 pub const SYM: &str = "sym";
 
 /// Hands a read's result to its callback. The path pushes it on the TD
@@ -43,7 +47,9 @@ pub(crate) type Deliver<T> = Box<dyn FnOnce(Result<T, ReadError>) + Send>;
 
 /// The paths of one session. See the module docs.
 #[derive(Debug, Default)]
-pub(crate) struct Wiring {}
+pub(crate) struct Wiring {
+    td: OnceLock<TdPath>,
+}
 
 impl Wiring {
     pub(crate) fn apply_bindings(&self, bindings: &Bindings) -> Result<(), String> {
@@ -51,18 +57,31 @@ impl Wiring {
         Ok(())
     }
 
+    /// Opens the TD path in Init. A second open is refused.
+    pub(crate) fn open_td(&self, config: tdwire::Config) -> Result<(), String> {
+        let path = TdPath::open(config)?;
+        self.td.set(path).map_err(|_| "td".to_owned())
+    }
+
+    /// C4 never calls Start before a successful Init, so the path is open;
+    /// without one (the plane's unit tests) this and [`Wiring::recon`] do
+    /// nothing.
     pub(crate) fn listen_td(&self) -> Result<(), String> {
-        Ok(())
+        self.td.get().map_or(Ok(()), TdPath::listen)
     }
 
     /// The first Recon after OnStart. `Err(Error::Stopping)` is not a Start
     /// failure: a hold that filled during OnStart has already ended the
     /// session `FAILED` (E08-D041).
     pub(crate) fn recon(&self) -> Result<(), Error> {
-        Ok(())
+        self.td.get().map_or(Ok(()), TdPath::recon)
     }
 
-    pub(crate) fn unsubscribe_td(&self) {}
+    pub(crate) fn unsubscribe_td(&self) {
+        if let Some(td) = self.td.get() {
+            td.unsubscribe();
+        }
+    }
 
     /// `call` is the hook's context: the resolve waits until its deadline
     /// when it has one (E03-D041 on #411).
@@ -77,13 +96,14 @@ impl Wiring {
     }
 
     pub(crate) fn submit(&self, order: Order) -> Result<String, Error> {
-        let _ = order;
-        Err(Error::NotWired(TD))
+        self.td.get().ok_or(Error::Stopping)?.submit(order)
     }
 
     pub(crate) fn cancel(&self, api_id: i64, client_order_id: &str) -> Result<(), Error> {
-        let _ = (api_id, client_order_id);
-        Err(Error::NotWired(TD))
+        self.td
+            .get()
+            .ok_or(Error::Stopping)?
+            .cancel(api_id, client_order_id)
     }
 
     pub(crate) fn batch_cancel(
@@ -92,33 +112,32 @@ impl Wiring {
         algo_id: u32,
         uids: &[u32],
     ) -> Result<(), Error> {
-        let _ = (api_id, algo_id, uids);
-        Err(Error::NotWired(TD))
+        self.td
+            .get()
+            .ok_or(Error::Stopping)?
+            .batch_cancel(api_id, algo_id, uids)
     }
 
     pub(crate) fn request_recon(&self, api_id: i64) -> Result<(), Error> {
-        let _ = api_id;
-        Err(Error::NotWired(TD))
+        self.td.get().ok_or(Error::Stopping)?.request_recon(api_id)
     }
 
     pub(crate) fn order(&self, api_id: i64, client_order_id: &str) -> Option<td::Order> {
-        let _ = (api_id, client_order_id);
-        None
+        self.td.get()?.order(api_id, client_order_id)
     }
 
     pub(crate) fn open_orders(&self, api_id: i64, algo_id: u32) -> Vec<td::Order> {
-        let _ = (api_id, algo_id);
-        Vec::new()
+        self.td
+            .get()
+            .map_or_else(Vec::new, |td| td.open_orders(api_id, algo_id))
     }
 
     pub(crate) fn position(&self, api_id: i64, uid: u32) -> Option<td::Position> {
-        let _ = (api_id, uid);
-        None
+        self.td.get()?.position(api_id, uid)
     }
 
     pub(crate) fn balance(&self, api_id: i64, asset: &str) -> Option<td::Balance> {
-        let _ = (api_id, asset);
-        None
+        self.td.get()?.balance(api_id, asset)
     }
 
     pub(crate) fn tape(
