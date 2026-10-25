@@ -16,7 +16,7 @@
 //! They must not call [`Dispatcher::run`], [`Dispatcher::on_stop`], or
 //! [`Dispatcher::wait_exited`]: those wait for this same thread.
 
-mod envelope;
+pub(crate) mod envelope;
 mod ring;
 
 use std::any::Any;
@@ -220,6 +220,9 @@ pub struct Config {
     /// Market-data bytes alias the ring and are valid only for this call.
     pub feed: Option<MdHook>,
     /// `orderbook_delta`. Not filtered by the stale-window prehook. Bytes alias the ring.
+    ///
+    /// Pass them to [`crate::bookpath::Path::on_message`]. The local book applies
+    /// every delta; `recv_window` only decides whether that delta is a hook.
     pub book: Option<MdHook>,
     pub log: Option<LogCallback>,
     /// Host arms an OS timer and later calls [`Timer::fire`]. `deadline_ns` is injected time.
@@ -441,7 +444,12 @@ impl Dispatcher {
         self.shared.push_md(msg, false)
     }
 
-    /// Copy one `orderbook_delta` into the ring. It skips the stale-window prehook.
+    /// Copy one `orderbook_delta` into the ring.
+    ///
+    /// The stale-window prehook does not see it, and that age is not added to
+    /// [`QueueStat::dropped`] (PROTOCOL §9.5). A bad envelope is still rejected
+    /// and counted. A missing book callback skips the bytes and does not count
+    /// a drop.
     pub fn push_book(&self, msg: &[u8]) -> Result<(), PushError> {
         self.shared.push_md(msg, true)
     }
