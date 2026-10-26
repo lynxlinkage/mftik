@@ -464,30 +464,21 @@ fn a_read_callback_with_the_wrong_arity_is_crashed() {
     let _peer = Peer::start(&nats);
     let mut shim = spawn(python_module("reads:Arity"), &nats);
     running_with(&mut shim, &nats, trade_bindings(), &package_version());
-    match shim.expect() {
-        worker_up::Msg::Exiting(exiting) => {
-            assert_eq!(exiting.outcome, Outcome::Crashed as i32, "{exiting:?}");
-            assert!(
-                exiting.reason.starts_with("hook panic: TypeError:"),
-                "{}",
-                exiting.reason
-            );
-            assert!(
-                exiting.reason.contains("positional argument"),
-                "{}",
-                exiting.reason
-            );
-        }
-        other => panic!("want Exiting, got {other:?}"),
-    }
-    match shim.expect() {
-        worker_up::Msg::Stopped(stopped) => assert!(stopped.on_stop_completed),
-        other => panic!("want Stopped, got {other:?}"),
-    }
+    // The mismatch is raised by the call itself, so CPython has no Python
+    // frame to print. stderr still receives the exception line.
+    const REASON: &str = "hook panic: TypeError: Arity.on_start.<locals>.bad() \
+        takes 1 positional argument but 3 were given";
+    expect_ending(&mut shim, Outcome::Crashed, REASON, Some(true));
     let ended = shim.end();
     assert_eq!(ended.code, Some(20), "{}", ended.stderr);
     assert!(ended.stdout.contains("TAIL-arity"), "{}", ended.stdout);
-    assert_traceback(&ended, "TypeError");
+    assert!(
+        ended
+            .stderr
+            .contains("takes 1 positional argument but 3 were given"),
+        "{}",
+        ended.stderr
+    );
 }
 
 #[test]
