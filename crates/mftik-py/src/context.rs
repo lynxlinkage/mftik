@@ -1,21 +1,29 @@
-//! Python `Context` and `Poster` (E04-D005, E04-D011).
+//! Python `Context`, `Poster`, and `BookView` (E04-D005, E04-D011, E04-D051).
 //!
 //! A `Context` handed to a hook stores only a token. The token matches the
 //! hook's thread-local scope, so using it after the hook returns, or from any
 //! other thread, raises `mftik.ContextError` instead of touching the runtime.
-//! [`Poster`] is the one object that may cross threads.
+//! [`Poster`] is the one object that may cross threads. A [`PyBookView`] is
+//! the same kind of token: each method borrows the book again, and the levels
+//! it returns are owned copies (E04-D051, E04-D052).
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use mftik_core::book::OrderBook;
+use mftik_core::mdpath::ReadError as MdReadError;
 use mftik_rt::{Context, Poster};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use crate::proto::ToPyMessage;
+use crate::sdk::{PyInfo, PyTapeQuery};
 use crate::strategy::PyStrategy;
-use crate::{describe, invalid_context, require_callable, write_traceback};
+use crate::{
+    describe, invalid_book, invalid_context, read_error, require_callable, write_traceback,
+};
 
 static HOOK_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -79,23 +87,57 @@ pub(crate) fn with_python_hook<T>(
     Python::attach(|py| body(py, token))
 }
 
-fn with_context<T>(token: u64, body: impl FnOnce(&Context<PyStrategy>) -> T) -> PyResult<T> {
+/// The `Context` for `token` on this thread, or `None` when the token is not
+/// the hook currently on the stack.
+///
+/// This does not touch Python, so [`PyContext::resolve`] can call it and then
+/// release the GIL. The pointer stays valid while this thread's [`HookScope`]
+/// is on the stack; `Python::detach` does not switch threads.
+fn context_ptr(token: u64) -> Option<*const Context<PyStrategy>> {
     ACTIVE.with(|slot| {
         let ptr = slot.get();
         if ptr.is_null() {
-            return Err(invalid_context());
+            return None;
         }
         // SAFETY: a non-null slot on this thread was stored by `HookScope::enter`
         // and points at that scope's `Active` until the scope drops. The token
         // must match, so a context from another hook is rejected before the
-        // `Context` pointer is used. Other threads never see this slot.
+        // `Context` pointer is returned. Other threads never see this slot.
         let active = unsafe { &*ptr };
         if active.token != token {
-            return Err(invalid_context());
+            return None;
         }
-        let ctx = unsafe { &*active.ctx };
-        Ok(body(ctx))
+        Some(active.ctx)
     })
+}
+
+fn with_context<T>(token: u64, body: impl FnOnce(&Context<PyStrategy>) -> T) -> PyResult<T> {
+    let Some(ptr) = context_ptr(token) else {
+        return Err(invalid_context());
+    };
+    // SAFETY: `context_ptr` only returns the `Context` of this thread's live
+    // `HookScope` for `token`. That scope outlives `body`.
+    Ok(body(unsafe { &*ptr }))
+}
+
+/// Re-borrows the synced book. A dead token, another thread, or a book that
+/// is no longer synced is [`invalid_book`] (E04-D005).
+fn with_book<T>(token: u64, uid: u32, body: impl FnOnce(&OrderBook) -> T) -> PyResult<T> {
+    let Some(ptr) = context_ptr(token) else {
+        return Err(invalid_book());
+    };
+    // SAFETY: same as [`with_context`]: the pointer is this thread's live hook.
+    let ctx = unsafe { &*ptr };
+    let Some(view) = ctx.book(uid) else {
+        return Err(invalid_book());
+    };
+    Ok(body(&view))
+}
+
+/// `(tick, qty)` from the best outward. A non-positive limit is empty
+/// (E04-D051, E04-D052).
+fn level_pairs(levels: impl IntoIterator<Item = (i64, f64)>) -> Vec<(i64, f64)> {
+    levels.into_iter().collect()
 }
 
 fn bad_delay() -> PyErr {
@@ -121,6 +163,60 @@ pub(crate) fn invoke_callback(callback: &Py<PyAny>, ctx: &Context<PyStrategy>) {
     if let Err(message) = result {
         panic!("{message}");
     }
+}
+
+/// Runs `callback(ctx, value, err)` as a hook. Success is `(value, None)`.
+/// Failure is `(None, ReadError)` and the text is the Rust `Display`.
+/// A Python exception panics like [`invoke_callback`] (E04-D004). Arity is
+/// not checked ahead of the call (E04-D054).
+fn invoke_read<T: ToPyMessage>(
+    callback: &Py<PyAny>,
+    ctx: &Context<PyStrategy>,
+    result: Result<T, MdReadError>,
+) {
+    let outcome = with_python_hook(ctx, |py, token| deliver_read(py, token, callback, result));
+    if let Err(message) = outcome {
+        panic!("{message}");
+    }
+}
+
+fn deliver_read<T: ToPyMessage>(
+    py: Python<'_>,
+    token: u64,
+    callback: &Py<PyAny>,
+    result: Result<T, MdReadError>,
+) -> Result<(), String> {
+    let py_ctx = match py_context(py, token) {
+        Ok(ctx) => ctx,
+        Err(err) => return python_failure(py, err),
+    };
+    let (value, err_obj) = match result {
+        Ok(msg) => match msg.to_py(py) {
+            Ok(value) => (value, py.None()),
+            Err(err) => return python_failure(py, err),
+        },
+        Err(err) => (
+            py.None(),
+            read_error(&err).value(py).clone().unbind().into_any(),
+        ),
+    };
+    match callback.call1(py, (py_ctx, value, err_obj)) {
+        Ok(_) => Ok(()),
+        Err(err) => python_failure(py, err),
+    }
+}
+
+fn python_failure(py: Python<'_>, err: PyErr) -> Result<(), String> {
+    let message = describe(py, &err);
+    write_traceback(py, &err);
+    Err(message)
+}
+
+fn schedule<T>(
+    token: u64,
+    call: impl FnOnce(&Context<PyStrategy>) -> Result<T, mftik_rt::Error>,
+) -> PyResult<T> {
+    with_context(token, call)?.map_err(|err| crate::context_error(&err))
 }
 
 fn call_callable(py: Python<'_>, callback: &Py<PyAny>, token: u64) -> Result<(), String> {
@@ -219,6 +315,140 @@ impl PyContext {
             inner: ctx.poster(),
         })
     }
+
+    /// SYM `Get`. The wait releases the GIL (E04-D002). This is the part of
+    /// the E04-04 surface the reads and the local book need: a stored row.
+    /// There is no timeout argument (E04-D043).
+    fn resolve(&self, py: Python<'_>, ticker: String) -> PyResult<Py<PyInfo>> {
+        let ptr = context_ptr(self.token).ok_or_else(invalid_context)?;
+        let addr = ptr as usize;
+        let result = py.detach(move || {
+            // SAFETY: `addr` is the `Context` this thread's `HookScope` holds.
+            // `detach` runs here, on that same thread, and the scope stays on
+            // the stack until the hook returns.
+            let ctx = unsafe { &*(addr as *const Context<PyStrategy>) };
+            ctx.resolve(&ticker)
+        });
+        Python::attach(|py| match result {
+            Ok(info) => PyInfo::from_info(py, &info),
+            Err(err) => Err(crate::context_error(&err)),
+        })
+    }
+
+    /// The synced local book, or `None` while `md.view` has not caught up.
+    fn book(&self, py: Python<'_>, uid: u32) -> PyResult<Option<Py<PyBookView>>> {
+        let present = with_context(self.token, |ctx| ctx.book(uid).is_some())?;
+        if !present {
+            return Ok(None);
+        }
+        Ok(Some(Py::new(
+            py,
+            PyBookView {
+                token: self.token,
+                uid,
+            },
+        )?))
+    }
+
+    /// Page `md.view`. `callback(ctx, page, err)` runs on the dispatcher.
+    /// A value that is not callable is `TypeError` before the read (E04-D054).
+    fn tape(
+        &self,
+        py: Python<'_>,
+        uid: u32,
+        topic: String,
+        query: Py<PyTapeQuery>,
+        callback: Py<PyAny>,
+    ) -> PyResult<()> {
+        require_callable(py, &callback)?;
+        let query = (*query.borrow(py)).to_query();
+        schedule(self.token, |ctx| {
+            ctx.tape(uid, &topic, query, move |_strategy, ctx, result| {
+                invoke_read(&callback, ctx, result);
+            })
+        })
+    }
+
+    /// Ask `md.view` for the windowed book. The callback shape matches [`Self::tape`].
+    fn book_snapshot(&self, py: Python<'_>, uid: u32, callback: Py<PyAny>) -> PyResult<()> {
+        require_callable(py, &callback)?;
+        schedule(self.token, |ctx| {
+            ctx.book_snapshot(uid, move |_strategy, ctx, result| {
+                invoke_read(&callback, ctx, result);
+            })
+        })
+    }
+
+    /// Ask `md.fetch` for the latest `limit` closed klines.
+    fn fetch_klines(
+        &self,
+        py: Python<'_>,
+        uid: u32,
+        interval: String,
+        limit: u32,
+        callback: Py<PyAny>,
+    ) -> PyResult<()> {
+        require_callable(py, &callback)?;
+        schedule(self.token, |ctx| {
+            ctx.fetch_klines(uid, &interval, limit, move |_strategy, ctx, result| {
+                invoke_read(&callback, ctx, result);
+            })
+        })
+    }
+
+    /// Ask `md.fetch` for the open interest the exchange does not push.
+    fn fetch_open_interest(&self, py: Python<'_>, uid: u32, callback: Py<PyAny>) -> PyResult<()> {
+        require_callable(py, &callback)?;
+        schedule(self.token, |ctx| {
+            ctx.fetch_open_interest(uid, move |_strategy, ctx, result| {
+                invoke_read(&callback, ctx, result);
+            })
+        })
+    }
+}
+
+/// The local book inside the hook that received it (E04-D005, E04-D051).
+///
+/// Methods copy what they return. The object itself dies with the hook.
+#[pyclass(frozen, module = "mftik", name = "BookView")]
+pub(crate) struct PyBookView {
+    token: u64,
+    uid: u32,
+}
+
+#[pymethods]
+impl PyBookView {
+    fn tick_size(&self) -> PyResult<f64> {
+        with_book(self.token, self.uid, |book| book.tick_size())
+    }
+
+    fn window(&self) -> PyResult<usize> {
+        with_book(self.token, self.uid, |book| book.window())
+    }
+
+    fn price(&self, tick: i64) -> PyResult<f64> {
+        with_book(self.token, self.uid, |book| book.price(tick))
+    }
+
+    fn best_bid_tick(&self) -> PyResult<Option<i64>> {
+        with_book(self.token, self.uid, |book| book.best_bid_tick())
+    }
+
+    fn best_ask_tick(&self) -> PyResult<Option<i64>> {
+        with_book(self.token, self.uid, |book| book.best_ask_tick())
+    }
+
+    fn qty(&self, bid: bool, price: f64) -> PyResult<Option<f64>> {
+        with_book(self.token, self.uid, |book| book.qty(bid, price))
+    }
+
+    fn bids(&self, limit: i64) -> PyResult<Vec<(i64, f64)>> {
+        with_book(self.token, self.uid, |book| level_pairs(book.bids(limit)))
+    }
+
+    fn asks(&self, limit: i64) -> PyResult<Vec<(i64, f64)>> {
+        with_book(self.token, self.uid, |book| level_pairs(book.asks(limit)))
+    }
 }
 
 #[pyclass(frozen, module = "mftik._mftik", name = "Poster")]
@@ -252,5 +482,32 @@ mod tests {
             assert_eq!(delay_duration(0.0).unwrap(), Duration::ZERO);
             assert_eq!(delay_duration(1.5).unwrap(), Duration::from_millis(1500));
         });
+    }
+
+    #[test]
+    fn level_pairs_are_tick_then_qty_from_the_best() {
+        use mftik_core::book::Level;
+
+        let mut book = OrderBook::new(8, 0.5).expect("book");
+        book.apply(
+            &[
+                Level {
+                    price: 100.0,
+                    size: 2.0,
+                },
+                Level {
+                    price: 99.0,
+                    size: 1.0,
+                },
+            ],
+            &[Level {
+                price: 101.0,
+                size: 3.0,
+            }],
+        );
+        assert_eq!(level_pairs(book.bids(4)), vec![(200, 2.0), (198, 1.0)]);
+        assert_eq!(level_pairs(book.asks(4)), vec![(202, 3.0)]);
+        assert!(level_pairs(book.bids(0)).is_empty());
+        assert!(level_pairs(book.asks(-1)).is_empty());
     }
 }

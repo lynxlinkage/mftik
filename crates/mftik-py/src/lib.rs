@@ -9,13 +9,14 @@ mod error;
 mod proto;
 mod sdk;
 mod strategy;
+mod topic;
 
 use mftik_rt::Strategy;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use crate::context::{PyContext, PyPoster};
+use crate::context::{PyBookView, PyContext, PyPoster};
 use crate::error::ContextError;
 use crate::strategy::{LoadFailed, PyStrategy};
 
@@ -26,11 +27,15 @@ pub use sdk::feed_to_py;
 /// `mftik.Context` is only valid inside the hook that received it (E04-D005).
 const CONTEXT_ERROR: &str = "mftik.Context is only valid inside the hook that received it";
 
-/// Register SDK types, proto wrappers, and the error hierarchy on `module`.
+/// `mftik.BookView` is only valid inside the hook that received it (E04-D005).
+const BOOK_ERROR: &str = "mftik.BookView is only valid inside the hook that received it";
+
+/// Register SDK types, proto wrappers, topics, and the error hierarchy on `module`.
 pub fn init_module(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     error::register(py, module)?;
     sdk::register(py, module)?;
     proto::register(py, module)?;
+    topic::register(module)?;
     Ok(())
 }
 
@@ -40,6 +45,7 @@ fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_module(m.py(), m)?;
     m.add_class::<PyContext>()?;
     m.add_class::<PyPoster>()?;
+    m.add_class::<PyBookView>()?;
     m.add_function(wrap_pyfunction!(_run, m)?)?;
     m.add_function(wrap_pyfunction!(_run_load_failed, m)?)?;
     m.add_function(wrap_pyfunction!(_registered_hooks, m)?)?;
@@ -106,6 +112,10 @@ fn before_exit(code: i32) {
 
 pub(crate) fn invalid_context() -> PyErr {
     ContextError::new_err(CONTEXT_ERROR)
+}
+
+pub(crate) fn invalid_book() -> PyErr {
+    ContextError::new_err(BOOK_ERROR)
 }
 
 pub(crate) fn describe(py: Python<'_>, err: &PyErr) -> String {

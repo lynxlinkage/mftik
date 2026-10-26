@@ -221,3 +221,12 @@ E04-02 Python 端的型別與錯誤。只做型別與轉換，不接 hook。
 - E04-D022 proto enum 對到 `enum.IntEnum`；收到未知值不丟例外，保留原始 int（同 Go 保留未知 enum 數值）。
 - E04-D023 欄位對應：`optional` 與沒設的 message 欄位為 `None`；oneof 每個分支各是一個屬性，未選為 `None`，另有屬性回傳選中分支名（未設為 `None`）；`repeated` 為 `tuple`；`map` 為 `dict`，每次讀取回新的副本。
 - E04-D024 一期不提供以 prost 編解碼 bytes 的進出（Go `proto.Marshal` 對應），有需要再加。
+
+## 決定（2026-10-26，E04-D051–E04-D054）
+
+E04-05 Context 的 MD 讀取、callback 與 BookView。Yi Te 於 #430 確認。
+
+- E04-D051 `BookView.bids(limit)`、`asks(limit)` 回 `list`（當下的副本），不回迭代器，hook 之後仍可用。
+- E04-D052 每一檔是 `tuple`，欄位同 Go 的 level（價格 tick、數量），不另包 pyclass。
+- E04-D053 `mftik.topic` 的常數是 `str`，不用 Enum；`kline(interval)` 回 `str`。
+- E04-D054 讀取的 callback 呼叫時只檢查 callable，不是則同步丟 `TypeError`；參數個數不預先檢查，執行時出錯照 E04-D004（`CRASHED`）。

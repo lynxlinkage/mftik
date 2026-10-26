@@ -7,8 +7,9 @@ from typing import Any, Self, final
 import mftik.common as common
 import mftik.md as md
 import mftik.td as td
+import mftik.topic as topic
 from mftik.common.v1 import OrderType, Side, TimeInForce
-from mftik.md.v1 import Cursor
+from mftik.md.v1 import BookSnapshot, Cursor, Klines, OpenInterest, TapePage
 from mftik.td.v1 import Balance, Fill, OrderCause, Position, Recon
 from mftik.td.v1 import Order as TdOrder
 
@@ -26,6 +27,7 @@ __all__ = [
     "Td",
     "Feed",
     "BookUpdate",
+    "BookView",
     "OrderEvent",
     "FillEvent",
     "PositionEvent",
@@ -43,6 +45,7 @@ __all__ = [
     "td",
     "Context",
     "Poster",
+    "topic",
     "_run",
     "_run_load_failed",
     "_registered_hooks",
@@ -253,6 +256,17 @@ class TapeQuery:
     def __repr__(self) -> str: ...
 
 @final
+class BookView:
+    def tick_size(self, /) -> float: ...
+    def window(self, /) -> int: ...
+    def price(self, /, tick: int) -> float: ...
+    def best_bid_tick(self, /) -> int | None: ...
+    def best_ask_tick(self, /) -> int | None: ...
+    def qty(self, /, bid: bool, price: float) -> float | None: ...
+    def bids(self, /, limit: int) -> list[tuple[int, float]]: ...
+    def asks(self, /, limit: int) -> list[tuple[int, float]]: ...
+
+@final
 class Context:
     def session_id(self, /) -> str: ...
     def params(self, /) -> bytes: ...
@@ -263,6 +277,36 @@ class Context:
     def after(self, /, delay: float, callback: Callable[[Context], object]) -> None: ...
     def post(self, /, callback: Callable[[Context], object]) -> None: ...
     def poster(self, /) -> Poster: ...
+    def resolve(self, /, ticker: str) -> Info: ...
+    def book(self, /, uid: int) -> BookView | None: ...
+    def tape(
+        self,
+        /,
+        uid: int,
+        topic: str,
+        query: TapeQuery,
+        callback: Callable[[Context, TapePage | None, ReadError | None], object],
+    ) -> None: ...
+    def book_snapshot(
+        self,
+        /,
+        uid: int,
+        callback: Callable[[Context, BookSnapshot | None, ReadError | None], object],
+    ) -> None: ...
+    def fetch_klines(
+        self,
+        /,
+        uid: int,
+        interval: str,
+        limit: int,
+        callback: Callable[[Context, Klines | None, ReadError | None], object],
+    ) -> None: ...
+    def fetch_open_interest(
+        self,
+        /,
+        uid: int,
+        callback: Callable[[Context, OpenInterest | None, ReadError | None], object],
+    ) -> None: ...
 
 @final
 class Poster:
