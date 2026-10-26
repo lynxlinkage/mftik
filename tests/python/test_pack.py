@@ -305,6 +305,25 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(PackError):
             execute([])
 
+    def test_no_push_is_accepted_before_the_directory_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "absent")
+            with self.assertRaises(PackError) as caught:
+                execute(
+                    [
+                        "-dir",
+                        missing,
+                        "-target",
+                        "hello:Hello",
+                        "-name",
+                        "hello",
+                        "-repo",
+                        "127.0.0.1:9/mftik/hello",
+                        "-no-push",
+                    ]
+                )
+        self.assertIn("not a directory", str(caught.exception))
+
     def test_session_contracts_match_hello(self):
         self.assertEqual(
             session_contracts(),

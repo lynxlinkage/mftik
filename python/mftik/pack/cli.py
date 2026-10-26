@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Never
 
-from mftik.pack.build import Options, build_and_push, parse_env
+from mftik.pack.build import Options, build_and_push, build_image, parse_env
 from mftik.pack.error import PackError
 from mftik.pack.pins import DEFAULT_PYTHON
 
@@ -20,7 +20,11 @@ class _Parser(argparse.ArgumentParser):
 
 
 def execute(argv: list[str] | None = None) -> str:
-    """Pack and push. Returns the image manifest digest."""
+    """Pack, and push unless ``-no-push``. Returns the image manifest digest.
+
+    ``-no-push`` still requires ``-repo`` (the image name is checked) and does
+    not open a connection to that registry.
+    """
     parser = _Parser(prog="mftik.pack")
     parser.add_argument("-dir", dest="directory", required=True)
     parser.add_argument("-requirements", default="")
@@ -32,6 +36,7 @@ def execute(argv: list[str] | None = None) -> str:
     parser.add_argument("-plain-http", dest="plain_http", action="store_true")
     parser.add_argument("-python", default=DEFAULT_PYTHON)
     parser.add_argument("-wheel", default="")
+    parser.add_argument("-no-push", dest="no_push", action="store_true")
     args = parser.parse_args(argv)
     options = Options(
         directory=Path(args.directory),
@@ -45,6 +50,8 @@ def execute(argv: list[str] | None = None) -> str:
         python=args.python,
         wheel=Path(args.wheel) if args.wheel else None,
     )
+    if args.no_push:
+        return build_image(options).digest
     return build_and_push(options)
 
 
