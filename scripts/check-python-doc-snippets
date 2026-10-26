@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Fail if a docs/python code block drifts from examples/python (E05-D042).
+
+Every fenced block cites a file and an inclusive 1-based line range:
+
+    ```python examples/python/md_watch/strategy.py:12-40
+
+The body must equal those source lines. A block with no citation fails. A
+document with no fenced block passes: the chapters that do not quote an
+example have nothing to compare.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import python_docs
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=python_docs.ROOT)
+    args = parser.parse_args(argv)
+    try:
+        count = check(args.root)
+    except python_docs.DocError as exc:
+        print(f"check-python-doc-snippets: {exc}", file=sys.stderr)
+        return 1
+    print(f"ok: {count} snippets")
+    return 0
+
+
+def check(root: Path) -> int:
+    count = 0
+    for path in python_docs.markdown_files(root):
+        text = path.read_text(encoding="utf-8")
+        for fence in python_docs.fences(text, path):
+            _match(root, fence)
+            count += 1
+    return count
+
+
+def _match(root: Path, fence: python_docs.Fence) -> None:
+    relative = Path(fence.info_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise python_docs.DocError(f"{fence.path}:{fence.line}: path leaves examples/python")
+    if len(relative.parts) < 3 or relative.parts[0] != "examples" or relative.parts[1] != "python":
+        raise python_docs.DocError(
+            f"{fence.path}:{fence.line}: snippet path must be under examples/python"
+        )
+    examples = (root / "examples" / "python").resolve()
+    source = (root / relative).resolve()
+    if not source.is_relative_to(examples):
+        raise python_docs.DocError(f"{fence.path}:{fence.line}: path leaves examples/python")
+    if not source.is_file():
+        raise python_docs.DocError(f"{fence.path}:{fence.line}: {fence.info_path} is missing")
+    lines = source.read_text(encoding="utf-8").splitlines()
+    if fence.end > len(lines):
+        raise python_docs.DocError(
+            f"{fence.path}:{fence.line}: {fence.info_path} has no line {fence.end}"
+        )
+    expected = tuple(lines[fence.start - 1 : fence.end])
+    if fence.body != expected:
+        raise python_docs.DocError(
+            f"{fence.path}:{fence.line}: body does not match "
+            f"{fence.info_path}:{fence.start}-{fence.end} ({_diff(fence.body, expected)})"
+        )
+
+
+def _diff(got: tuple[str, ...], expected: tuple[str, ...]) -> str:
+    for index, (left, right) in enumerate(zip(got, expected, strict=False), start=1):
+        if left != right:
+            return f"line {index} of the block differs"
+    return f"block has {len(got)} lines, source has {len(expected)}"
+
+
+if __name__ == "__main__":
+    sys.exit(main())

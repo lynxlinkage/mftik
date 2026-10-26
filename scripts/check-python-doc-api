@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Fail if a public mftik name is absent from docs/python (E05-D043).
+
+Public names are the literal ``__all__`` entries under ``python/mftik`` and the
+public definitions in the handwritten ``.pyi`` files: classes, functions,
+methods, and annotated attributes. A dunder that is defined in a stub counts.
+A single-underscore name counts only when ``__all__`` lists it. Generated
+protobuf stubs in ``common/``, ``md/``, and ``td/`` are not a second catalog
+(E04-D021); the packages themselves are in ``mftik.__all__``.
+
+A name counts as documented when it appears as a whole word in inline code or
+in a fenced excerpt. Prose does not count.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import python_docs
+
+_GENERATED = frozenset({"common", "md", "td"})
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=python_docs.ROOT)
+    args = parser.parse_args(argv)
+    try:
+        names = public_names(args.root)
+        code = "\n".join(
+            python_docs.code_text(path.read_text(encoding="utf-8"))
+            for path in python_docs.markdown_files(args.root)
+        )
+        missing = sorted(name for name in names if not python_docs.contains_name(code, name))
+        if missing:
+            lines = "\n".join(f"  {name}" for name in missing)
+            raise python_docs.DocError(f"docs/python does not mention:\n{lines}")
+    except python_docs.DocError as exc:
+        print(f"check-python-doc-api: {exc}", file=sys.stderr)
+        return 1
+    print(f"ok: {len(names)} public names")
+    return 0
+
+
+def public_names(root: Path) -> set[str]:
+    package = root / "python" / "mftik"
+    if not package.is_dir():
+        raise python_docs.DocError("python/mftik is missing")
+    names: set[str] = set()
+    listed_by_stem: dict[Path, dict[str, set[str]]] = {}
+    for path in sorted(package.rglob("*")):
+        if not path.is_file() or path.suffix not in {".py", ".pyi"}:
+            continue
+        relative = path.relative_to(package)
+        if relative.parts[0] in _GENERATED or "__pycache__" in relative.parts:
+            continue
+        listed = module_all(path)
+        if listed is not None:
+            names.update(listed)
+            listed_by_stem.setdefault(path.with_suffix(""), {})[path.suffix] = set(listed)
+        if path.suffix == ".pyi":
+            names.update(definitions(path))
+    for stem, by_suffix in listed_by_stem.items():
+        py_names = by_suffix.get(".py")
+        pyi_names = by_suffix.get(".pyi")
+        if py_names is None or pyi_names is None or py_names == pyi_names:
+            continue
+        differ = ", ".join(sorted(py_names ^ pyi_names))
+        raise python_docs.DocError(f"{stem.name}: __all__ differs between .py and .pyi ({differ})")
+    if not names:
+        raise python_docs.DocError("no public names under python/mftik")
+    return names
+
+
+def module_all(path: Path) -> list[str] | None:
+    tree = _parse(path)
+    found: list[str] | None = None
+    for node in tree.body:
+        target, value = _assigned(node)
+        if target != "__all__":
+            continue
+        if found is not None:
+            raise python_docs.DocError(f"{path}: __all__ is assigned twice")
+        found = _strings(path, value)
+    return found
+
+
+def definitions(path: Path) -> set[str]:
+    return _body_names(path, _parse(path).body)
+
+
+def _body_names(path: Path, body: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            if _public(node.name):
+                names.add(node.name)
+            names.update(_body_names(path, node.body))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _public(node.name):
+                names.add(node.name)
+        elif isinstance(node, ast.AnnAssign):
+            _add_target(path, node.target, names)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                _add_target(path, target, names)
+        elif isinstance(node, ast.If):
+            names.update(_body_names(path, node.body))
+            names.update(_body_names(path, node.orelse))
+        elif not isinstance(node, (ast.Expr, ast.Pass, ast.Import, ast.ImportFrom)):
+            kind = type(node).__name__
+            raise python_docs.DocError(f"{path}: unsupported statement {kind}")
+    return names
+
+
+def _add_target(path: Path, target: ast.expr, names: set[str]) -> None:
+    if not isinstance(target, ast.Name):
+        raise python_docs.DocError(f"{path}: assignment target is not a name")
+    if _public(target.id):
+        names.add(target.id)
+
+
+def _assigned(node: ast.stmt) -> tuple[str | None, ast.expr | None]:
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    ):
+        return node.targets[0].id, node.value
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return node.target.id, node.value
+    return None, None
+
+
+def _strings(path: Path, value: ast.expr | None) -> list[str]:
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        raise python_docs.DocError(f"{path}: __all__ is not a list of strings")
+    names: list[str] = []
+    for element in value.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+            names.append(element.value)
+            continue
+        raise python_docs.DocError(f"{path}: __all__ is not a list of strings")
+    return names
+
+
+def _public(name: str) -> bool:
+    if name == "__all__":
+        return False
+    if name.startswith("__") and name.endswith("__"):
+        return True
+    return not name.startswith("_")
+
+
+def _parse(path: Path) -> ast.Module:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError as exc:
+        raise python_docs.DocError(f"{path}: {exc}") from exc
+    if not isinstance(tree, ast.Module):
+        raise python_docs.DocError(f"{path}: not a module")
+    return tree
+
+
+if __name__ == "__main__":
+    sys.exit(main())

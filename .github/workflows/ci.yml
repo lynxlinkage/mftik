@@ -62,6 +62,10 @@ jobs:
           uv python install 3.11
       - name: Sync dev tools
         run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.11
+      - name: Python user docs
+        run: |
+          uv run --frozen --no-sync python scripts/check-python-doc-api
+          uv run --frozen --no-sync python scripts/check-python-doc-snippets
       - name: Ruff
         run: uv run --frozen --no-sync ruff check python tests/python examples/python crates/mftik-py/tests/pystrategies
       - name: Ruff format
