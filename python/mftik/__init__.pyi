@@ -32,6 +32,8 @@ from mftik._mftik import (
 )
 from mftik.strategy import Strategy
 
+from . import volume as volume
+
 __all__ = [
     "AlgoNotDeclared",
     "BalanceEvent",
@@ -65,6 +67,7 @@ __all__ = [
     "md",
     "run",
     "td",
+    "volume",
 ]
 
 __version__: str
