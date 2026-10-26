@@ -53,7 +53,22 @@ fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_run, m)?)?;
     m.add_function(wrap_pyfunction!(_run_load_failed, m)?)?;
     m.add_function(wrap_pyfunction!(_registered_hooks, m)?)?;
+    m.add_function(wrap_pyfunction!(session_contracts, m)?)?;
     Ok(())
+}
+
+/// `Hello.contracts` of a session worker, the same list `c4::Config::session` sends.
+pub(crate) fn session_contract_names() -> Vec<String> {
+    mftik_core::c4::SESSION_CONTRACTS
+        .iter()
+        .map(|contract| (*contract).to_owned())
+        .collect()
+}
+
+/// Session contracts for `python -m mftik.pack` (E04-07). Same source as Hello.
+#[pyfunction]
+fn session_contracts() -> Vec<String> {
+    session_contract_names()
 }
 
 /// Hosts `strategy` until the process `_exit`s. `release` is `Hello.release`.
@@ -164,6 +179,15 @@ pub(crate) fn require_callable(py: Python<'_>, callback: &Py<PyAny>) -> PyResult
 pub(crate) fn lock_python_tests() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+#[cfg(test)]
+mod session_contract_tests {
+    #[test]
+    fn session_contracts_match_hello() {
+        let config = mftik_core::c4::Config::session("release", 1);
+        assert_eq!(config.contracts, crate::session_contract_names());
+    }
 }
 
 #[cfg(test)]

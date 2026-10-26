@@ -166,3 +166,32 @@ jobs:
           name: mftiko-conformance-report
           path: report.json
           if-no-files-found: warn
+
+  # E04-D076: pack one strategy into a local registry:2, check it with the
+  # pinned mftiko artifact package, and run the unpacked rootfs. The checkout
+  # is dd73a2d421ca. This job does not push anywhere but 127.0.0.1.
+  pack:
+    name: pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install nats-server
+        run: |
+          GOBIN="$RUNNER_TEMP/nats-bin" go install github.com/nats-io/nats-server/v2@v2.15.0
+          echo "MFTIK_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
+      - name: Install CPython headers
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-dev
+          uv python install 3.11
+      - name: Sync dev tools
+        run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.11
+      - name: Pack, check, and run
+        run: uv run --frozen --no-sync python tests/python/pack_e2e.py
