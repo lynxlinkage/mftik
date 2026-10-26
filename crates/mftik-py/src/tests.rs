@@ -36,6 +36,42 @@ pub(crate) fn install_mftik(py: Python<'_>) {
     init_module(py, &module).unwrap();
 }
 
+#[test]
+fn topic_constants_are_the_runtime_strings() {
+    with_mftik(|py| {
+        let topic = py.import("mftik").unwrap().getattr("topic").unwrap();
+        let pairs = [
+            ("BEST_QUOTE", mftik_rt::topic::BEST_QUOTE),
+            ("TRADE", mftik_rt::topic::TRADE),
+            ("AGG_TRADE", mftik_rt::topic::AGG_TRADE),
+            ("ORDER_BOOK_DELTA", mftik_rt::topic::ORDER_BOOK_DELTA),
+            ("TICKER", mftik_rt::topic::TICKER),
+            ("LIQUIDATION", mftik_rt::topic::LIQUIDATION),
+            ("FUNDING_RATE", mftik_rt::topic::FUNDING_RATE),
+            ("OPEN_INTEREST", mftik_rt::topic::OPEN_INTEREST),
+            ("GREEKS", mftik_rt::topic::GREEKS),
+            ("MARK_PRICE", mftik_rt::topic::MARK_PRICE),
+        ];
+        for (name, value) in pairs {
+            let got: String = topic.getattr(name).unwrap().extract().unwrap();
+            assert_eq!(got, value, "{name}");
+        }
+        let one_minute: String = topic
+            .call_method1("kline", ("1m",))
+            .unwrap()
+            .extract()
+            .unwrap();
+        let empty: String = topic
+            .call_method1("kline", ("",))
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(one_minute, "kline_1m");
+        assert_eq!(empty, "kline_");
+        assert_eq!(one_minute, mftik_rt::topic::kline("1m"));
+    });
+}
+
 pub(crate) fn with_mftik(body: impl FnOnce(Python<'_>)) {
     let _guard = crate::lock_python_tests();
     // Tests embed an interpreter. The wheel does not: auto-initialize stays off.
