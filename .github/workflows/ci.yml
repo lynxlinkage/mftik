@@ -63,9 +63,9 @@ jobs:
       - name: Sync dev tools
         run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.11
       - name: Ruff
-        run: uv run --frozen --no-sync ruff check python tests/python crates/mftik-py/tests/pystrategies
+        run: uv run --frozen --no-sync ruff check python tests/python examples/python crates/mftik-py/tests/pystrategies
       - name: Ruff format
-        run: uv run --frozen --no-sync ruff format --check python tests/python crates/mftik-py/tests/pystrategies
+        run: uv run --frozen --no-sync ruff format --check python tests/python examples/python crates/mftik-py/tests/pystrategies
       - name: Build the mftik wheel
         run: uv run --frozen --no-sync maturin build --release --out dist
       - name: Install the wheel
@@ -164,6 +164,80 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mftiko-conformance-report
+          path: report.json
+          if-no-files-found: warn
+
+  # E05-D011: one abi3 wheel, installed by the three Python conformance jobs.
+  python-conform-wheel:
+    name: python-conform-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.11"
+      - name: Install CPython headers
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-dev
+          uv python install 3.11
+      - name: Sync dev tools
+        run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.11
+      - name: Build one abi3 wheel
+        run: uv run --frozen --no-sync maturin build --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mftik-abi3-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # E05-D001, E05-D002, E05-D011: the same suite as mftiko-conformance, on the
+  # Python strategy, once per supported interpreter. The pinned harness
+  # replaces the worker environment and does not forward PYTHONPATH, so the
+  # venv path file puts examples/python on sys.path. The argv is still
+  # `python -m mftik.run conform:Conform`.
+  mftiko-conformance-python:
+    name: mftiko-conformance-python (${{ matrix.python }})
+    needs: python-conform-wheel
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install mftiko-conformance from the pinned mftiko commit
+        run: |
+          GOBIN="$RUNNER_TEMP/conformance-bin" bash scripts/install-mftiko-conformance
+          echo "$RUNNER_TEMP/conformance-bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mftik-abi3-wheel
+          path: dist
+      - name: Install the wheel into a clean venv
+        run: |
+          set -euo pipefail
+          uv python install "${{ matrix.python }}"
+          uv venv --managed-python --python "${{ matrix.python }}" /tmp/mftik-conform
+          uv pip install --python /tmp/mftik-conform/bin/python dist/*.whl
+          site="$(/tmp/mftik-conform/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          printf '%s\n' "$GITHUB_WORKSPACE/examples/python" > "$site/mftik-conform.pth"
+      - name: Run mftiko-conformance
+        env:
+          PYTHONPATH: ${{ github.workspace }}/examples/python
+        run: mftiko-conformance -json report.json -- /tmp/mftik-conform/bin/python -m mftik.run conform:Conform
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mftiko-conformance-python-${{ matrix.python }}
           path: report.json
           if-no-files-found: warn
 
