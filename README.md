@@ -17,7 +17,7 @@ Decisions for this repo are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 | `mftik-testkit` | `crates/mftik-testkit` | Dev-only nats-server and fake-shim harness (`publish = false`). |
 | `mftik-conform` | `examples/conform` | The Rust standard conformance strategy (PROTOCOL §9.8), the `conform` binary. |
 
-The Python API will be snake_case and one-to-one with the Go SDK.
+The Python API is snake_case and matches the Go SDK's hook and context names. The user guide and API reference are in [`docs/python`](docs/python/README.md).
 
 ## Proto
 
@@ -54,7 +54,7 @@ uv run ruff format --check python tests/python examples/python crates/mftik-py/t
 
 GitHub Actions runs on `ubuntu-latest`. `cargo clippy --workspace --all-targets -- -D warnings` fails the build on warnings. The workflow also checks formatting, tests, and that the proto tree still matches the pinned commit. [`scripts/sync-proto-negative`](scripts/sync-proto-negative) appends a line to a temporary copy of that tree and requires `scripts/sync-proto --check` to fail.
 
-The Python job uses Python 3.11 (E04-D014). It syncs the locked uv tools, runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`tests/python/smoke_import.py`](tests/python/smoke_import.py), the Python unit tests, `mypy.stubtest` against `mftik._mftik`, and the Python session end-to-end tests.
+The Python job uses Python 3.11 (E04-D014). It syncs the locked uv tools, checks that [`docs/python`](docs/python/README.md) names every public `mftik` symbol and that any code excerpt matches [`examples/python`](examples/python), runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`tests/python/smoke_import.py`](tests/python/smoke_import.py), the Python unit tests, `mypy.stubtest` against `mftik._mftik`, and the Python session end-to-end tests.
 
 The wheels job builds the two release wheels on every pull request and installs each into a clean virtual environment for the same smoke test (E04-D063): manylinux_2_28 x86_64 and macOS arm64. Both are abi3 wheels for Python 3.11 (`cp311-abi3`). There is no source distribution. [`scripts/release-check`](scripts/release-check) checks that the workspace version, `pyproject.toml`, the smoke test's expected version, and `mftik.__version__` match.
 

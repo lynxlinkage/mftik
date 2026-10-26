@@ -329,3 +329,15 @@ Yi Te 於 #423 確認，並於同日修訂 E05-D051（對齊 Go `sdk/internal/td
 - E05-D054 failed 之後的 order 與 recon 回覆不處理（`fail_full` 清掉 rounds；`on_recon_round` 見 failed 即返回）。
 
 Rust 在 dispatcher 取出時才分類（E03-D071）。第 65537 筆之前的事件在 FIFO 裡更早，`failed` 之前就套用，所以 OnStop 看得到。第 65537 筆之後才推進 TD buffer 的事件，Go 在 NATS callback 裡已經看到 `failed` 而丟掉；Rust 在取出時看到 `failed`，同樣丟掉。現行行為與 Go 等價，程式不改。測試在 `mftik-core`（sans-IO，時鐘是注入的 `NOW_MS`）與 `mftik-rt`（真實 nats-server；dispatcher 的 `on_stop` 在 TD drain 之後讀 OMS／Ledger，與策略的 OnStop 同一點）。沒有改 PROTOCOL。
+
+## 決定（2026-10-26，E05-D041–E05-D045）
+
+Yi Te 於 #443 確認。E05-04 使用文件（`docs/python/`）。與 Go 版語意不同之處先回報再做。本票沒有改 PROTOCOL。
+
+- E05-D041 先寫不引用範例的章節；#442 合併後 merge main 補上範例片段，只開一個 PR。
+- E05-D042 文件內每段程式碼標註來源檔與行號，CI 腳本比對片段與範例檔一致。
+- E05-D043 CI 腳本以 `mftik` 的公開名稱（`__all__` 與 `.pyi`）比對文件，漏寫即失敗。
+- E05-D044 API 參考手寫 Markdown，不由 docstring 產生、不架網站（同 E05-D005）。
+- E05-D045 兩支檢查腳本放在現有 `python` job，不另開 job。
+
+使用文件在 `docs/python/`，英文，README 連到該目錄。程式碼區塊只來自 `examples/python`，info string 是 `<language> <path>:<start>-<end>`（行號從 1 起，含尾）。`scripts/check-python-doc-snippets` 把區塊本文與那些行逐行比對；沒有區塊時通過。`scripts/check-python-doc-api` 收集手寫的 `__all__` 與手寫 `.pyi` 的公開定義（dunder 算，單底線只在 `__all__` 裡才算）。產生的 `common/`、`md/`、`td/` stub 排除（E04-D021）；文件寫對應規則與簽章型別，不逐欄手抄產生碼。每個名稱必須以完整單字出現在行內程式碼或區塊本文。兩支腳本在 `python` job、`maturin build` 之前跑。#450（`94f26533`，#442 的範例）合併進 main 之後，本 PR 以 merge main（不 rebase）補上範例片段。區塊標的是 `examples/python/md_watch/md_watch.py`、`examples/python/maker/maker.py`、`examples/python/stateful/stateful.py`，以及 `md_watch` README 的啟動與打包命令。
