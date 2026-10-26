@@ -221,3 +221,12 @@ E04-02 Python 端的型別與錯誤。只做型別與轉換，不接 hook。
 - E04-D022 proto enum 對到 `enum.IntEnum`；收到未知值不丟例外，保留原始 int（同 Go 保留未知 enum 數值）。
 - E04-D023 欄位對應：`optional` 與沒設的 message 欄位為 `None`；oneof 每個分支各是一個屬性，未選為 `None`，另有屬性回傳選中分支名（未設為 `None`）；`repeated` 為 `tuple`；`map` 為 `dict`，每次讀取回新的副本。
 - E04-D024 一期不提供以 prost 編解碼 bytes 的進出（Go `proto.Marshal` 對應），有需要再加。
+
+## 決定（2026-10-26，E04-D041–E04-D044）
+
+Yi Te 於 #429 確認 E04-D041–E04-D044。E04-04 Context 的商品、下單、本地狀態與 volume。
+
+- E04-D041 `submit` 只收 `mftik.Order`（E04-02），不提供 kwargs 快捷；型別不對丟 `TypeError`。
+- E04-D042 `open_orders` 回 `tuple[Order, ...]`，無掛單為空 tuple（同 E04-D023）；順序照 `mftik-rt`，不另排序。
+- E04-D043 `resolve` 沿用 runtime 的逾時與 hook 預算，Python 不加 timeout 參數。
+- E04-D044 volume：`dir`、`volume_dir`、`input_dir` 收 `str | os.PathLike`；`data` 收 bytes-like（`bytes`、`bytearray`、`memoryview`），`str` 丟 `TypeError`，不隱式編碼；`read` 回 `bytes`，找不到回 `None`。
