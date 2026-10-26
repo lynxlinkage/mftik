@@ -143,29 +143,55 @@ fn call_callable(py: Python<'_>, callback: &Py<PyAny>, token: u64) -> Result<(),
 }
 
 /// Calls `obj.method(ctx)`. The `Err` string is `{type}: {str(e)}` and the
-/// traceback has been written to stderr (E04-D004).
+/// traceback has been written to stderr (E04-D004). A return value is ignored
+/// (E04-D033).
 pub(crate) fn call_method(
     py: Python<'_>,
     obj: &Py<PyAny>,
     method: &str,
     token: u64,
 ) -> Result<(), String> {
+    invoke(py, obj, method, token, None)
+}
+
+/// Calls `obj.method(ctx, event)`. Same exception and return rules as
+/// [`call_method`]. `event` is a new object for this delivery (E04-D034).
+pub(crate) fn call_hook(
+    py: Python<'_>,
+    obj: &Py<PyAny>,
+    method: &str,
+    token: u64,
+    event: Py<PyAny>,
+) -> Result<(), String> {
+    invoke(py, obj, method, token, Some(event))
+}
+
+fn invoke(
+    py: Python<'_>,
+    obj: &Py<PyAny>,
+    method: &str,
+    token: u64,
+    event: Option<Py<PyAny>>,
+) -> Result<(), String> {
     let py_ctx = match py_context(py, token) {
         Ok(ctx) => ctx,
-        Err(err) => {
-            let message = describe(py, &err);
-            write_traceback(py, &err);
-            return Err(message);
-        }
+        Err(err) => return fail(py, err),
     };
-    match obj.bind(py).call_method1(method, (py_ctx,)) {
+    let result = match event {
+        Some(event) => obj.bind(py).call_method1(method, (py_ctx, event)),
+        None => obj.bind(py).call_method1(method, (py_ctx,)),
+    };
+    match result {
+        // Hooks have no result. A value the strategy returns is dropped.
         Ok(_) => Ok(()),
-        Err(err) => {
-            let message = describe(py, &err);
-            write_traceback(py, &err);
-            Err(message)
-        }
+        Err(err) => fail(py, err),
     }
+}
+
+fn fail(py: Python<'_>, err: PyErr) -> Result<(), String> {
+    let message = describe(py, &err);
+    write_traceback(py, &err);
+    Err(message)
 }
 
 #[pyclass(frozen, module = "mftik._mftik", name = "Context")]

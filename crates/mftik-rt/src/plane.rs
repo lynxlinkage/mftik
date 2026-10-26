@@ -640,6 +640,24 @@ fn panic_message(payload: &dyn Any) -> String {
     }
 }
 
+/// Runs `body` as one hook on a plane that has not opened a session.
+///
+/// Binding tests use this to call a strategy hook without fd 3 or NATS.
+/// [`Io::start`] leaves its thread running until the process exits; the
+/// command thread exits when the plane is dropped.
+#[doc(hidden)]
+pub fn in_one_hook<S: Strategy>(
+    strategy: S,
+    body: impl FnOnce(&mut S, &Context<S>),
+) -> io::Result<()> {
+    let io_thread = Io::start()?;
+    let clock = Clock::new();
+    let timers = Timers::new(io_thread.clone(), clock);
+    let plane = Plane::start(strategy, io_thread, clock, timers)?;
+    plane.in_hook(body);
+    Ok(())
+}
+
 fn emit_gate() {
     let mut out = io::stdout().lock();
     let _ = out.write_all(GATE_LINE.as_bytes());

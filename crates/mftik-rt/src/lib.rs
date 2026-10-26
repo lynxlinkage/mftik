@@ -53,7 +53,7 @@ pub use md::BookView;
 pub use mftik_core::book::OrderBook;
 pub use mftik_core::mdpath::{ReadError, TapeQuery};
 pub use mftik_core::symbol::Info;
-pub use plane::{CLOCK_TICK, GATE_LINE, INPUT_DIR_ENV, VOLUME_DIR_ENV};
+pub use plane::{CLOCK_TICK, GATE_LINE, INPUT_DIR_ENV, VOLUME_DIR_ENV, in_one_hook};
 pub use session::{RELEASE, run};
 pub use strategy::{
     AggTrade, AggTradeHandler, BalanceEvent, BalanceHandler, BestQuote, BestQuoteHandler,

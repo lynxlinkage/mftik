@@ -25,21 +25,23 @@ use crate::sdk::{
 };
 use crate::{feed_to_py, init_module, read_error};
 
-fn with_mftik(body: impl FnOnce(Python<'_>)) {
-    // One interpreter, and `import` inside registration can drop the GIL.
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+pub(crate) fn install_mftik(py: Python<'_>) {
+    let module = PyModule::new(py, "mftik").unwrap();
+    py.import("sys")
+        .unwrap()
+        .getattr("modules")
+        .unwrap()
+        .set_item("mftik", &module)
+        .unwrap();
+    init_module(py, &module).unwrap();
+}
+
+pub(crate) fn with_mftik(body: impl FnOnce(Python<'_>)) {
+    let _guard = crate::lock_python_tests();
     // Tests embed an interpreter. The wheel does not: auto-initialize stays off.
     Python::initialize();
     Python::attach(|py| {
-        let module = PyModule::new(py, "mftik").unwrap();
-        py.import("sys")
-            .unwrap()
-            .getattr("modules")
-            .unwrap()
-            .set_item("mftik", &module)
-            .unwrap();
-        init_module(py, &module).unwrap();
+        install_mftik(py);
         body(py);
     });
 }
