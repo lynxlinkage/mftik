@@ -50,16 +50,28 @@ jobs:
       - name: Sync ruff and maturin
         run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.12
       - name: Ruff
-        run: uv run --frozen --no-sync ruff check python
+        run: uv run --frozen --no-sync ruff check python tests/python
       - name: Ruff format
-        run: uv run --frozen --no-sync ruff format --check python
+        run: uv run --frozen --no-sync ruff format --check python tests/python
       - name: Build the mftik wheel
         run: uv run --frozen --no-sync maturin build --release --out dist
       - name: Install the wheel and import mftik
         run: |
           uv venv --managed-python --python 3.12 /tmp/mftik-smoke
           uv pip install --python /tmp/mftik-smoke/bin/python dist/*.whl
-          /tmp/mftik-smoke/bin/python python/smoke_import.py
+          meta="$(unzip -p dist/*.whl 'mftik-*.dist-info/METADATA')"
+          if printf '%s\n' "$meta" | grep -i protobuf; then
+            echo "wheel metadata mentions protobuf" >&2
+            exit 1
+          fi
+          unzip -l dist/*.whl | grep -q 'mftik/md/v1.pyi'
+          unzip -l dist/*.whl | grep -q 'mftik/td/v1.pyi'
+          unzip -l dist/*.whl | grep -q 'mftik/common/v1.pyi'
+          /tmp/mftik-smoke/bin/python tests/python/smoke_import.py
+          /tmp/mftik-smoke/bin/python -m unittest tests/python/test_types.py
+          uv pip install --python /tmp/mftik-smoke/bin/python 'mypy>=1.13,<2'
+          cd /tmp
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik
 
   # Temporary copy only. The committed proto tree is not edited.
   proto-drift:
