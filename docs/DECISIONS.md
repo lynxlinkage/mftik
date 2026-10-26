@@ -306,3 +306,14 @@ Yi Te 於 #441 確認。E05-02 讓 conformance 跑在打包後的 rootfs 上。�
 - E05-D025 合併後由 Grok Bot 把三個新 job 加進 main 的 required check；PR 不改 repo 設定。
 
 E05-02 的 `conformance-rootfs` job 在 3.11、3.12、3.13 並行（`fail-fast: false`），`needs: python-conform-wheel`。每個 job 下載 artifact `mftik-abi3-wheel`，不重建 wheel，只把它裝進乾淨 venv 以執行 `python -m mftik.pack`。`-dir` 是 `examples/python`（裡面是套件 `conform`），`-target conform:Conform`，`-python` 是該 job 的版本，`-wheel` 是那顆 abi3 wheel，沒有額外依賴。映像推到本機 `127.0.0.1` 的 `registry:2`，repository `mftik/conform`。接著用 E04-D076 釘住的 mftiko commit `dd73a2d421ca` 的 `internal/platform/artifact`（`tests/pack/check`）依 PROTOCOL §8.3 拉取、檢查、解開。manifest 的 entrypoint 必須是 `python/bin/python3 -m mftik.run conform:Conform`。第一段不得以 `/` 開頭、不得含空段、`.` 或 `..`；詞法路徑在 rootfs 內，而且 symlink 的目標也不得離開 rootfs，這樣才不是主機上的 Python。`mftiko-conformance -json report-rootfs.json -- <entrypoint>` 的工作目錄是 rootfs，argv 就是這份 manifest entrypoint。這個行程的 `PATH` 只有 `mftiko-conformance` 所在目錄，`HOME` 是空目錄，不轉發 `PYTHONPATH` 與 `LD_LIBRARY_PATH`。釘住的 harness 會換掉 worker 的環境，只留下 `PATH`、`HOME`、`TMPDIR`，不套用 manifest 的 `PYTHONPATH`（與 E05-01 相同）。解開之後在 rootfs 的 `python/lib/python<版本>/site-packages/mftik-conform.pth` 寫入 manifest `PYTHONPATH`（`app:site-packages`）相對該目錄的路徑，讓 `import conform` 找得到策略。這份檔不在 image 裡；STS 正式啟動時是把 manifest 的環境放進 worker。報告不論成敗都上傳，artifact 名 `mftiko-conformance-rootfs-<版本>`。11 項 `flow`、`beat`、`deadline`、`shutdown`、`buffer_priority`、`prehook`、`td_overflow`、`cloid`、`subject`、`recon`、`ctx` 必須全部是 pass；工具把 skip 當成功，腳本看到 skip 或 fail 就讓 job 失敗。branch protection 要加的 check 名稱是 `conformance-rootfs (3.11)`、`conformance-rootfs (3.12)`、`conformance-rootfs (3.13)`，合併後由 Grok Bot 加入（E05-D025）。本票不改 repo 設定、不改 `pack` job、不改 SDK、不改 PROTOCOL。不推送任何對外的 image 或 tag。
+
+## 決定（2026-10-26，E05-D051–E05-D054）
+
+Yi Te 於 #423 確認，並於同日修訂 E05-D051（對齊 Go `sdk/internal/tdpath`，不改 runtime）。
+
+- E05-D051（修訂）照 Go：`onEvent` 在 `failed` 時直接返回。hold 滿而 FAILED 之前已排入並套用的 live 事件，OnStop 的 OMS／Ledger 都含。觸發 FAILED 之後才處理到的事件，即使序號接得上也丟掉，不扣住、不發請求。
+- E05-D052 hold 裡已扣住的事件不交付（`release_step` 見 failed 即停）。
+- E05-D053 觸發 FAILED 的那一筆（第 65537 筆）不交付、不進 hold。
+- E05-D054 failed 之後的 order 與 recon 回覆不處理（`fail_full` 清掉 rounds；`on_recon_round` 見 failed 即返回）。
+
+Rust 在 dispatcher 取出時才分類（E03-D071）。第 65537 筆之前的事件在 FIFO 裡更早，`failed` 之前就套用，所以 OnStop 看得到。第 65537 筆之後才推進 TD buffer 的事件，Go 在 NATS callback 裡已經看到 `failed` 而丟掉；Rust 在取出時看到 `failed`，同樣丟掉。現行行為與 Go 等價，程式不改。測試在 `mftik-core`（sans-IO，時鐘是注入的 `NOW_MS`）與 `mftik-rt`（真實 nats-server；dispatcher 的 `on_stop` 在 TD drain 之後讀 OMS／Ledger，與策略的 OnStop 同一點）。沒有改 PROTOCOL。
