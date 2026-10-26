@@ -2,6 +2,11 @@
 # That output is not committed (E01-D005).
 /target
 
+# Generated proto pyclasses' stubs (E04-D021). build.rs rewrites them.
+/python/mftik/common/
+/python/mftik/md/
+/python/mftik/td/
+
 # Python
 __pycache__/
 *.py[cod]

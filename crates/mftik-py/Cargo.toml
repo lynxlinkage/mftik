@@ -13,9 +13,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mftik-core = { path = "../mftik-core" }
+mftik-proto = { path = "../mftik-proto" }
 mftik-rt = { path = "../mftik-rt" }
 pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
 
+[build-dependencies]
+heck = "0.5"
+prost = "0.14.4"
+prost-types = "0.14.4"
+protoc-bin-vendored = "3.3.0"
+
 [dev-dependencies]
-mftik-proto = { path = "../mftik-proto" }
 mftik-testkit = { path = "../mftik-testkit" }

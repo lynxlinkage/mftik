@@ -766,10 +766,14 @@ dependencies = [
 name = "mftik-py"
 version = "0.12.0"
 dependencies = [
+ "heck",
  "mftik-core",
  "mftik-proto",
  "mftik-rt",
  "mftik-testkit",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
  "pyo3",
 ]
 

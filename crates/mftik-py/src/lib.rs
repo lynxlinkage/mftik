@@ -1,11 +1,13 @@
 //! Python extension module `mftik._mftik`.
 //!
-//! The import package is pure Python (`python/mftik/`). This module is the
-//! binding onto `mftik-rt`: it hosts a [`mftik_rt::Strategy`] that holds the
-//! user's Python object, and the [`mftik_rt::Context`] methods this ticket
-//! exposes (E04-D001, E04-D003, E04-D005).
+//! The import package is pure Python (`python/mftik/`). This module binds
+//! `mftik-rt` (the session runtime) and the proto and SDK types. Protocol
+//! logic stays in `mftik-core` and IO stays in `mftik-rt` (E04-D001).
 
 mod context;
+mod error;
+mod proto;
+mod sdk;
 mod strategy;
 
 use mftik_rt::Strategy;
@@ -13,18 +15,31 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use crate::context::{ContextError, PyContext, PyPoster};
+use crate::context::{PyContext, PyPoster};
+use crate::error::ContextError;
 use crate::strategy::{LoadFailed, PyStrategy};
+
+pub use error::{context_error, read_error};
+pub use proto::ToPyMessage;
+pub use sdk::feed_to_py;
 
 /// `mftik.Context` is only valid inside the hook that received it (E04-D005).
 const CONTEXT_ERROR: &str = "mftik.Context is only valid inside the hook that received it";
 
+/// Register SDK types, proto wrappers, and the error hierarchy on `module`.
+pub fn init_module(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    error::register(py, module)?;
+    sdk::register(py, module)?;
+    proto::register(py, module)?;
+    Ok(())
+}
+
 #[pymodule]
 #[pyo3(name = "_mftik")]
 fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    init_module(m.py(), m)?;
     m.add_class::<PyContext>()?;
     m.add_class::<PyPoster>()?;
-    m.add("ContextError", m.py().get_type::<ContextError>())?;
     m.add_function(wrap_pyfunction!(_run, m)?)?;
     m.add_function(wrap_pyfunction!(_run_load_failed, m)?)?;
     m.add_function(wrap_pyfunction!(_registered_hooks, m)?)?;
@@ -89,7 +104,7 @@ fn before_exit(code: i32) {
     });
 }
 
-pub(crate) fn context_error() -> PyErr {
+pub(crate) fn invalid_context() -> PyErr {
     ContextError::new_err(CONTEXT_ERROR)
 }
 
@@ -128,3 +143,6 @@ pub(crate) fn require_callable(py: Python<'_>, callback: &Py<PyAny>) -> PyResult
         Err(PyTypeError::new_err("expected a callable"))
     }
 }
+
+#[cfg(test)]
+mod tests;

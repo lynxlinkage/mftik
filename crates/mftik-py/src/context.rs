@@ -2,7 +2,7 @@
 //!
 //! A `Context` handed to a hook stores only a token. The token matches the
 //! hook's thread-local scope, so using it after the hook returns, or from any
-//! other thread, raises [`ContextError`] instead of touching the runtime.
+//! other thread, raises `mftik.ContextError` instead of touching the runtime.
 //! [`Poster`] is the one object that may cross threads.
 
 use std::cell::Cell;
@@ -15,14 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::strategy::PyStrategy;
-use crate::{context_error, describe, require_callable, write_traceback};
-
-pyo3::create_exception!(
-    mftik,
-    ContextError,
-    pyo3::exceptions::PyException,
-    "The Context is no longer valid for this call."
-);
+use crate::{describe, invalid_context, require_callable, write_traceback};
 
 static HOOK_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -90,7 +83,7 @@ fn with_context<T>(token: u64, body: impl FnOnce(&Context<PyStrategy>) -> T) -> 
     ACTIVE.with(|slot| {
         let ptr = slot.get();
         if ptr.is_null() {
-            return Err(context_error());
+            return Err(invalid_context());
         }
         // SAFETY: a non-null slot on this thread was stored by `HookScope::enter`
         // and points at that scope's `Active` until the scope drops. The token
@@ -98,7 +91,7 @@ fn with_context<T>(token: u64, body: impl FnOnce(&Context<PyStrategy>) -> T) -> 
         // `Context` pointer is used. Other threads never see this slot.
         let active = unsafe { &*ptr };
         if active.token != token {
-            return Err(context_error());
+            return Err(invalid_context());
         }
         let ctx = unsafe { &*active.ctx };
         Ok(body(ctx))

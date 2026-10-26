@@ -212,3 +212,12 @@ Yi Te 於 #386 確認 E04-D001–E04-D010，於 #426 確認 E04-D011–E04-D014�
 - E04-D012 import、建構或型別檢查失敗的 `Done.error` 為 `load module:Class: {型別名}: {str(e)}`，traceback 只寫 stderr。仍進 `mftik_rt::run`，OnInit 回這個錯，session 以 `INIT_FAILED` 結束。不在 Hello 之前 exit 1。
 - E04-D013 抽出的測試架 crate 名為 `mftik-testkit`，`publish = false`，只當 dev-dependency。假 shim 可以起任意 argv。E03-D066 放在 `crates/mftik-rt/tests/common/` 的 nats-server 與假 shim 改由它提供；`mftik-rt` 用到那份 helper 的測試改依賴它。
 - E04-D014 CI 的 python job 只跑 Python 3.11（最低支援版本，abi3）；版本矩陣留到 E04-06。
+
+## 決定（2026-10-26，E04-D021–E04-D024）
+
+E04-02 Python 端的型別與錯誤。只做型別與轉換，不接 hook。
+
+- E04-D021 產生方式：`mftik-py` 的 build.rs 讀 descriptor 產生 frozen pyclass wrapper、`From` 轉換與 `.pyi`；`mftik-proto` 不碰 pyo3。產生碼不進 git（E01-D005）。
+- E04-D022 proto enum 對到 `enum.IntEnum`；收到未知值不丟例外，保留原始 int（同 Go 保留未知 enum 數值）。
+- E04-D023 欄位對應：`optional` 與沒設的 message 欄位為 `None`；oneof 每個分支各是一個屬性，未選為 `None`，另有屬性回傳選中分支名（未設為 `None`）；`repeated` 為 `tuple`；`map` 為 `dict`，每次讀取回新的副本。
+- E04-D024 一期不提供以 prost 編解碼 bytes 的進出（Go `proto.Marshal` 對應），有需要再加。

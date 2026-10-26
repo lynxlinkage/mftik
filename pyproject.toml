@@ -21,6 +21,13 @@ manifest-path = "crates/mftik-py/Cargo.toml"
 module-name = "mftik._mftik"
 python-source = "python"
 bindings = "pyo3"
+# build.rs writes these after the proto descriptor changes. They are gitignored
+# (E01-D005) and still have to ship in the wheel.
+include = [
+    "python/mftik/common/**/*.pyi",
+    "python/mftik/md/**/*.pyi",
+    "python/mftik/td/**/*.pyi",
+]
 
 [tool.ruff]
 target-version = "py311"

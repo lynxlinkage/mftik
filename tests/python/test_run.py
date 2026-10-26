@@ -1,6 +1,7 @@
 """Loader and release selection, without a session."""
 
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -73,6 +74,32 @@ class LoadTests(unittest.TestCase):
             format_load_error("sample_mod:Boom", caught.exception),
             "load sample_mod:Boom: RuntimeError: construct broke",
         )
+
+
+class RunAttributeTests(unittest.TestCase):
+    def test_run_stays_the_function(self):
+        script = """
+import mftik
+import sys
+assert "mftik.run" not in sys.modules
+first = mftik.run
+second = mftik.run
+assert first is second
+assert callable(first)
+try:
+    first(object())
+except TypeError as exc:
+    assert "mftik.Strategy" in str(exc)
+else:
+    raise SystemExit("expected TypeError")
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 if __name__ == "__main__":

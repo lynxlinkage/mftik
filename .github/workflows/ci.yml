@@ -70,6 +70,14 @@ jobs:
         run: |
           uv venv --managed-python --python 3.11 /tmp/mftik-smoke
           uv pip install --python /tmp/mftik-smoke/bin/python dist/*.whl
+          meta="$(unzip -p dist/*.whl 'mftik-*.dist-info/METADATA')"
+          if printf '%s\n' "$meta" | grep -i protobuf; then
+            echo "wheel metadata mentions protobuf" >&2
+            exit 1
+          fi
+          unzip -l dist/*.whl | grep -q 'mftik/md/v1.pyi'
+          unzip -l dist/*.whl | grep -q 'mftik/td/v1.pyi'
+          unzip -l dist/*.whl | grep -q 'mftik/common/v1.pyi'
           uv export --frozen --only-dev --no-emit-project --no-hashes -o /tmp/mftik-dev.txt
           uv pip install --python /tmp/mftik-smoke/bin/python -r /tmp/mftik-dev.txt
       - name: Import smoke
@@ -77,7 +85,11 @@ jobs:
       - name: Python unit tests
         run: /tmp/mftik-smoke/bin/python -m unittest discover -s tests/python -v
       - name: stubtest
-        run: /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik._mftik
+        run: |
+          cd /tmp
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik._mftik
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik.common.v1 mftik.md.v1 mftik.td.v1
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik
       - name: Python session e2e
         run: |
           test -n "$MFTIK_NATS_SERVER"
