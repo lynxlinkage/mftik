@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import overload
 
 from mftik.pack.error import PackError
 
@@ -336,20 +337,41 @@ def _token_url(realm: str, service: str, scopes: list[str]) -> str:
     return urllib.parse.urlunsplit(parts._replace(query=encoded, fragment=""))
 
 
+@overload
+def _quote_digest(
+    string: str,
+    safe: str | bytes = "",
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> str: ...
+
+
+@overload
+def _quote_digest(
+    string: bytes,
+    safe: str | bytes = "",
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> str: ...
+
+
+def _quote_digest(
+    string: str | bytes,
+    safe: str | bytes = "",
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> str:
+    """``quote_plus`` that keeps ``:`` so an OCI digest stays ``sha256:<hex>``."""
+    del safe
+    text = string.decode("utf-8", "strict") if isinstance(string, bytes) else string
+    return urllib.parse.quote_plus(text, safe=":", encoding=encoding, errors=errors)
+
+
 def _with_digest(url: str, digest: str) -> str:
     parts = urllib.parse.urlsplit(url)
     query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
     query.append(("digest", digest))
-
-    def quote(
-        text: str,
-        safe: str = "",
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        return urllib.parse.quote(text, safe=":")
-
-    encoded = urllib.parse.urlencode(query, quote_via=quote)
+    encoded = urllib.parse.urlencode(query, quote_via=_quote_digest)
     return urllib.parse.urlunsplit(parts._replace(query=encoded))
 
 

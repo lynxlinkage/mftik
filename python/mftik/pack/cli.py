@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Never
 
 from mftik.pack.build import Options, build_and_push, parse_env
 from mftik.pack.error import PackError
@@ -14,7 +15,7 @@ from mftik.pack.pins import DEFAULT_PYTHON
 class _Parser(argparse.ArgumentParser):
     """Usage errors are ``PackError`` so ``main`` can print one line and exit 1."""
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         raise PackError(message)
 
 
