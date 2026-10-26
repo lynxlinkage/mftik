@@ -1,12 +1,12 @@
 //! What the end-to-end tests share: nats-server with operator JWT auth, and
 //! a fake shim on a socketpair handed to the worker as the control fd
-//! (E03-05, E03-D056).
+//! (E03-05, E03-D056, E04-D013).
 //!
-//! Each test binary has its own `worker_entry` test that runs its strategy
-//! when `WORKER_ENV` is set; [`Shim::spawn`] re-runs the binary filtered to it.
+//! [`Shim::spawn`] re-runs the current test binary filtered to `worker_entry`.
+//! [`Shim::spawn_worker`] starts any program, which is how the Python session
+//! tests run `python -m mftik.run`.
 
-#![allow(dead_code)] // Each test binary uses part of it.
-
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
@@ -207,25 +207,90 @@ pub struct Ended {
     pub code: Option<i32>,
     /// The JSON lines the worker printed, in order.
     pub lines: Vec<String>,
+    /// The worker's stdout, unfiltered.
+    pub stdout: String,
     pub stderr: String,
+}
+
+/// A worker process the fake shim starts. [`Shim::spawn`] builds the one that
+/// re-runs the current test binary; [`WorkerSpawn`] is any other argv.
+pub struct WorkerSpawn {
+    program: PathBuf,
+    args: Vec<OsString>,
+    env: Vec<(OsString, OsString)>,
+    env_remove: Vec<OsString>,
+}
+
+impl WorkerSpawn {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+        }
+    }
+
+    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
+        self.args.push(arg.as_ref().to_owned());
+        self
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.args
+            .extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        self
+    }
+
+    pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.env
+            .push((key.as_ref().to_owned(), value.as_ref().to_owned()));
+        self
+    }
+
+    pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Self {
+        self.env_remove.push(key.as_ref().to_owned());
+        self
+    }
+
+    /// The current test binary, filtered to its `worker_entry` test.
+    pub fn test_entry() -> Self {
+        Self::new(env::current_exe().expect("test binary"))
+            .args(["worker_entry", "--exact", "--nocapture", "--test-threads=1"])
+            .env(WORKER_ENV, "1")
+    }
 }
 
 impl Shim {
     pub fn spawn(nats_url: &str) -> Shim {
+        Self::spawn_worker(nats_url, WorkerSpawn::test_entry())
+    }
+
+    /// Starts `worker` with the shim's socket at fd 3 (E04-D013).
+    pub fn spawn_worker(nats_url: &str, worker: WorkerSpawn) -> Shim {
         let (ours, theirs) = UnixStream::pair().expect("socketpair");
         ours.set_read_timeout(Some(FUSE)).expect("read timeout");
         let volume = TempDir::new("volume");
         let fd = theirs.as_raw_fd();
-        let mut cmd = Command::new(env::current_exe().expect("test binary"));
-        cmd.args(["worker_entry", "--exact", "--nocapture", "--test-threads=1"])
-            .env(WORKER_ENV, "1")
-            .env("MFTIKO_CTL_FD", "3")
-            .env("MFTIKO_NATS_URL", nats_url)
-            .env("MFTIKO_VOLUME_DIR", &volume.0)
+        let mut cmd = Command::new(&worker.program);
+        cmd.args(&worker.args)
             .env_remove("MFTIKO_INPUT_DIR")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for key in &worker.env_remove {
+            cmd.env_remove(key);
+        }
+        for (key, value) in &worker.env {
+            cmd.env(key, value);
+        }
+        cmd.env("MFTIKO_CTL_FD", "3")
+            .env("MFTIKO_NATS_URL", nats_url)
+            .env("MFTIKO_VOLUME_DIR", &volume.0);
         // SAFETY: dup2 is async-signal-safe. The new fd 3 has no
         // close-on-exec, so the worker inherits it as the shim's would.
         unsafe {
@@ -259,6 +324,7 @@ impl Shim {
     }
 
     /// The next frame that is not Beat or Report. `None` at EOF.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<worker_up::Msg> {
         loop {
             let up: WorkerUp = self.frames.read_message().expect("read from worker")?;
@@ -366,12 +432,18 @@ impl Shim {
         Ended {
             code: status.code(),
             lines,
+            stdout,
             stderr,
         }
     }
 }
 
 pub fn hello(shim: &mut Shim) {
+    expect_hello(shim, TEST_RELEASE);
+}
+
+#[track_caller]
+pub fn expect_hello(shim: &mut Shim, release: &str) {
     match shim.expect() {
         worker_up::Msg::Hello(hello) => {
             assert_eq!(hello.kind, "session");
@@ -380,7 +452,7 @@ pub fn hello(shim: &mut Shim) {
                 ["worker.v1", "stsctl.v1", "md.v1", "td.v1"]
             );
             assert_eq!(hello.pid as u32, shim.child.id());
-            assert_eq!(hello.release, TEST_RELEASE);
+            assert_eq!(hello.release, release);
         }
         other => panic!("want Hello, got {other:?}"),
     }

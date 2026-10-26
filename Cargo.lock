@@ -767,6 +767,9 @@ name = "mftik-py"
 version = "0.12.0"
 dependencies = [
  "mftik-core",
+ "mftik-proto",
+ "mftik-rt",
+ "mftik-testkit",
  "pyo3",
 ]
 
@@ -775,17 +778,29 @@ name = "mftik-rt"
 version = "0.12.0"
 dependencies = [
  "async-nats",
- "base64 0.23.1",
  "bytes",
  "futures-util",
  "libc",
  "mftik-core",
  "mftik-proto",
+ "mftik-testkit",
  "nkeys",
  "proptest",
  "prost",
  "signal-hook",
  "tokio",
+]
+
+[[package]]
+name = "mftik-testkit"
+version = "0.12.0"
+dependencies = [
+ "base64 0.23.1",
+ "libc",
+ "mftik-proto",
+ "mftik-rt",
+ "nkeys",
+ "prost",
 ]
 
 [[package]]

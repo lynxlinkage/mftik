@@ -9,7 +9,8 @@
 //!   mirroring mftiko `sdk/strategy.go` and `sdk/context.go`.
 //! - [`run`] (in `session`): the threads and the C4 driver. The dispatcher
 //!   runs on the thread that calls `run` (E03-D003). Every exit seals fd 3
-//!   and calls `_exit` ([`exit`], E03-D005).
+//!   and calls `_exit` ([`exit`], E03-D005). The binding may register a
+//!   callback that runs just before that `_exit` (E04-D002).
 //! - [`clock`]: the injected `now_ns` (E03-D004). [`timers`]: one timer
 //!   table on the IO thread. [`io`]: the tokio `current_thread` runtime.
 //! - [`nats`]: the connection with the session's credentials, retried inside

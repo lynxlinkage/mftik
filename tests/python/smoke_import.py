@@ -14,7 +14,7 @@ def main() -> None:
     if not isinstance(module_file, str):
         sys.exit("mftik imported without a file path")
     module_path = Path(module_file).resolve()
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     if module_path == repo_root or repo_root in module_path.parents:
         sys.exit(f"imported mftik from the source tree ({module_path})")
 
