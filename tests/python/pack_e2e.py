@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-MFTIKO_COMMIT = "dd73a2d421cafe1214d441478ef753ba2775510a"
+MFTIKO_COMMIT = "d204815de615de3b3882ec3afd7f9143d69a3533"
 MFTIKO_URL = "https://github.com/BullionBear/mftiko.git"
 CONTRACTS = ["worker.v1", "stsctl.v1", "md.v1", "td.v1"]
 

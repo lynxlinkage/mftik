@@ -64,6 +64,10 @@ message Report {
   // 不在活躍表，或這條 route 訂不了，是 REJECTED。在表上但不是 TRADABLE 是 PENDING，這輪不訂。
   // channel 被交易所 ack 之後，掛在上面的每一筆 feed 是 SUBSCRIBED。
   repeated FeedStatus feeds = 7;
+  // 發布用的 NATS 是否連著。沒填表示這個 worker 不上報（TD、STS，或還沒接到 bus）。
+  // md conn worker 在斷線與重連時都填，經 shim 的 socketpair 送出，不經 NATS（E12-D062）。
+  // 不改 feed 的 SUBSCRIBED：READY 仍是交易所 ack 過的訂閱（E12-D063）。
+  optional bool bus_up = 8;
 }
 
 enum ConnState {

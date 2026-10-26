@@ -146,7 +146,7 @@ message AgentRecord {
   string work_dir = 7; // 該行程的 WORK_DIR（E10-D092）。controller 沒有 WORK_DIR，留空。
 }
 
-// 不綁 lease（§3.2 W7），只在階段改變時寫；worker 確定不在之後由 agent 刪除。
+// 不綁 lease（§3.2 W7）。階段或 conditions 改變時寫；worker 確定不在之後由 agent 刪除。
 message WorkerStatus {
   mftiko.common.v1.WorkerRef worker = 1;
   string phase = 2; // STARTING | RUNNING | STOPPING | BACKOFF | EXITED | LOST
@@ -154,9 +154,12 @@ message WorkerStatus {
   string release = 4;
   string shim_release = 5;
   uint32 restarts = 6;
-  int64 rss_bytes = 7; // 寫入當下的值，只是快照：WorkerStatus 只在階段改變時寫（§3.2 W7）
+  int64 rss_bytes = 7; // 寫入當下的值，只是快照：階段或 conditions 改變時才寫（§3.2 W7）
   int64 started_at_ns = 8;
   mftiko.common.v1.ExitInfo last_exit = 9;
+  // 通用條件，格式與 SessionStatus.conditions 相同。md conn worker 的 bus 是 type "bus_disconnected"：
+  // status true 是斷線，false 是連著。沒有這條的 worker（TD、STS）不上報（E12-D063）。
+  repeated mftiko.common.v1.Condition conditions = 10;
 }
 
 // ---------- MD agent 不能重新推導的狀態 ----------
