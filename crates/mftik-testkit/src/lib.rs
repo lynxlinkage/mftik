@@ -219,6 +219,7 @@ pub struct WorkerSpawn {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
+    current_dir: Option<PathBuf>,
 }
 
 impl WorkerSpawn {
@@ -228,6 +229,7 @@ impl WorkerSpawn {
             args: Vec::new(),
             env: Vec::new(),
             env_remove: Vec::new(),
+            current_dir: None,
         }
     }
 
@@ -254,6 +256,12 @@ impl WorkerSpawn {
 
     pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Self {
         self.env_remove.push(key.as_ref().to_owned());
+        self
+    }
+
+    /// Working directory. The platform sets this to the unpacked rootfs (PROTOCOL §4.6).
+    pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.current_dir = Some(dir.as_ref().to_owned());
         self
     }
 
@@ -287,6 +295,9 @@ impl Shim {
         }
         for (key, value) in &worker.env {
             cmd.env(key, value);
+        }
+        if let Some(dir) = &worker.current_dir {
+            cmd.current_dir(dir);
         }
         cmd.env("MFTIKO_CTL_FD", "3")
             .env("MFTIKO_NATS_URL", nats_url)

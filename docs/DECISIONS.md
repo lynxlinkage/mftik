@@ -260,3 +260,16 @@ Yi Te 於 #431 確認。E04-06 的 wheel 與 PyPI 發佈。
 - E04-D065 第一次發佈：PR 合併後在 main 打 `v0.14.0`，等 Yi Te 確認才打。
 
 本票把 `Cargo.toml` 的 workspace version、`pyproject.toml`、`tests/python/smoke_import.py` 的期望值、`mftik.__version__`（`python/mftik/_version.py` 的 fallback；裝進 wheel 之後由套件 metadata 提供）一起改成 0.14.0。CI 的 `scripts/release-check versions` 檢查四者一致。`release.yml` 只在 `v*` tag 上建 E04-D063 的兩個 wheel、跑 smoke，tag 不是 `v` 加這個版本、或那個 commit 不在 main，就失敗，然後以 trusted publishing 上傳。不出 sdist，workflow 裡沒有 API token，也不打 tag。E01-D002 刪掉的舊 `release.yml`（映像、Strategon、compose）不復原。E04-D008 的「在那之前套件版本維持 0.12.0」到此結束。E04-D014 留到本票的版本矩陣是 E04-D063 的兩個 wheel；python job 的完整測試仍只跑 Python 3.11。
+
+## 決定（2026-10-26，E04-D071–E04-D076）
+
+Yi Te 於 #432 確認。E04-07 的 OCI 打包。
+
+- E04-D071 `mftik.pack` 用純 Python、只用標準函式庫實作，含最小 OCI 推送 client（blob、manifest 上傳；basic 與 token 交換）。不放進 `mftik._mftik`。
+- E04-D072 依賴層以 `pip download --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version <版本>` 取得 wheel 並解開到 `site-packages/`；只有 sdist 的依賴直接報錯，不在本機編譯。
+- E04-D073 CPython 預設 3.12，允許 3.11–3.13；python-build-standalone 的版本與 sha256 寫死在程式，下載後驗證，不符即失敗。
+- E04-D074 pyc 以 `unchecked-hash` 模式預先編譯。
+- E04-D075 下載的 CPython 與 wheel 快取在 `~/.cache/mftik/pack`，以 sha256 為 key。
+- E04-D076 CI 的 mftiko checkout 釘在 commit `dd73a2d421ca`，需要時手動更新。
+
+本票的 `python -m mftik.pack` 依這些決定打包。三層是 runtime（釘住的 `install_only_stripped` 加上同版本的 mftik wheel）、依賴（`site-packages/`）、策略（`app/`）。python-build-standalone 裡含 `..` 的 symlink 以檔案複本放進層，解開時才過得了 §8.3。sdk、依賴、策略的 `.py` 以 unchecked-hash 預先編成 `.pyc`；manifest 設 `PYTHONDONTWRITEBYTECODE=1`，worker 不改 rootfs。`contracts` 來自 `mftik._mftik.session_contracts`，與 `Hello.contracts` 同源。CI 的 `pack` job 推到本機 `registry:2`，用釘住的 mftiko `internal/platform/artifact` 拉取、檢查、解開，再以假 shim 在空的 PATH 跑完 Init、Start、Stop。同一份輸入打兩次，digest 相同。不推送任何對外的 image 或 tag。
