@@ -273,3 +273,24 @@ Yi Te 於 #432 確認。E04-07 的 OCI 打包。
 - E04-D076 CI 的 mftiko checkout 釘在 commit `dd73a2d421ca`，需要時手動更新。
 
 本票的 `python -m mftik.pack` 依這些決定打包。三層是 runtime（釘住的 `install_only_stripped` 加上同版本的 mftik wheel）、依賴（`site-packages/`）、策略（`app/`）。python-build-standalone 裡含 `..` 的 symlink 以檔案複本放進層，解開時才過得了 §8.3。sdk、依賴、策略的 `.py` 以 unchecked-hash 預先編成 `.pyc`；manifest 設 `PYTHONDONTWRITEBYTECODE=1`，worker 不改 rootfs。`contracts` 來自 `mftik._mftik.session_contracts`，與 `Hello.contracts` 同源。CI 的 `pack` job 推到本機 `registry:2`，用釘住的 mftiko `internal/platform/artifact` 拉取、檢查、解開，再以假 shim 在空的 PATH 跑完 Init、Start、Stop。同一份輸入打兩次，digest 相同。不推送任何對外的 image 或 tag。
+
+## 決定（2026-10-26，E05-D001–E05-D014）
+
+Yi Te 於 #387 確認 E05-D001–E05-D010，於 #440 確認 E05-D011–E05-D014。E05 的共同決定與 E05-01 的決定。與 Go 版語意不同之處先回報再做。
+
+- E05-D001 Rust 版 conformance 保留：`examples/conform` 的 job 照跑，守 `mftik-rt`；Python 版守 PyO3 那層。兩者都在每個 PR 的 CI 跑。
+- E05-D002 Python 版 conformance 在 3.11、3.12、3.13 三版各跑一次，並行。0.14.0 宣告支援 3.11–3.13（E04-D064），abi3 wheel 要在三版上真的跑過。
+- E05-D003 conformance 也跑在 `python -m mftik.pack` 打包、再由釘住的 mftiko `internal/platform/artifact` 解開的 rootfs 上（E05-02）：STS 跑的是 rootfs，不是 venv。
+- E05-D004 範例策略三個，放在 `examples/python/`：`md_watch`（只用 MD）、`maker`（TD 下單撤單）、`stateful`（volume 與 inputs）。每個都附端對端測試，在 CI 跑，也都能打包。
+- E05-D005 使用文件用英文，放在 repo 的 `docs/python/`，Markdown，不架網站。
+- E05-D006 #423（hold 滿而 FAILED 時交付 TD buffer）併進 E05，成為 E05-05，在 1.0.0 之前修掉。
+- E05-D007 testnet 實機部署（E05-06）等 mftiko #385 的演練完成；由 Yi Te 在 testnet 執行，或開放存取後由 Claude 執行，開工前再定。先只用 MD（`md_watch`），TD 等有 testnet 帳號再加。
+- E05-D008 1.0.0 發佈放進 E05，成為 E05-07，在 E05-06 之後，等 Yi Te 確認才打 tag（同 E04-D065）。
+- E05-D009 E05-06 時把 pin 改到 testnet 部署的 mftiko commit（`scripts/sync-proto`），並以那個 commit 的 `mftiko-conformance` 重跑 E05-01、E05-02。
+- E05-D010 並行與決策區段：E05-01、E05-03、E05-04、E05-05 同時開工；E05-02 等 E05-01；E05-06 等 E05-01–E05-04 與 mftiko #385；E05-07 等 E05-06。各票的決策區段：E05-01 從 D011 起，E05-02 從 D021 起，依此類推，E05-07 從 D071 起。第一張合併的 PR 把 E05-D001–E05-D010 寫進 `docs/DECISIONS.md`；後合併的 PR 以 merge main 解 DECISIONS 衝突，不 rebase。
+- E05-D011 wheel 只建一次 abi3 wheel 並存成 artifact；3.11、3.12、3.13 三個 job 各自裝進乾淨 venv 跑 `mftiko-conformance`。
+- E05-D012 不另寫 Python conform 策略本身的測試；conformance 全套 11 項即其測試。
+- E05-D013 本 PR 把 E05-D001–E05-D010 一併寫進 `docs/DECISIONS.md`；其他平行票以 merge main 解衝突。
+- E05-D014 三個 Python conformance job 設為 branch protection 的 required check，由 Yi Te 在 repo 設定加入；PR 不改 repo 設定。
+
+E05-01 的 Python 標準策略在 `examples/python/conform`，以 `python -m mftik.run conform:Conform` 啟動。行為與 `examples/conform` 及 Go `examples/strategies/conform` 一對一：`InitPayload.params` 的欄位同名，沒給的是零值，不認得的略過；`until_seq` 解得開但策略不讀。stdout 每行一個 JSON，欄位與順序同 Go 的 `observation`（`hook`、`ctx`、`seq`、`incarnation`、`view`、`fetch`），零值與空的省略，bool 設了就寫（含 false）。§9.8 列的 `md`、`queued` 不是這支策略寫的（E03-D101）。CI 的 `python-conform-wheel` job 建一次 abi3 wheel，artifact 名 `mftik-abi3-wheel`；`mftiko-conformance-python` 在 3.11、3.12、3.13 並行，各自裝進乾淨 venv，報告 artifact 是 `mftiko-conformance-python-<版本>`。釘住的 `mftiko-conformance` 會換掉 worker 的環境、不轉發 `PYTHONPATH`，所以 venv 的 `mftik-conform.pth` 把 `examples/python` 加進 `sys.path`；argv 仍是 `<venv>/bin/python -m mftik.run conform:Conform`。不另寫這支策略的測試（E05-D012）。branch protection 要加的 check 名稱是 `mftiko-conformance-python (3.11)`、`mftiko-conformance-python (3.12)`、`mftiko-conformance-python (3.13)`，由 Yi Te 在 repo 設定加入（E05-D014）。Rust 版 `mftiko-conformance` job 照跑。本票沒有改 SDK。同一顆 abi3 wheel 在 Python 3.11、3.12、3.13 上，`flow`、`beat`、`deadline`、`shutdown`、`buffer_priority`、`prehook`、`td_overflow`、`cloid`、`subject`、`recon`、`ctx` 全部 pass，沒有 skip。

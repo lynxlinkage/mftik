@@ -44,8 +44,8 @@ Python uses [uv](https://docs.astral.sh/uv/) and [maturin](https://www.maturin.r
 ```bash
 uv sync
 uv run maturin develop
-uv run ruff check python tests/python crates/mftik-py/tests/pystrategies
-uv run ruff format --check python tests/python crates/mftik-py/tests/pystrategies
+uv run ruff check python tests/python examples/python crates/mftik-py/tests/pystrategies
+uv run ruff format --check python tests/python examples/python crates/mftik-py/tests/pystrategies
 ```
 
 `mftik` requires Python 3.11 or newer (abi3). A session worker starts with `python -m mftik.run module:Class`. `Class` is constructed with no arguments and must be a `mftik.Strategy`.
@@ -66,4 +66,12 @@ The `mftiko-conformance` job runs the suite on every pull request. [`scripts/ins
 GOBIN="$PWD/bin" scripts/install-mftiko-conformance
 cargo build --release -p mftik-conform
 bin/mftiko-conformance -json report.json -- target/release/conform
+```
+
+The Python standard strategy is [`examples/python/conform`](examples/python/conform), started with `python -m mftik.run conform:Conform`. `python-conform-wheel` builds one abi3 wheel. `mftiko-conformance-python` installs that wheel into a clean venv and runs the same suite on Python 3.11, 3.12, and 3.13 in parallel. Each report is an artifact. The pinned harness replaces the worker environment and does not forward `PYTHONPATH`, so the venv's `mftik-conform.pth` adds `examples/python` to `sys.path`. Locally, with the wheel installed in `.venv`:
+
+```bash
+site="$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+printf '%s\n' "$PWD/examples/python" > "$site/mftik-conform.pth"
+bin/mftiko-conformance -json report.json -- .venv/bin/python -m mftik.run conform:Conform
 ```
