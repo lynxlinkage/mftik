@@ -89,7 +89,7 @@ jobs:
           cd /tmp
           /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik._mftik
           /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik.common.v1 mftik.md.v1 mftik.td.v1
-          /tmp/mftik-smoke/bin/python -m mypy.stubtest --ignore-missing-stub mftik
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik
       - name: Python session e2e
         run: |
           test -n "$MFTIK_NATS_SERVER"

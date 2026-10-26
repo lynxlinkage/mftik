@@ -84,9 +84,13 @@ __version__ = package_version()
 
 def __getattr__(name: str):
     # ``python -m mftik.run`` imports this package first. Importing ``mftik.run``
-    # here would leave it in ``sys.modules`` before that entrypoint executes.
+    # at package import time would leave it in ``sys.modules`` before that
+    # entrypoint executes, so the function is bound on first use.
     if name == "run":
-        from mftik.run import run
+        from mftik.run import run as entry
 
-        return run
+        # Importing the submodule assigns this name to the module. Put the
+        # function back; otherwise the next lookup is the module.
+        globals()["run"] = entry
+        return entry
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
