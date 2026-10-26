@@ -1995,3 +1995,216 @@ fn the_hold_cap_fails_the_session_once() {
     assert!(path.on_backoff(7).is_empty());
     assert!(path.on_recon_round(7, 1, ReconOutcome::Failed).is_empty());
 }
+
+#[test]
+fn hold_full_keeps_what_was_applied_and_drops_what_follows() {
+    // E05-D051 (revised) through E05-D054. Live events applied before the hold
+    // fills stay in the OMS and the ledger. The event that trips the cap, events
+    // still in the hold, and anything fed after the failure — an in-sequence
+    // event included — are not delivered. Replies after the failure are ignored.
+    let mut path = open(vec![decl(7, &[1]), decl(8, &[1])]);
+    let mut mint = Mint::new();
+    listen(&mut path);
+    baseline(&mut path, 7, 1, 10, 4);
+    let generation = ask(&mut path, 8);
+
+    let early = id_of(1, 40);
+    let effects = path.on_account_event(
+        7,
+        order_event(
+            1,
+            11,
+            row(&early, td::OrderStatus::New, 1001, 1.0),
+            td::OrderCause::Accepted,
+            0,
+            "",
+        ),
+    );
+    assert_eq!(names(&drive(&mut path, effects, |_, _| {})), ["order"]);
+    let effects = path.on_account_event(
+        7,
+        event(
+            1,
+            12,
+            Some(td::account_event::Event::PositionUpdate(
+                td::PositionUpdate {
+                    positions: vec![td::Position {
+                        uid: 4,
+                        size: 2.0,
+                        ..Default::default()
+                    }],
+                },
+            )),
+        ),
+    );
+    assert_eq!(names(&drive(&mut path, effects, |_, _| {})), ["position"]);
+    let effects = path.on_account_event(
+        7,
+        event(
+            1,
+            13,
+            Some(td::account_event::Event::BalanceUpdate(td::BalanceUpdate {
+                balances: vec![td::Balance {
+                    asset: "usd".to_owned(),
+                    free: 1.0,
+                    locked: 2.0,
+                    prelock: 3.0,
+                }],
+            })),
+        ),
+    );
+    assert_eq!(names(&drive(&mut path, effects, |_, _| {})), ["balance"]);
+
+    let (submitted, sent) = submit(&mut path, &mut mint, order_for(7, 1, 1001));
+    let order_ticket = ticket(&sent);
+    assert!(status_is(
+        &path.order(7, &submitted).unwrap(),
+        td::OrderStatus::PendingNew
+    ));
+
+    let held_id = id_of(1, 2);
+    assert!(
+        path.on_account_event(
+            8,
+            order_event(
+                1,
+                1,
+                row(&held_id, td::OrderStatus::New, 1001, 1.0),
+                td::OrderCause::Accepted,
+                0,
+                "",
+            ),
+        )
+        .is_empty()
+    );
+    let filler = event(1, 1, None);
+    for _ in 1..HOLD_CAP {
+        assert!(path.on_account_event(8, filler.clone()).is_empty());
+    }
+    assert_eq!(path.held(), HOLD_CAP);
+    assert!(path.order(8, &held_id).is_none());
+
+    let trigger = id_of(1, 3);
+    let overflow = path.on_account_event(
+        8,
+        order_event(
+            1,
+            2,
+            row(&trigger, td::OrderStatus::New, 1001, 1.0),
+            td::OrderCause::Accepted,
+            0,
+            "",
+        ),
+    );
+    assert_eq!(
+        overflow,
+        vec![Effect::Fail {
+            reason: REASON_HOLD_FULL.to_owned()
+        }]
+    );
+    assert_eq!(path.held(), HOLD_CAP);
+    assert!(path.order(8, &trigger).is_none());
+    assert!(status_is(
+        &path.order(7, &early).unwrap(),
+        td::OrderStatus::New
+    ));
+    assert_eq!(path.order(7, &early).unwrap().qty, 1.0);
+    assert_eq!(path.position(7, 4).unwrap().size, 2.0);
+    let usd = path.balance(7, "usd").unwrap();
+    assert_eq!((usd.free, usd.locked, usd.prelock), (1.0, 2.0, 3.0));
+
+    // In sequence after the trigger, a gap, and a duplicate: none is applied,
+    // and none starts a recon.
+    let late = id_of(1, 41);
+    assert!(
+        path.on_account_event(
+            7,
+            order_event(
+                1,
+                14,
+                row(&late, td::OrderStatus::New, 1001, 1.0),
+                td::OrderCause::Accepted,
+                0,
+                "",
+            ),
+        )
+        .is_empty()
+    );
+    assert!(path.order(7, &late).is_none());
+    assert!(path.on_account_event(7, event(1, 99, None)).is_empty());
+    assert!(path.on_account_event(7, event(1, 11, None)).is_empty());
+    assert!(path.on_account_event(8, filler).is_empty());
+    assert_eq!(path.held(), HOLD_CAP);
+    assert!(path.end_hook().is_none());
+    assert_eq!(path.held(), HOLD_CAP);
+    assert!(path.order(8, &held_id).is_none());
+
+    assert!(
+        path.on_order_round(
+            order_ticket,
+            RoundOutcome::Reply(td::OrderReply {
+                accepted: false,
+                code: 101,
+                reason: "down".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .is_empty()
+    );
+    assert!(status_is(
+        &path.order(7, &submitted).unwrap(),
+        td::OrderStatus::PendingNew
+    ));
+
+    let planted = id_of(1, 50);
+    let reply = view(
+        1,
+        1,
+        4,
+        vec![row(&planted, td::OrderStatus::Accepted, 1001, 9.0)],
+        vec![td::Position {
+            uid: 4,
+            size: 9.0,
+            ..Default::default()
+        }],
+        vec![td::Balance {
+            asset: "eur".to_owned(),
+            free: 4.0,
+            locked: 0.0,
+            prelock: 0.0,
+        }],
+    );
+    assert!(
+        path.on_recon_round(8, generation, ReconOutcome::Reply(reply))
+            .is_empty()
+    );
+    assert!(path.order(8, &planted).is_none());
+    assert!(path.position(8, 4).is_none());
+    assert!(path.balance(8, "eur").is_none());
+    assert!(path.on_backoff(8).is_empty());
+    assert!(
+        path.on_recon_round(8, generation, ReconOutcome::Failed)
+            .is_empty()
+    );
+    assert_eq!(path.request_recon(7).unwrap_err(), Error::Stopping);
+    assert_eq!(path.request_recon(8).unwrap_err(), Error::Stopping);
+    assert_eq!(
+        path.submit(order_for(7, 1, 1001), NOW_MS, &mut mint)
+            .unwrap_err(),
+        Error::Stopping
+    );
+    assert!(status_is(
+        &path.order(7, &early).unwrap(),
+        td::OrderStatus::New
+    ));
+    assert_eq!(path.position(7, 4).unwrap().size, 2.0);
+    let usd = path.balance(7, "usd").unwrap();
+    assert_eq!((usd.free, usd.locked, usd.prelock), (1.0, 2.0, 3.0));
+    assert!(status_is(
+        &path.order(7, &submitted).unwrap(),
+        td::OrderStatus::PendingNew
+    ));
+    assert!(path.order(7, &late).is_none());
+    assert!(path.order(8, &trigger).is_none());
+    assert_eq!(path.held(), HOLD_CAP);
+}

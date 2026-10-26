@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant as StdInstant};
 
@@ -226,6 +226,70 @@ impl Peer {
         self.flush();
     }
 
+    /// Account 7's view is the fixture snapshot. Account 8's view and every
+    /// `td.order` stay parked until [`Parked`] publishes the reply.
+    fn serve_live_and_parked(&self) -> Parked {
+        let view_inbox: Arc<Mutex<Option<String>>> = Arc::default();
+        let order_inbox: Arc<Mutex<Option<String>>> = Arc::default();
+        let nats = self.nats.clone();
+        let view_slot = Arc::clone(&view_inbox);
+        let mut views = self
+            .io
+            .block_on({
+                let nats = nats.clone();
+                async move { nats.subscribe("td.view.*").await }
+            })
+            .expect("subscribe td.view");
+        self.io.spawn(async move {
+            while let Some(msg) = views.next().await {
+                let api_id: i64 = msg.subject.as_str()["td.view.".len()..]
+                    .parse()
+                    .expect("api id");
+                let to = msg.reply.expect("reply subject");
+                if api_id == 8 {
+                    *view_slot.lock().expect("view") = Some(to.to_string());
+                    continue;
+                }
+                let reply = td::ViewReply {
+                    incarnation: INCARNATION,
+                    seq: SNAPSHOT_SEQ,
+                    cancel_batch: cancel_batch(api_id),
+                    reply: Some(td::view_reply::Reply::Recon(td::Recon {
+                        incarnation: INCARNATION,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                };
+                nats.publish(to, reply.encode_to_vec().into())
+                    .await
+                    .expect("view reply");
+            }
+        });
+        let nats = self.nats.clone();
+        let order_slot = Arc::clone(&order_inbox);
+        let mut orders = self
+            .io
+            .block_on({
+                let nats = nats.clone();
+                async move { nats.subscribe("td.order.*").await }
+            })
+            .expect("subscribe td.order");
+        self.io.spawn(async move {
+            while let Some(msg) = orders.next().await {
+                td::OrderRequest::decode(msg.payload.as_ref()).expect("request");
+                let to = msg.reply.expect("reply subject");
+                *order_slot.lock().expect("order") = Some(to.to_string());
+            }
+        });
+        self.flush();
+        Parked {
+            nats: self.nats.clone(),
+            io: self.io.clone(),
+            view_inbox,
+            order_inbox,
+        }
+    }
+
     fn publish(&self, api_id: i64, event: td::AccountEvent) {
         let nats = self.nats.clone();
         self.io
@@ -252,6 +316,41 @@ impl Peer {
 
     fn requests(&self) -> Vec<td::OrderRequest> {
         self.requests.lock().expect("requests").clone()
+    }
+}
+
+/// Reply subjects captured by [`Peer::serve_live_and_parked`].
+struct Parked {
+    nats: Client,
+    io: Io,
+    view_inbox: Arc<Mutex<Option<String>>>,
+    order_inbox: Arc<Mutex<Option<String>>>,
+}
+
+impl Parked {
+    fn inbox(slot: &Mutex<Option<String>>, what: &'static str) -> String {
+        wait_until(what, || slot.lock().expect("inbox").is_some());
+        slot.lock().expect("inbox").clone().expect(what)
+    }
+
+    fn view_inbox(&self) -> String {
+        Self::inbox(&self.view_inbox, "api 8 view")
+    }
+
+    fn order_inbox(&self) -> String {
+        Self::inbox(&self.order_inbox, "the order")
+    }
+
+    fn publish(&self, inbox: String, body: Vec<u8>) {
+        let nats = self.nats.clone();
+        self.io
+            .block_on(async move {
+                nats.publish(inbox, body.into())
+                    .await
+                    .map_err(|err| err.to_string())?;
+                nats.flush().await.map_err(|err| err.to_string())
+            })
+            .expect("reply");
     }
 }
 
@@ -300,10 +399,38 @@ fn position_event(seq: u64, incarnation: u32) -> td::AccountEvent {
     }
 }
 
+fn balance_event(seq: u64, incarnation: u32) -> td::AccountEvent {
+    td::AccountEvent {
+        seq,
+        source: source(incarnation),
+        event: Some(td::account_event::Event::BalanceUpdate(td::BalanceUpdate {
+            balances: vec![td::Balance {
+                asset: "usd".into(),
+                free: 1.0,
+                locked: 2.0,
+                prelock: 3.0,
+            }],
+        })),
+    }
+}
+
+/// The client id [`order_event`] stores for `seq`.
+fn event_id(seq: u64) -> String {
+    cloid::encode(
+        1,
+        cloid::EPOCH_MS + 1 + (seq / 1024) as i64,
+        (seq % 1024) as u32,
+    )
+    .expect("cloid")
+}
+
 // ---------- the session side ----------
 
 /// Runs inside the next delivered hook, once.
 type During = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+/// Reads the OMS from the strategy `on_stop`, after the TD drain.
+type StopWatch = Box<dyn FnMut(&TdPath, &dispatch::StopInfo) -> Result<(), String> + Send>;
 
 /// A delivered hook, and whether `order` found the hook's order inside it.
 #[derive(Clone, Debug)]
@@ -324,6 +451,10 @@ struct Rig {
 }
 
 fn rig(recv_window: Duration) -> Rig {
+    rig_with(recv_window, None)
+}
+
+fn rig_with(recv_window: Duration, on_stop: Option<StopWatch>) -> Rig {
     let server = start_server();
     let peer = Peer::connect(&server.url);
     let io = Io::start().expect("io");
@@ -336,10 +467,18 @@ fn rig(recv_window: Duration) -> Rig {
     let during: During = Arc::default();
     let unsubscribe = Arc::clone(&path);
     let disp_logs = Arc::clone(&logs);
+    let on_stop = on_stop.map(|mut callback| {
+        let path = Arc::clone(&path);
+        Box::new(move |info: &dispatch::StopInfo| {
+            let td = path.get().expect("td").clone();
+            callback(&td, info)
+        }) as dispatch::OnStopHook
+    });
     let disp = Dispatcher::new(dispatch::Config {
         recv_window,
         hook_timeout: Duration::ZERO,
         now_ns: clock.now_ns(),
+        on_stop,
         unsubscribe_td: Some(Box::new(move || {
             if let Some(td) = unsubscribe.get() {
                 td.unsubscribe();
@@ -856,4 +995,218 @@ fn after_unsubscribe_a_queued_recon_is_delivered_and_its_release_stops() {
         ]
     );
     assert_eq!(rig.peer.views.load(Ordering::SeqCst), 3);
+}
+
+/// What account 7 and 8 hold when the strategy `on_stop` runs.
+#[derive(Clone, Debug)]
+struct StopLedger {
+    early: Option<i32>,
+    submitted: Option<i32>,
+    late: Option<i32>,
+    trigger: Option<i32>,
+    held: Option<i32>,
+    planted: Option<i32>,
+    pos7: Option<f64>,
+    pos8: Option<f64>,
+    usd: Option<(f64, f64, f64)>,
+    eur: Option<f64>,
+    open7: usize,
+    open8: usize,
+}
+
+#[test]
+fn on_stop_keeps_events_applied_before_hold_full_and_drops_the_rest() {
+    // E05-D051 (revised) through E05-D054. Account 7 is live; its order,
+    // position, and balance are applied before the hold fills. Account 8
+    // stays holding. The dispatcher is blocked so the 65537th event, a later
+    // in-sequence event, the parked recon reply, and the order reject sit
+    // behind that trigger. `on_stop` runs after the drain, which is when the
+    // strategy reads the OMS.
+    let snap: Arc<Mutex<Option<StopLedger>>> = Arc::default();
+    let submitted_id: Arc<Mutex<Option<String>>> = Arc::default();
+    let (record, submitted_for_stop) = (Arc::clone(&snap), Arc::clone(&submitted_id));
+    let early_id = event_id(6);
+    let late_id = event_id(9);
+    let trigger_id = event_id(65_537);
+    let held_id = event_id(1);
+    let planted_id = event_id(70_000);
+    let planted_reply = planted_id.clone();
+    let rig = rig_with(
+        Duration::from_secs(60),
+        Some(Box::new(move |td, _| {
+            let submitted = submitted_for_stop.lock().expect("id").clone();
+            let usd = td.balance(7, "usd");
+            *record.lock().expect("snap") = Some(StopLedger {
+                early: td.order(7, &early_id).map(|order| order.status),
+                submitted: submitted.and_then(|id| td.order(7, &id).map(|order| order.status)),
+                late: td.order(7, &late_id).map(|order| order.status),
+                trigger: td.order(8, &trigger_id).map(|order| order.status),
+                held: td.order(8, &held_id).map(|order| order.status),
+                planted: td.order(8, &planted_id).map(|order| order.status),
+                pos7: td.position(7, 1001).map(|position| position.size),
+                pos8: td.position(8, 4).map(|position| position.size),
+                usd: usd.map(|balance| (balance.free, balance.locked, balance.prelock)),
+                eur: td.balance(8, "eur").map(|balance| balance.free),
+                open7: td.open_orders(7, 0).len(),
+                open8: td.open_orders(8, 0).len(),
+            });
+            Ok(())
+        })),
+    );
+    let parked = rig.peer.serve_live_and_parked();
+    rig.td.listen().expect("listen");
+    rig.td.request_recon(7).expect("recon 7");
+    wait_until("account 7 recon", || {
+        rig.stamps(7).iter().any(|(kind, _)| *kind == "recon")
+    });
+    assert!(rig.stamps(8).is_empty());
+
+    rig.peer.publish(7, order_event(6, INCARNATION));
+    rig.peer.publish(7, position_event(7, INCARNATION));
+    rig.peer.publish(7, balance_event(8, INCARNATION));
+    rig.peer.flush();
+    wait_until("the three live hooks", || rig.stamps(7).len() == 4);
+
+    let base = rig.td.fed();
+    let cap = tdpath::HOLD_CAP as u64;
+    let batch = 4096;
+    let mut seq = 0;
+    while seq < cap {
+        let nats = rig.peer.nats.clone();
+        let from = seq + 1;
+        seq += batch;
+        rig.peer
+            .io
+            .block_on(async move {
+                for n in from..=from + batch - 1 {
+                    let event = order_event(n, INCARNATION).encode_to_vec();
+                    nats.publish(tdpath::evt_subject(8), event.into()).await?;
+                }
+                nats.flush().await.map_err(|err| err.to_string().into())
+            })
+            .map_err(|err: Box<dyn std::error::Error + Send + Sync>| err.to_string())
+            .expect("publish");
+        let seen = base + seq;
+        wait_until("the batch to reach the hold", || rig.td.fed() == seen);
+    }
+    assert_eq!(seq, cap);
+    assert!(!rig.logged(tdpath::REASON_HOLD_FULL));
+    assert!(rig.stamps(8).is_empty());
+
+    let id = rig.td.submit(buy(7, 1)).expect("submit");
+    *submitted_id.lock().expect("id") = Some(id);
+    let order_inbox = parked.order_inbox();
+    rig.td.request_recon(8).expect("recon 8");
+    let view_inbox = parked.view_inbox();
+
+    let (go, wait) = std_mpsc::channel::<()>();
+    let entered = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&entered);
+    rig.disp
+        .push_td(move || {
+            flag.store(true, Ordering::SeqCst);
+            let _ = wait.recv_timeout(FUSE);
+        })
+        .expect("blocker");
+    wait_until("the blocker is running", || entered.load(Ordering::SeqCst));
+    assert_eq!(rig.disp.stats().td.depth, 0);
+
+    rig.peer.publish(8, order_event(65_537, INCARNATION));
+    rig.peer.flush();
+    wait_until("the trigger is queued", || rig.disp.stats().td.depth >= 1);
+    assert_eq!(rig.disp.stats().td.depth, 1);
+
+    rig.peer.publish(7, order_event(9, INCARNATION));
+    rig.peer.flush();
+    wait_until("the late event is queued", || {
+        rig.disp.stats().td.depth >= 2
+    });
+    assert_eq!(rig.disp.stats().td.depth, 2);
+
+    parked.publish(
+        view_inbox,
+        td::ViewReply {
+            incarnation: INCARNATION,
+            seq: SNAPSHOT_SEQ,
+            cancel_batch: 1,
+            reply: Some(td::view_reply::Reply::Recon(td::Recon {
+                open_orders: vec![td::Order {
+                    uid: 4,
+                    client_order_id: planted_reply,
+                    status: td::OrderStatus::New as i32,
+                    ..Default::default()
+                }],
+                positions: vec![td::Position {
+                    uid: 4,
+                    size: 9.0,
+                    ..Default::default()
+                }],
+                balances: vec![td::Balance {
+                    asset: "eur".into(),
+                    free: 4.0,
+                    locked: 0.0,
+                    prelock: 0.0,
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    );
+    wait_until("the recon reply is queued", || {
+        rig.disp.stats().td.depth >= 3
+    });
+    assert_eq!(rig.disp.stats().td.depth, 3);
+
+    parked.publish(
+        order_inbox,
+        td::OrderReply {
+            accepted: false,
+            code: 101,
+            reason: "down".into(),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    );
+    wait_until("the order reply is queued", || {
+        rig.disp.stats().td.depth >= 4
+    });
+    assert_eq!(rig.disp.stats().td.depth, 4);
+
+    go.send(()).expect("go");
+    assert_eq!(
+        rig.end(),
+        RunEnd::Failed {
+            reason: tdpath::REASON_HOLD_FULL.into()
+        }
+    );
+    assert!(rig.logged(tdpath::REASON_HOLD_FULL));
+    assert_eq!(rig.td.submit(buy(7, 1)), Err(Error::Stopping));
+    assert_eq!(rig.td.request_recon(7), Err(Error::Stopping));
+    assert_eq!(rig.td.request_recon(8), Err(Error::Stopping));
+
+    rig.disp.on_stop(&StopRequest::new(None)).expect("on_stop");
+    let snap = snap.lock().expect("snap").clone().expect("on_stop ran");
+    assert_eq!(snap.early, Some(td::OrderStatus::New as i32));
+    assert_eq!(snap.submitted, Some(td::OrderStatus::PendingNew as i32));
+    assert_eq!(snap.late, None);
+    assert_eq!(snap.trigger, None);
+    assert_eq!(snap.held, None);
+    assert_eq!(snap.planted, None);
+    assert_eq!(snap.pos7, Some(2.0));
+    assert_eq!(snap.pos8, None);
+    assert_eq!(snap.usd, Some((1.0, 2.0, 3.0)));
+    assert_eq!(snap.eur, None);
+    assert_eq!(snap.open7, 2);
+    assert_eq!(snap.open8, 0);
+    assert_eq!(
+        rig.stamps(7),
+        [
+            ("recon", td_stamp(7, INCARNATION, SNAPSHOT_SEQ)),
+            ("order", td_stamp(7, INCARNATION, 6)),
+            ("position", td_stamp(7, INCARNATION, 7)),
+            ("balance", td_stamp(7, INCARNATION, 8)),
+        ]
+    );
+    assert!(rig.stamps(8).is_empty());
 }
