@@ -269,3 +269,46 @@ jobs:
         run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.11
       - name: Pack, check, and run
         run: uv run --frozen --no-sync python tests/python/pack_e2e.py
+
+  # E05-D021–E05-D025: pack examples/python/conform once per interpreter, unpack
+  # with the pinned mftiko artifact client, and run mftiko-conformance in that
+  # rootfs. The pack job is unchanged. The wheel is python-conform-wheel's
+  # mftik-abi3-wheel artifact; this job does not build one.
+  conformance-rootfs:
+    name: conformance-rootfs (${{ matrix.python }})
+    needs: python-conform-wheel
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install mftiko-conformance from the pinned mftiko commit
+        run: |
+          GOBIN="$RUNNER_TEMP/conformance-bin" bash scripts/install-mftiko-conformance
+      - uses: actions/download-artifact@v4
+        with:
+          name: mftik-abi3-wheel
+          path: dist
+      - name: Pack the rootfs and run mftiko-conformance
+        env:
+          MFTIK_PYTHON: ${{ matrix.python }}
+          MFTIK_WHEEL_DIR: dist
+          MFTIK_CONFORMANCE: ${{ runner.temp }}/conformance-bin/mftiko-conformance
+          MFTIK_REPORT: ${{ github.workspace }}/report-rootfs.json
+        run: python3 tests/python/conformance_rootfs.py
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mftiko-conformance-rootfs-${{ matrix.python }}
+          path: report-rootfs.json
+          if-no-files-found: warn
