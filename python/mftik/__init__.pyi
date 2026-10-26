@@ -2,6 +2,7 @@ from mftik._mftik import (
     AlgoNotDeclared,
     BalanceEvent,
     BookUpdate,
+    BookView,
     Context,
     ContextError,
     Error,
@@ -32,12 +33,14 @@ from mftik._mftik import (
 )
 from mftik.strategy import Strategy
 
+from . import topic
 from . import volume as volume
 
 __all__ = [
     "AlgoNotDeclared",
     "BalanceEvent",
     "BookUpdate",
+    "BookView",
     "Context",
     "ContextError",
     "Error",
@@ -61,6 +64,7 @@ __all__ = [
     "TapeQuery",
     "Td",
     "UniversalTicker",
+    "topic",
     "UnknownAccount",
     "UnknownUid",
     "common",

@@ -230,3 +230,12 @@ Yi Te 於 #429 確認 E04-D041–E04-D044。E04-04 Context 的商品、下單、
 - E04-D042 `open_orders` 回 `tuple[Order, ...]`，無掛單為空 tuple（同 E04-D023）；順序照 `mftik-rt`，不另排序。
 - E04-D043 `resolve` 沿用 runtime 的逾時與 hook 預算，Python 不加 timeout 參數。
 - E04-D044 volume：`dir`、`volume_dir`、`input_dir` 收 `str | os.PathLike`；`data` 收 bytes-like（`bytes`、`bytearray`、`memoryview`），`str` 丟 `TypeError`，不隱式編碼；`read` 回 `bytes`，找不到回 `None`。
+
+## 決定（2026-10-26，E04-D051–E04-D054）
+
+E04-05 Context 的 MD 讀取、callback 與 BookView。Yi Te 於 #430 確認。
+
+- E04-D051 `BookView.bids(limit)`、`asks(limit)` 回 `list`（當下的副本），不回迭代器，hook 之後仍可用。
+- E04-D052 每一檔是 `tuple`，欄位同 Go 的 level（價格 tick、數量），不另包 pyclass。
+- E04-D053 `mftik.topic` 的常數是 `str`，不用 Enum；`kline(interval)` 回 `str`。
+- E04-D054 讀取的 callback 呼叫時只檢查 callable，不是則同步丟 `TypeError`；參數個數不預先檢查，執行時出錯照 E04-D004（`CRASHED`）。
