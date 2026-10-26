@@ -62,6 +62,8 @@ Market-data events sit in a fixed ring. When the ring cannot hold a new event, t
 
 The local view is updated before the hook runs. Inside `on_order`, `on_position`, `on_balance`, and `on_recon`, the reads `order`, `open_orders`, `position`, and `balance` already include that event. `on_fill` does not change those four reads. The SDK does not derive a position or a balance from a fill. A terminal order is still visible to `order` inside `on_order` and is removed from `open_orders` when that hook returns.
 
+`md_watch` shows `on_trade`, `on_book`, and `after`. `maker` shows `on_recon`, `on_order`, and `on_fill`. See [Examples](examples.md).
+
 ## Which buffer runs next
 
 Two queues feed the dispatcher. The account queue holds account events, order replies, timers, `post` callbacks, and the replies from `tape`, `book_snapshot`, `fetch_klines`, and `fetch_open_interest`. It is not dropped. Its cap is 65536 items. One more ends the session `FAILED` with reason `td buffer full`. `on_stop` runs. Events that were already applied stay visible to `on_stop`. The event that filled the queue, and events taken after the session has failed, are not delivered.

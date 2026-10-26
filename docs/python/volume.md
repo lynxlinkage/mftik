@@ -12,6 +12,8 @@ An empty directory string is skipped. It is not replaced with the process's curr
 
 An I/O error other than a missing file stops the search and raises `OSError`. The second directory is not tried after a permission error on the first.
 
+`stateful` restores a fill count this way: `read` of the volume directory, then the `state` input, then zero when both are absent. The timer and `on_stop` replace that file with `write`. See [Examples](examples.md).
+
 ## Atomic replace
 
 `write` replaces `dir`/`name` with `data`. `dir` and the directory arguments of `read` accept a string or any `os.PathLike` of a string. A bytes path raises `TypeError` (`volume path must be a str, not bytes`). `data` must be `bytes`, `bytearray`, or another bytes-like buffer. A `str` raises `TypeError` (`volume data must be bytes-like, not str`). The SDK does not encode text. Encode it in the strategy if the file is text.

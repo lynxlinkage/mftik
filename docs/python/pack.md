@@ -8,7 +8,7 @@ A failure raises `PackError` inside the tool. The command prints one line, `mfti
 
 ## Command
 
-`python -m mftik.pack -dir DIR -target module:Class -name NAME -repo HOST/REPO [-tag TAG] [-requirements FILE] [-env K=V] [-plain-http] [-python 3.12] [-wheel PATH]`
+`python -m mftik.pack -dir DIR -target module:Class -name NAME -repo HOST/REPO [-tag TAG] [-requirements FILE] [-env K=V] [-plain-http] [-python 3.12] [-wheel PATH] [-no-push]`
 
 `-dir` is the strategy directory. The top-level module of `-target` has to live there, either as `module.py` or as `module/__init__.py`. `-target` is the same `module:Class` string that `python -m mftik.run` takes. Dotted module names are allowed when that top-level package is in the directory.
 
@@ -19,6 +19,8 @@ A failure raises `PackError` inside the tool. The command prints one line, `mfti
 `-wheel` is a local `mftik` wheel. Without it, the packer downloads the wheel that matches the installed package version and the chosen interpreter. `-requirements` is a requirements file. Dependencies are downloaded as manylinux_2_28 wheels for that interpreter. A dependency that is only a source distribution is an error. The packer does not compile it.
 
 `-env` may be repeated. Each value is `K=V`. The packer rejects a name that starts with `MFTIKO_`, and it rejects `PYTHONPATH`, `MFTIK_RELEASE`, and `PYTHONDONTWRITEBYTECODE`, which it sets itself. It also rejects a duplicate key, a newline, or a null byte. `-plain-http` talks HTTP to the registry. A local registry uses it. The default is HTTPS.
+
+`-no-push` builds the image and prints the digest, and does not open a connection. `-repo` is still required, because the image name is checked. [Examples](examples.md) packs `md_watch` that way.
 
 Credentials come from Docker's config file for that registry host, including a credential helper. The push supports basic authentication and a bearer token exchange. An anonymous push is what happens when no credential is configured. Do not put a credential in `-env` or in the strategy directory.
 

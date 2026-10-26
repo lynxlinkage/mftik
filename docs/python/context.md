@@ -44,6 +44,8 @@ A submit the account worker accepts is only an acknowledgement. Later states arr
 
 `Stopping`, message `sdk: the session is stopping`, is raised when the session is already stopping and the call cannot be accepted. `NoFeed`, message `sdk: the session has no such feed`, is raised when a read names a feed this session does not have.
 
+`maker` is the order example. Its first `on_recon` reads `position` and `open_orders`, may call `batch_cancel`, then `submit`s one limit order. `on_order` calls `cancel` when that order is accepted. See [Examples](examples.md).
+
 ## Local book
 
 `book` returns a `BookView` for a UID once the market-data snapshot is in place, or `None` while that book is not synced. The view borrows the hook's book. The books change only between hooks, so the view does not change underneath the hook, and it must not be used after the hook returns. See [Threads](threads.md).

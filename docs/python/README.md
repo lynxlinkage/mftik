@@ -12,6 +12,9 @@
 | [Runtime notes](runtime.md) | `multiprocessing`, SIGTERM, and `Limits.memory_mb` |
 | [Pack and deploy](pack.md) | `python -m mftik.pack` and `StrategyRef.code` |
 | [Volume and inputs](volume.md) | Durable files and read-only inputs |
+| [Examples](examples.md) | `md_watch`, `maker`, and `stateful`, quoted from `examples/python` |
 | [API reference](reference.md) | Every public name |
 
 A hook runs on one thread, one at a time. It must return. The only object that may cross threads is a `Poster`. `Context` and `BookView` work only inside the hook that received them.
+
+A fenced listing is an excerpt of a file under `examples/python`. The info string names that file and the inclusive line numbers.

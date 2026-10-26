@@ -3,7 +3,7 @@
 
 Every fenced block cites a file and an inclusive 1-based line range:
 
-    ```python examples/python/md_watch/strategy.py:12-40
+    ```python examples/python/md_watch/md_watch.py:90-96
 
 The body must equal those source lines. A block with no citation fails. A
 document with no fenced block passes: the chapters that do not quote an

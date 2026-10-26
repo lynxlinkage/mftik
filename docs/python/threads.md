@@ -8,7 +8,7 @@ The GIL is held during a hook and released when the hook returns. Between hooks 
 
 A hook must return. The dispatcher delivers nothing else until it does. A hook that runs longer than the session's `hook_timeout_s` ends the session `HUNG`: exit code 21, reason `hook timeout`, and `on_stop` does not run. A hook longer than 100 milliseconds counts as slow and is logged. That 100 millisecond mark is not the hard stop.
 
-`on_init` and `on_start` may call `resolve`, which waits, and they may read the volume. That wait is the one blocking SDK call, and only those two hooks may make it. After `on_start`, do not wait on the network, a lock, or a sleep inside a hook. Schedule later work with `after` instead of sleeping. The delay is a number of seconds, the same unit as `time.sleep`, but the callback runs on the dispatcher rather than blocking this hook.
+`on_init` and `on_start` may call `resolve`, which waits, and they may read the volume. That wait is the one blocking SDK call, and only those two hooks may make it. After `on_start`, do not wait on the network, a lock, or a sleep inside a hook. Schedule later work with `after` instead of sleeping. The delay is a number of seconds, the same unit as `time.sleep`, but the callback runs on the dispatcher rather than blocking this hook. `md_watch` and `stateful` arm the next period from that callback. See [Examples](examples.md).
 
 The Beat thread does not take the GIL, so a hook that holds the GIL does not by itself stop the heartbeat. The hook budget still applies. A C extension that blocks without releasing the GIL stalls other Python threads for the same reason any such extension does. It does not change the rule: the hook has to return before the budget expires.
 
