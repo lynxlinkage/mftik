@@ -39,6 +39,7 @@ from mftik._version import package_version
 from mftik.strategy import Strategy
 
 from . import topic
+from . import volume as volume
 
 sys.modules["mftik.common"] = common
 sys.modules["mftik.common.v1"] = common.v1
@@ -82,6 +83,7 @@ __all__ = [
     "md",
     "run",
     "td",
+    "volume",
 ]
 
 __version__ = package_version()

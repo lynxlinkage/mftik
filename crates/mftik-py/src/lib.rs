@@ -10,6 +10,7 @@ mod proto;
 mod sdk;
 mod strategy;
 mod topic;
+mod volume;
 
 use mftik_rt::Strategy;
 use pyo3::exceptions::PyTypeError;
@@ -19,6 +20,7 @@ use pyo3::wrap_pyfunction;
 use crate::context::{PyBookView, PyContext, PyPoster};
 use crate::error::ContextError;
 use crate::strategy::{LoadFailed, PyStrategy};
+use crate::volume::{volume_read, volume_write};
 
 pub use error::{context_error, read_error};
 pub use proto::ToPyMessage;
@@ -46,6 +48,8 @@ fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyContext>()?;
     m.add_class::<PyPoster>()?;
     m.add_class::<PyBookView>()?;
+    m.add_function(wrap_pyfunction!(volume_write, m)?)?;
+    m.add_function(wrap_pyfunction!(volume_read, m)?)?;
     m.add_function(wrap_pyfunction!(_run, m)?)?;
     m.add_function(wrap_pyfunction!(_run_load_failed, m)?)?;
     m.add_function(wrap_pyfunction!(_registered_hooks, m)?)?;

@@ -90,12 +90,15 @@ jobs:
           /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik._mftik
           /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik.common.v1 mftik.md.v1 mftik.td.v1
           /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik.topic
+          # One process, given both names, sees the venv's mftik.volume twice
+          # (cwd is /tmp, so the same stub is a relative path and an absolute one).
           /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik.volume
       - name: Python session e2e
         run: |
           test -n "$MFTIK_NATS_SERVER"
           test -x /tmp/mftik-smoke/bin/python
-          MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --tests -- --ignored --test-threads=1
+          MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --test session --test context --test reads -- --ignored --test-threads=1
 
   # Temporary copy only. The committed proto tree is not edited.
   proto-drift:

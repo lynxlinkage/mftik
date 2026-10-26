@@ -14,15 +14,16 @@ use std::time::Duration;
 use mftik_core::book::OrderBook;
 use mftik_core::mdpath::ReadError as MdReadError;
 use mftik_rt::{Context, Poster};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyTuple};
 
 use crate::proto::ToPyMessage;
-use crate::sdk::{PyInfo, PyTapeQuery};
+use crate::sdk::{PyInfo, PyOrder, PyTapeQuery};
 use crate::strategy::PyStrategy;
 use crate::{
-    describe, invalid_book, invalid_context, read_error, require_callable, write_traceback,
+    context_error, describe, invalid_book, invalid_context, read_error, require_callable,
+    write_traceback,
 };
 
 static HOOK_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -87,12 +88,8 @@ pub(crate) fn with_python_hook<T>(
     Python::attach(|py| body(py, token))
 }
 
-/// The `Context` for `token` on this thread, or `None` when the token is not
-/// the hook currently on the stack.
-///
-/// This does not touch Python, so [`PyContext::resolve`] can call it and then
-/// release the GIL. The pointer stays valid while this thread's [`HookScope`]
-/// is on the stack; `Python::detach` does not switch threads.
+/// The live `Context` for `token` on this thread, or `None` when the token
+/// does not belong to the hook running here.
 fn context_ptr(token: u64) -> Option<*const Context<PyStrategy>> {
     ACTIVE.with(|slot| {
         let ptr = slot.get();
@@ -101,8 +98,8 @@ fn context_ptr(token: u64) -> Option<*const Context<PyStrategy>> {
         }
         // SAFETY: a non-null slot on this thread was stored by `HookScope::enter`
         // and points at that scope's `Active` until the scope drops. The token
-        // must match, so a context from another hook is rejected before the
-        // `Context` pointer is returned. Other threads never see this slot.
+        // is compared before the `Context` pointer is returned. Other threads
+        // never see this slot.
         let active = unsafe { &*ptr };
         if active.token != token {
             return None;
@@ -115,9 +112,10 @@ fn with_context<T>(token: u64, body: impl FnOnce(&Context<PyStrategy>) -> T) -> 
     let Some(ptr) = context_ptr(token) else {
         return Err(invalid_context());
     };
-    // SAFETY: `context_ptr` only returns the `Context` of this thread's live
-    // `HookScope` for `token`. That scope outlives `body`.
-    Ok(body(unsafe { &*ptr }))
+    // SAFETY: `context_ptr` just matched `token` against this thread's scope,
+    // which outlives the call.
+    let ctx = unsafe { &*ptr };
+    Ok(body(ctx))
 }
 
 /// Re-borrows the synced book. A dead token, another thread, or a book that
@@ -138,6 +136,45 @@ fn with_book<T>(token: u64, uid: u32, body: impl FnOnce(&OrderBook) -> T) -> PyR
 /// (E04-D051, E04-D052).
 fn level_pairs(levels: impl IntoIterator<Item = (i64, f64)>) -> Vec<(i64, f64)> {
     levels.into_iter().collect()
+}
+
+fn mapped<T>(
+    token: u64,
+    body: impl FnOnce(&Context<PyStrategy>) -> Result<T, mftik_rt::Error>,
+) -> PyResult<T> {
+    with_context(token, body)?.map_err(|err| context_error(&err))
+}
+
+/// This thread's hook [`Context`], carried across [`Python::detach`].
+///
+/// `detach` requires [`Send`]. A raw pointer is not `Send`, and turning it
+/// into a `usize` drops provenance. The closure runs on the calling thread.
+/// The pointer lives in this wrapper so the closure captures the wrapper,
+/// not the `Copy` field.
+struct HookPtr(*const Context<PyStrategy>);
+
+// SAFETY: `Python::detach` calls the closure on this thread. The pointer is
+// dereferenced only there, while the `HookScope` that published it is still
+// alive. It is never read from another thread.
+unsafe impl Send for HookPtr {}
+
+impl HookPtr {
+    fn resolve(self, ticker: &str) -> Result<mftik_core::symbol::Info, mftik_rt::Error> {
+        // SAFETY: see `Send`. `self` is moved into the `detach` closure,
+        // which runs on the thread that created this pointer.
+        let ctx = unsafe { &*self.0 };
+        ctx.resolve(ticker)
+    }
+}
+
+fn maybe_message<T>(py: Python<'_>, value: Option<T>) -> PyResult<Py<PyAny>>
+where
+    T: ToPyMessage,
+{
+    match value {
+        Some(value) => value.to_py(py),
+        None => Ok(py.None()),
+    }
 }
 
 fn bad_delay() -> PyErr {
@@ -295,6 +332,84 @@ impl PyContext {
         with_context(self.token, |ctx| ctx.input_dir(name))
     }
 
+    /// SYM lookup. Only OnInit and OnStart succeed. The wait releases the GIL
+    /// (E04-D002) and uses the runtime's own deadline (E04-D043).
+    fn resolve(&self, py: Python<'_>, ticker: String) -> PyResult<Py<PyInfo>> {
+        let Some(ptr) = context_ptr(self.token) else {
+            return Err(invalid_context());
+        };
+        let hook = HookPtr(ptr);
+        // The SYM wait blocks inside `detach`, so other Python threads run.
+        let result = py.detach(move || hook.resolve(&ticker));
+        match result {
+            Ok(info) => PyInfo::from_info(py, &info),
+            Err(err) => Err(context_error(&err)),
+        }
+    }
+
+    fn info(&self, py: Python<'_>, uid: u32) -> PyResult<Py<PyInfo>> {
+        let info = mapped(self.token, |ctx| ctx.info(uid))?;
+        PyInfo::from_info(py, &info)
+    }
+
+    /// Places `order`. Anything that is not an `mftik.Order` is a `TypeError`
+    /// (E04-D041); there is no field-by-field shortcut.
+    fn submit(&self, order: &Bound<'_, PyAny>) -> PyResult<String> {
+        let py_order = order
+            .cast::<PyOrder>()
+            .map_err(|_| PyTypeError::new_err("submit() argument must be mftik.Order"))?;
+        let built = py_order
+            .borrow()
+            .to_new()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        mapped(self.token, |ctx| ctx.submit(built))
+    }
+
+    fn cancel(&self, api_id: i64, client_order_id: &str) -> PyResult<()> {
+        mapped(self.token, |ctx| ctx.cancel(api_id, client_order_id))
+    }
+
+    /// Go's variadic `BatchCancel`: each extra argument is one uid.
+    #[pyo3(signature = (api_id, algo_id, *uids))]
+    fn batch_cancel(&self, api_id: i64, algo_id: u32, uids: Vec<u32>) -> PyResult<()> {
+        mapped(self.token, |ctx| ctx.batch_cancel(api_id, algo_id, &uids))
+    }
+
+    fn request_recon(&self, api_id: i64) -> PyResult<()> {
+        mapped(self.token, |ctx| ctx.request_recon(api_id))
+    }
+
+    fn order(&self, py: Python<'_>, api_id: i64, client_order_id: &str) -> PyResult<Py<PyAny>> {
+        let found = with_context(self.token, |ctx| ctx.order(api_id, client_order_id))?;
+        maybe_message(py, found)
+    }
+
+    /// The runtime's order, with no extra sort (E04-D042). No open orders is
+    /// an empty tuple.
+    fn open_orders<'py>(
+        &self,
+        py: Python<'py>,
+        api_id: i64,
+        algo_id: u32,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let orders = with_context(self.token, |ctx| ctx.open_orders(api_id, algo_id))?;
+        let mut items = Vec::with_capacity(orders.len());
+        for order in orders {
+            items.push(order.to_py(py)?);
+        }
+        PyTuple::new(py, items)
+    }
+
+    fn position(&self, py: Python<'_>, api_id: i64, uid: u32) -> PyResult<Py<PyAny>> {
+        let found = with_context(self.token, |ctx| ctx.position(api_id, uid))?;
+        maybe_message(py, found)
+    }
+
+    fn balance(&self, py: Python<'_>, api_id: i64, asset: &str) -> PyResult<Py<PyAny>> {
+        let found = with_context(self.token, |ctx| ctx.balance(api_id, asset))?;
+        maybe_message(py, found)
+    }
+
     fn after(&self, py: Python<'_>, delay: f64, callback: Py<PyAny>) -> PyResult<()> {
         let delay = delay_duration(delay)?;
         require_callable(py, &callback)?;
@@ -313,25 +428,6 @@ impl PyContext {
     fn poster(&self) -> PyResult<PyPoster> {
         with_context(self.token, |ctx| PyPoster {
             inner: ctx.poster(),
-        })
-    }
-
-    /// SYM `Get`. The wait releases the GIL (E04-D002). This is the part of
-    /// the E04-04 surface the reads and the local book need: a stored row.
-    /// There is no timeout argument (E04-D043).
-    fn resolve(&self, py: Python<'_>, ticker: String) -> PyResult<Py<PyInfo>> {
-        let ptr = context_ptr(self.token).ok_or_else(invalid_context)?;
-        let addr = ptr as usize;
-        let result = py.detach(move || {
-            // SAFETY: `addr` is the `Context` this thread's `HookScope` holds.
-            // `detach` runs here, on that same thread, and the scope stays on
-            // the stack until the hook returns.
-            let ctx = unsafe { &*(addr as *const Context<PyStrategy>) };
-            ctx.resolve(&ticker)
-        });
-        Python::attach(|py| match result {
-            Ok(info) => PyInfo::from_info(py, &info),
-            Err(err) => Err(crate::context_error(&err)),
         })
     }
 

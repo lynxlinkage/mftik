@@ -28,3 +28,4 @@ async-nats = { version = "0.50.0", default-features = false, features = ["nkeys"
 futures-util = { version = "0.3.34", default-features = false }
 mftik-testkit = { path = "../mftik-testkit" }
 prost = "0.14.4"
+tokio = { version = "1.54.1", features = ["time"] }
