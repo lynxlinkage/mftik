@@ -174,6 +174,66 @@ handlers! {
     RejectHandler::on_reject(RejectEvent) => reject;
 }
 
+impl<S> Handlers<S> {
+    /// The optional hooks registered, in the order of [`Strategy::handlers`].
+    /// Names are the Go hook names in snake_case (E04-D003).
+    pub fn registered(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.best_quote.is_some() {
+            names.push("on_best_quote");
+        }
+        if self.trade.is_some() {
+            names.push("on_trade");
+        }
+        if self.agg_trade.is_some() {
+            names.push("on_agg_trade");
+        }
+        if self.kline.is_some() {
+            names.push("on_kline");
+        }
+        if self.ticker.is_some() {
+            names.push("on_ticker");
+        }
+        if self.liquidation.is_some() {
+            names.push("on_liquidation");
+        }
+        if self.funding_rate.is_some() {
+            names.push("on_funding_rate");
+        }
+        if self.open_interest.is_some() {
+            names.push("on_open_interest");
+        }
+        if self.greeks.is_some() {
+            names.push("on_greeks");
+        }
+        if self.mark_price.is_some() {
+            names.push("on_mark_price");
+        }
+        if self.book.is_some() {
+            names.push("on_book");
+        }
+        if self.order.is_some() {
+            names.push("on_order");
+        }
+        if self.fill.is_some() {
+            names.push("on_fill");
+        }
+        if self.position.is_some() {
+            names.push("on_position");
+        }
+        if self.balance.is_some() {
+            names.push("on_balance");
+        }
+        if self.recon.is_some() {
+            names.push("on_recon");
+        }
+        if self.reject.is_some() {
+            names.push("on_reject");
+        }
+        names
+    }
+}
+
 impl<S: Strategy> Handlers<S> {
     /// The strategy's market data hooks, for mdpath's skip-before-decode
     /// (E08-D005). `orderbook_delta` is not among them: the local book takes
@@ -272,6 +332,8 @@ mod tests {
         assert!(!md.best_quote && !md.mark_price);
         assert!(some.order.is_some());
         assert!(some.fill.is_none() && some.book.is_none());
+        assert_eq!(some.registered(), ["on_trade", "on_kline", "on_order"]);
+        assert!(registered(&Plain).registered().is_empty());
         assert_eq!(topic::kline("1m"), "kline_1m");
     }
 }

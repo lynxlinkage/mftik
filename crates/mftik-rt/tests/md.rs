@@ -1,23 +1,22 @@
 //! The MD path through `mftik_rt::run` (E03-06): Start's bindings are
 //! subscribed before the gate, `md.f` reaches OnTrade through the dispatcher
 //! and the prehook, and Live changes the set and answers `Applied`. The fake
-//! MD peer is a NATS client in the test process. See `common` for the shim.
+//! MD peer is a NATS client in the test process. See `mftik-testkit` for the shim.
 //!
 //! The book and the reads need SYM rows, which the SYM path (E03-08) stores;
-//! they are tested against the MD path itself in `src/md/tests.rs`.
-
-mod common;
+//! they are tested against the MD path itself in `src/md/tests.rs`. The fake
+//! shim lives in `mftik-testkit`.
 
 use std::env;
 use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::*;
 use mftik_proto::wire::mftiko::common::v1::{Outcome, Version};
 use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event};
 use mftik_proto::wire::mftiko::stsctl::v1::{Bindings, FeedBinding, SelectorBinding};
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
 use mftik_rt::{Context, HookError, Strategy, TapeQuery, Trade, TradeHandler};
+use mftik_testkit::*;
 use prost::Message;
 
 const FEED: &str = "trade.Bybit_Perp_BTCUSDT";

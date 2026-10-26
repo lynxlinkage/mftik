@@ -9,9 +9,7 @@
 //! nats-server comes from `MFTIK_NATS_SERVER`, else `PATH`. A test that
 //! cannot find it fails, it does not skip. CI installs the pinned version
 //! (see `.github/workflows/ci.yml`). The nats-server and shim helpers are in
-//! `common`.
-
-mod common;
+//! `mftik-testkit`.
 
 use std::env;
 use std::io::Write;
@@ -20,7 +18,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use common::*;
 use mftik_proto::wire::mftiko::common::v1 as cv1;
 use mftik_proto::wire::mftiko::common::v1::Outcome;
 use mftik_proto::wire::mftiko::session::v1::AccountDecl;
@@ -31,6 +28,7 @@ use mftik_rt::{
     Context, Handlers, HookError, Order, OrderEvent, OrderHandler, ReconEvent, ReconHandler,
     Strategy,
 };
+use mftik_testkit::*;
 use nkeys::KeyPair;
 use prost::Message;
 

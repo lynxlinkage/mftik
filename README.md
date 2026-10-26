@@ -12,8 +12,9 @@ Decisions for this repo are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 | --- | --- | --- |
 | `mftik-proto` | `crates/mftik-proto` | Prost types for the pinned mftiko protos. Generated code stays out of git. |
 | `mftik-core` | `crates/mftik-core` | Pure Rust algorithms. No IO. |
-| `mftik-py` | `crates/mftik-py` | PyO3 module. The import name is `mftik`. |
+| `mftik-py` | `crates/mftik-py` | PyO3 bindings. The Python package is `mftik` (`python/mftik`); the native module is `mftik._mftik`. |
 | `mftik-rt` | `crates/mftik-rt` | Session worker runtime: fd 3, C4, the dispatcher, NATS, and timers. `Strategy` and `Context`. |
+| `mftik-testkit` | `crates/mftik-testkit` | Dev-only nats-server and fake-shim harness (`publish = false`). |
 | `mftik-conform` | `examples/conform` | The Rust standard conformance strategy (PROTOCOL §9.8), the `conform` binary. |
 
 The Python API will be snake_case and one-to-one with the Go SDK.
@@ -43,17 +44,17 @@ Python uses [uv](https://docs.astral.sh/uv/) and [maturin](https://www.maturin.r
 ```bash
 uv sync
 uv run maturin develop
-uv run ruff check python
-uv run ruff format --check python
+uv run ruff check python tests/python crates/mftik-py/tests/pystrategies
+uv run ruff format --check python tests/python crates/mftik-py/tests/pystrategies
 ```
 
-`mftik` requires Python 3.11 or newer (abi3).
+`mftik` requires Python 3.11 or newer (abi3). A session worker starts with `python -m mftik.run module:Class`. `Class` is constructed with no arguments and must be a `mftik.Strategy`.
 
 ## CI
 
 GitHub Actions runs on `ubuntu-latest`. `cargo clippy --workspace --all-targets -- -D warnings` fails the build on warnings. The workflow also checks formatting, tests, and that the proto tree still matches the pinned commit. [`scripts/sync-proto-negative`](scripts/sync-proto-negative) appends a line to a temporary copy of that tree and requires `scripts/sync-proto --check` to fail.
 
-The Python job syncs the locked uv tools, runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`python/smoke_import.py`](python/smoke_import.py).
+The Python job uses Python 3.11 (E04-D014). It syncs the locked uv tools, runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`tests/python/smoke_import.py`](tests/python/smoke_import.py), the Python unit tests, `mypy.stubtest` against `mftik._mftik`, and the Python session end-to-end tests.
 
 The `mftiko-conformance` job runs the suite on every pull request. [`scripts/install-mftiko-conformance`](scripts/install-mftiko-conformance) is the `go install` of `mftiko-conformance` from the pinned mftiko commit. The job runs it against the Rust standard strategy [`examples/conform`](examples/conform), keeps `report.json` as an artifact, and fails on any failed check. To run it locally (Go 1.26 or newer):
 
