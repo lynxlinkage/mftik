@@ -307,6 +307,18 @@ Yi Te 於 #441 確認。E05-02 讓 conformance 跑在打包後的 rootfs 上。�
 
 E05-02 的 `conformance-rootfs` job 在 3.11、3.12、3.13 並行（`fail-fast: false`），`needs: python-conform-wheel`。每個 job 下載 artifact `mftik-abi3-wheel`，不重建 wheel，只把它裝進乾淨 venv 以執行 `python -m mftik.pack`。`-dir` 是 `examples/python`（裡面是套件 `conform`），`-target conform:Conform`，`-python` 是該 job 的版本，`-wheel` 是那顆 abi3 wheel，沒有額外依賴。映像推到本機 `127.0.0.1` 的 `registry:2`，repository `mftik/conform`。接著用 E04-D076 釘住的 mftiko commit `dd73a2d421ca` 的 `internal/platform/artifact`（`tests/pack/check`）依 PROTOCOL §8.3 拉取、檢查、解開。manifest 的 entrypoint 必須是 `python/bin/python3 -m mftik.run conform:Conform`。第一段不得以 `/` 開頭、不得含空段、`.` 或 `..`；詞法路徑在 rootfs 內，而且 symlink 的目標也不得離開 rootfs，這樣才不是主機上的 Python。`mftiko-conformance -json report-rootfs.json -- <entrypoint>` 的工作目錄是 rootfs，argv 就是這份 manifest entrypoint。這個行程的 `PATH` 只有 `mftiko-conformance` 所在目錄，`HOME` 是空目錄，不轉發 `PYTHONPATH` 與 `LD_LIBRARY_PATH`。釘住的 harness 會換掉 worker 的環境，只留下 `PATH`、`HOME`、`TMPDIR`，不套用 manifest 的 `PYTHONPATH`（與 E05-01 相同）。解開之後在 rootfs 的 `python/lib/python<版本>/site-packages/mftik-conform.pth` 寫入 manifest `PYTHONPATH`（`app:site-packages`）相對該目錄的路徑，讓 `import conform` 找得到策略。這份檔不在 image 裡；STS 正式啟動時是把 manifest 的環境放進 worker。報告不論成敗都上傳，artifact 名 `mftiko-conformance-rootfs-<版本>`。11 項 `flow`、`beat`、`deadline`、`shutdown`、`buffer_priority`、`prehook`、`td_overflow`、`cloid`、`subject`、`recon`、`ctx` 必須全部是 pass；工具把 skip 當成功，腳本看到 skip 或 fail 就讓 job 失敗。branch protection 要加的 check 名稱是 `conformance-rootfs (3.11)`、`conformance-rootfs (3.12)`、`conformance-rootfs (3.13)`，合併後由 Grok Bot 加入（E05-D025）。本票不改 repo 設定、不改 `pack` job、不改 SDK、不改 PROTOCOL。不推送任何對外的 image 或 tag。
 
+## 決定（2026-10-26，E05-D031–E05-D035）
+
+Yi Te 於 #442 確認。E05-03 範例策略。與 Go 版語意不同之處先回報再做。
+
+- E05-D031 每個範例的 e2e 測試放在該範例目錄內（例如 `examples/python/maker/test_e2e.py`）。
+- E05-D032 另開 `examples` CI job，用 `mftik-abi3-wheel` 跑三個範例的 e2e，並各以 `python -m mftik.pack` 打包一次（不推送）；合併後由 Grok Bot 加進 required check，PR 不改 repo 設定。
+- E05-D033 三個範例都從 `InitPayload.params` JSON 讀 symbol、下單量等參數，不寫死交易所或商品。
+- E05-D034 `stateful` 存一個計數器（例如處理過的成交筆數），在計時器觸發與 OnStop 時原子寫入 volume；測試涵蓋「有 volume 接續」「只有 inputs」「都沒有從零開始」三種情況。
+- E05-D035 README 用英文（同 E05-D005）。
+
+E05-03 的三個策略在 `examples/python/md_watch`、`examples/python/maker`、`examples/python/stateful`。各目錄的 `test_e2e.py` 寫場景，再跑 `cargo test -p mftik-py --test examples -- --ignored --exact drive`。被忽略的測試在 `crates/mftik-py/tests/examples.rs`，用 `mftik-testkit` 的假 shim、nats-server，以及假的 MD、TD、SYM 對端。`cargo test --workspace` 會編譯這個檔、不執行它。CI 的 `examples` job `needs: python-conform-wheel`，下載 artifact `mftik-abi3-wheel`，不重建 wheel，裝進乾淨 venv 後跑三個 `test_e2e.py`。接著各以 `python -m mftik.pack -no-push` 打包一次：映像會建好並印出 digest，不連 registry。`-repo` 仍必填（`build_image` 要拆 host 與路徑），這個值不會被連線。`-no-push` 是「不推送」的做法，不是新的決定編號。`after` 每次呼叫是一個計時器，範例在回呼裡再排下一次；這是既有的 SDK 行為。branch protection 要加的 check 名稱是 `examples`，合併後由 Grok Bot 加入（E05-D032）。本票不改 repo 設定、不改 PROTOCOL。不推送任何對外的 image 或 tag。
+
 ## 決定（2026-10-26，E05-D051–E05-D054）
 
 Yi Te 於 #423 確認，並於同日修訂 E05-D051（對齊 Go `sdk/internal/tdpath`，不改 runtime）。

@@ -777,6 +777,8 @@ dependencies = [
  "prost-types",
  "protoc-bin-vendored",
  "pyo3",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

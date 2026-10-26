@@ -312,3 +312,64 @@ jobs:
           name: mftiko-conformance-rootfs-${{ matrix.python }}
           path: report-rootfs.json
           if-no-files-found: warn
+
+  # E05-D031–E05-D035: md_watch, maker, and stateful. The wheel is
+  # python-conform-wheel's mftik-abi3-wheel artifact; this job does not build
+  # one. Pack builds each image and does not push it.
+  examples:
+    name: examples
+    needs: python-conform-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install nats-server
+        run: |
+          GOBIN="$RUNNER_TEMP/nats-bin" go install github.com/nats-io/nats-server/v2@v2.15.0
+          echo "MFTIK_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
+      - name: Install CPython headers
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-dev
+          uv python install 3.11
+      - uses: actions/download-artifact@v4
+        with:
+          name: mftik-abi3-wheel
+          path: dist
+      - name: Install the wheel into a clean venv
+        run: |
+          set -euo pipefail
+          uv venv --managed-python --python 3.11 /tmp/mftik-examples
+          uv pip install --python /tmp/mftik-examples/bin/python dist/*.whl
+      - name: Run the example end-to-end tests
+        env:
+          MFTIK_PYTHON: /tmp/mftik-examples/bin/python
+        run: |
+          set -euo pipefail
+          test -n "$MFTIK_NATS_SERVER"
+          test -x "$MFTIK_PYTHON"
+          for name in md_watch maker stateful; do
+            "$MFTIK_PYTHON" "examples/python/$name/test_e2e.py"
+          done
+      - name: Pack each example without pushing
+        run: |
+          set -euo pipefail
+          wheel=(dist/*.whl)
+          py=/tmp/mftik-examples/bin/python
+          for spec in md_watch:MdWatch maker:Maker stateful:Stateful; do
+            name="${spec%%:*}"
+            "$py" -m mftik.pack \
+              -dir "examples/python/$name" \
+              -target "$spec" \
+              -name "$name" \
+              -repo "127.0.0.1:9/mftik/$name" \
+              -python 3.11 \
+              -wheel "${wheel[0]}" \
+              -no-push
+          done
