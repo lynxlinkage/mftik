@@ -1,0 +1,106 @@
+name: release
+
+# v* tags only (E04-D061, E04-D065). Build the two abi3 wheels, smoke them,
+# and upload to PyPI with trusted publishing. This is not the release.yml
+# E01-D002 deleted: no images, no Strategon, no compose, no API token.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag matches the package version and points at main
+        run: |
+          set -euo pipefail
+          scripts/release-check versions --tag "${GITHUB_REF_NAME}"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "tag ${GITHUB_REF_NAME} ($(git rev-parse HEAD)) is not on origin/main" >&2
+            exit 1
+          fi
+
+  # Same two wheels as ci.yml (E04-D063).
+  wheels:
+    name: wheel (${{ matrix.platform }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2_28"
+            platform: manylinux_2_28_x86_64
+            artifact: wheel-manylinux_2_28_x86_64
+            cargo_jobs: "4"
+          - os: macos-latest
+            target: aarch64
+            manylinux: ""
+            platform: macos_arm64
+            artifact: wheel-macos_arm64
+            cargo_jobs: "1"
+    env:
+      CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wheel
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          platform: ${{ matrix.platform }}
+      - name: Stage the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/wheel-out"
+          mkdir "$RUNNER_TEMP/wheel-out"
+          cp dist/*.whl "$RUNNER_TEMP/wheel-out/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/wheel-out/
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: wheels
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mftik
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+      - name: Require the two release wheels
+        run: scripts/release-check dist dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.14.3
+        with:
+          packages-dir: dist
+          repository-url: https://upload.pypi.org/legacy/
+          attestations: true
+          skip-existing: false
+          verbose: true

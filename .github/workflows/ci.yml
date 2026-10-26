@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Package versions agree
+        run: scripts/release-check versions
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -35,8 +37,8 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-  # E01-D006, E04-D007, E04-D014: Python 3.11, the wheel, unit tests,
-  # stubtest, and the Python session e2e. A version matrix waits for E04-06.
+  # E01-D006, E04-D007, E04-D014: Python 3.11, the test wheel, unit tests,
+  # stubtest, and the Python session e2e. The release wheels are the wheels job.
   python:
     name: python
     runs-on: ubuntu-latest
@@ -99,6 +101,34 @@ jobs:
           test -n "$MFTIK_NATS_SERVER"
           test -x /tmp/mftik-smoke/bin/python
           MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --test session --test context --test reads --test hooks -- --ignored --test-threads=1
+
+  # E04-D063: the two release wheels. Same matrix as release.yml. No sdist.
+  wheels:
+    name: wheel (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2_28"
+            platform: manylinux_2_28_x86_64
+            cargo_jobs: "4"
+          - os: macos-latest
+            target: aarch64
+            manylinux: ""
+            platform: macos_arm64
+            cargo_jobs: "1"
+    env:
+      CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wheel
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          platform: ${{ matrix.platform }}
 
   # Temporary copy only. The committed proto tree is not edited.
   proto-drift:

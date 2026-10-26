@@ -39,7 +39,7 @@
 ## 決定（2026-10-25，E01-D001–E01-D007）
 - E01-D001 清空前在最後的舊 commit 打 `legacy-final` tag。
 - E01-D002 刪除 `release.yml`、`cleanup.yml`、`tests.yml`；Strategon 上的部署與 PyPI 舊版不動。
-- E01-D003 套件名沿用 `mftik`（import `mftik`），版本從 0.12.0 起，E04 才發佈。
+- E01-D003 套件名沿用 `mftik`（import `mftik`），版本從 0.12.0 起，E04 才發佈。（「版本從 0.12.0 起」已由 E04-D008 取代：版本 0.14.0。）
 - E01-D004 整包複製 mftiko `contract/proto/mftiko`，釘在 BullionBear/mftiko `e7b3543e2269c4ae8c10631edd448bdb86c52e2c`，同步腳本記錄來源 commit。
 - E01-D005 `build.rs` + prost-build，protoc 用 `protoc-bin-vendored`，產生的程式碼不進 git。
 - E01-D006 `rust-toolchain.toml` 釘目前 stable、edition 2024；Python 用 uv + maturin，lint 用 ruff；CI 在 GitHub Actions ubuntu，clippy 警告即失敗。
@@ -205,7 +205,7 @@ Yi Te 於 #386 確認 E04-D001–E04-D010，於 #426 確認 E04-D011–E04-D014�
 - E04-D005 Context 生命週期：Python 的 `Context` 只在該 hook 期間有效。hook 返回之後再用，或在 dispatcher 以外的執行緒用，丟 `mftik.ContextError`，不 panic、不 UB。跨執行緒唯一入口是 `ctx.poster()` 回的 `Poster`，`Poster.post(fn)` 可從任何 Python 執行緒呼叫（Go `Post`）。`ctx.book(uid)` 回的 `BookView` 同樣只在該 hook 期間有效（E03-D067）；`book` 的綁定在 E04-05。
 - E04-D006 訊息型別（原第 7 題；Yi Te 2026-10-26 改用 prost，取代原本的官方 protobuf）：proto 訊息（`md.v1` 的 payload、TapePage、BookSnapshot、Klines，`td.v1` 的 Order、Position、Balance、Fill、Recon 等）不用官方 protobuf，由 `mftik-proto` 的 prost 型別產生 frozen pyclass，欄位名稱與 proto 相同。轉換是把 prost 的值搬進 pyclass，不經過序列化；wheel 不依賴 `protobuf`。產生方式、enum／oneof／optional 的對應與 `.pyi` 在 E04-02 定，proto 升版時重新產生、不手寫；`mftik-proto` 的預設 feature 不依賴 pyo3。SDK 自己的型別（`Md`、`Td`、`Feed`、`BookUpdate`、各 Event、`Info`、`Order`、`TapeQuery`、`BookView`）同樣用 frozen pyclass。本票不手寫這些 pyclass。
 - E04-D007 驗收：Python 版 conformance 標準策略與它的 CI 照 E03-D007 留在 E05。E04 的驗收是 E04-01 的 Python e2e 測試架與各票的測試，每個 PR 的 CI 都跑；Rust 版 conformance 照跑。
-- E04-D008 發佈（原第 5 題）：版本 0.14.0。PyPI 已有舊 SDK 的 0.12.0、0.12.1，git 有 v0.13.0-a1–a4；1.0.0 留到 E05 實機跑過。取代 E01-D003 的「版本從 0.12.0 起」。wheel 出 manylinux_2_28 x86_64（必須）與 macOS arm64（本機開發、型別檢查與 `python -m mftik.pack` 用，不保證能跑 session），不出 sdist。PyPI 用 trusted publishing，PyPI 專案 owner 要設定一次。發佈工作是 E04-06；在那之前這棵樹的套件版本維持 0.12.0，不在 E04-01 改 workspace 版本（那會改到 `mftik-rt` 的 `RELEASE`）。
+- E04-D008 發佈（原第 5 題）：版本 0.14.0。PyPI 已有舊 SDK 的 0.12.0、0.12.1，git 有 v0.13.0-a1–a4；1.0.0 留到 E05 實機跑過。取代 E01-D003 的「版本從 0.12.0 起」。wheel 出 manylinux_2_28 x86_64（必須）與 macOS arm64（本機開發、型別檢查與 `python -m mftik.pack` 用，不保證能跑 session），不出 sdist。PyPI 用 trusted publishing，PyPI 專案 owner 要設定一次。發佈工作是 E04-06；在那之前這棵樹的套件版本維持 0.12.0，不在 E04-01 改 workspace 版本（那會改到 `mftik-rt` 的 `RELEASE`）。（「在那之前這棵樹的套件版本維持 0.12.0」由 E04-06 結束，版本改為 0.14.0。）
 - E04-D009 OCI 打包（原第 6 題）：mftik 自己做（`python -m mftik.pack`），不改 mftiko-pack；使用者只裝 mftik 就能打包，不用裝 Go。manifest 與推送邏輯因此有兩份，CI 以釘住的 mftiko 的 `internal/platform/artifact` 拉取、檢查、解開來對照（PROTOCOL §8.3）。實作是 E04-07。
 - E04-D010 並行與決策區段：E04-01、E04-02、E04-06、E04-07 同時開工；E04-03、E04-04、E04-05 等 E04-01、E04-02；E04-06 的發佈等 E04-01–E04-05 合併；E04-07 的 CI 端到端檢查等 E04-01。各票的決策區段：E04-01 從 D011 起，E04-02 從 D021 起，依此類推，E04-07 從 D071 起。第一張合併的 PR 把 E04-D001–E04-D010 寫進 `docs/DECISIONS.md`；後合併的 PR 以 merge main 解 DECISIONS 衝突，不 rebase。
 - E04-D011 `after(delay, fn)` 的 `delay` 是秒（float），與 `time.sleep` 一致；內部轉成 `Duration`（再由 runtime 轉 ns）。負數或 NaN 丟 `ValueError`，訊息是 `delay must be a finite number of seconds >= 0`。±inf 與轉不進 `Duration` 的有限值（`Duration::try_from_secs_f64` 拒絕的）用同一個 `ValueError`：它們不是有限的非負秒數，沒有第二種可表示的結果。0 可以。
@@ -248,3 +248,15 @@ E04-05 Context 的 MD 讀取、callback 與 BookView。Yi Te 於 #430 確認。
 - E04-D052 每一檔是 `tuple`，欄位同 Go 的 level（價格 tick、數量），不另包 pyclass。
 - E04-D053 `mftik.topic` 的常數是 `str`，不用 Enum；`kline(interval)` 回 `str`。
 - E04-D054 讀取的 callback 呼叫時只檢查 callable，不是則同步丟 `TypeError`；參數個數不預先檢查，執行時出錯照 E04-D004（`CRASHED`）。
+
+## 決定（2026-10-26，E04-D061–E04-D065）
+
+Yi Te 於 #431 確認。E04-06 的 wheel 與 PyPI 發佈。
+
+- E04-D061 PyPI 用 trusted publishing（GitHub OIDC），workflow `release.yml`、environment `pypi`；不放 API token。專案 owner 設定 publisher 的步驟寫在 PR。
+- E04-D062 PyPI 上 0.12.x 以前的舊版保留、不 yank；0.14.0 的 README 註明為 Rust 重寫、與舊 API 不相容。
+- E04-D063 每個 PR 的 CI 建 manylinux_2_28 x86_64 與 macOS arm64 兩個 wheel，各裝進乾淨 venv 跑 smoke。
+- E04-D064 metadata：classifiers 為 Python 3.11–3.13、Development Status :: 3 - Alpha；`requires-python >=3.11` 與 abi3-py311 一致。
+- E04-D065 第一次發佈：PR 合併後在 main 打 `v0.14.0`，等 Yi Te 確認才打。
+
+本票把 `Cargo.toml` 的 workspace version、`pyproject.toml`、`tests/python/smoke_import.py` 的期望值、`mftik.__version__`（`python/mftik/_version.py` 的 fallback；裝進 wheel 之後由套件 metadata 提供）一起改成 0.14.0。CI 的 `scripts/release-check versions` 檢查四者一致。`release.yml` 只在 `v*` tag 上建 E04-D063 的兩個 wheel、跑 smoke，tag 不是 `v` 加這個版本、或那個 commit 不在 main，就失敗，然後以 trusted publishing 上傳。不出 sdist，workflow 裡沒有 API token，也不打 tag。E01-D002 刪掉的舊 `release.yml`（映像、Strategon、compose）不復原。E04-D008 的「在那之前套件版本維持 0.12.0」到此結束。E04-D014 留到本票的版本矩陣是 E04-D063 的兩個 wheel；python job 的完整測試仍只跑 Python 3.11。
