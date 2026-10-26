@@ -777,6 +777,7 @@ dependencies = [
  "prost-types",
  "protoc-bin-vendored",
  "pyo3",
+ "tokio",
 ]
 
 [[package]]

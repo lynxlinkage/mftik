@@ -230,3 +230,12 @@ E04-03 選用 hook 的交付。Yi Te 於 #428 確認。
 - E04-D032 `async def` 的 hook（含 `on_init`、`on_start`、`on_stop`）在註冊時以 `TypeError` 拒絕，session 為 `INIT_FAILED`；SDK 不開 event loop。
 - E04-D033 hook 的回傳值忽略，不檢查（同 Go hook 無回傳值）。
 - E04-D034 每次交付建立新的 frozen 事件物件，不重用；BestQuote、Trade、OrderEvent 每則從轉換到呼叫的耗時記在 PR，無硬門檻（同 E02-D004）。
+
+## 決定（2026-10-26，E04-D041–E04-D044）
+
+Yi Te 於 #429 確認 E04-D041–E04-D044。E04-04 Context 的商品、下單、本地狀態與 volume。
+
+- E04-D041 `submit` 只收 `mftik.Order`（E04-02），不提供 kwargs 快捷；型別不對丟 `TypeError`。
+- E04-D042 `open_orders` 回 `tuple[Order, ...]`，無掛單為空 tuple（同 E04-D023）；順序照 `mftik-rt`，不另排序。
+- E04-D043 `resolve` 沿用 runtime 的逾時與 hook 預算，Python 不加 timeout 參數。
+- E04-D044 volume：`dir`、`volume_dir`、`input_dir` 收 `str | os.PathLike`；`data` 收 bytes-like（`bytes`、`bytearray`、`memoryview`），`str` 丟 `TypeError`，不隱式編碼；`read` 回 `bytes`，找不到回 `None`。
