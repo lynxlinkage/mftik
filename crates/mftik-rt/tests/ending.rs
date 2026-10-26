@@ -17,22 +17,20 @@
 //! - After EOF, an OnStop past the hook budget exits 21 without `Stopped`
 //!   (E03-D027).
 //!
-//! The shim in `common` keeps every Report and fails a test that reads one
+//! The shim in `mftik-testkit` keeps every Report and fails a test that reads one
 //! after `Exiting`.
-
-mod common;
 
 use std::env;
 use std::io::Write;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::*;
 use mftik_core::dispatch::TD_CAP;
 use mftik_proto::wire::mftiko::common::v1::{Outcome, Version};
 use mftik_proto::wire::mftiko::stsctl::v1::{Command as StsCommand, Fail, Report, command};
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
 use mftik_rt::{Context, HookError, Strategy};
+use mftik_testkit::*;
 use prost::Message;
 
 // ---------- the worker side ----------

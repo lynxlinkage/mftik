@@ -1,0 +1,16 @@
+[package]
+name = "mftik-testkit"
+description = "Dev-only nats-server and fake-shim harness for session tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+libc = "0.2.191"
+mftik-proto = { path = "../mftik-proto" }
+mftik-rt = { path = "../mftik-rt" }
+nkeys = "0.4.5"
+prost = "0.14.4"

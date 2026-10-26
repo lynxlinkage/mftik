@@ -12,7 +12,12 @@ pyo3::create_exception!(mftik, AlgoNotDeclared, Error);
 pyo3::create_exception!(mftik, NoFeed, Error);
 pyo3::create_exception!(mftik, Stopping, Error);
 pyo3::create_exception!(mftik, ReadError, Error);
-pyo3::create_exception!(mftik, ContextError, Error);
+pyo3::create_exception!(
+    mftik,
+    ContextError,
+    Error,
+    "The Context is no longer valid for this call."
+);
 
 pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Error", py.get_type::<Error>())?;

@@ -12,14 +12,14 @@ build-backend = "maturin"
 [dependency-groups]
 dev = [
     "maturin>=1.8,<2",
-    "mypy>=1.13,<2",
+    "mypy>=2.4.0",
     "ruff>=0.17",
 ]
 
 [tool.maturin]
 manifest-path = "crates/mftik-py/Cargo.toml"
-python-source = "python"
 module-name = "mftik._mftik"
+python-source = "python"
 bindings = "pyo3"
 # build.rs writes these after the proto descriptor changes. They are gitignored
 # (E01-D005) and still have to ship in the wheel.

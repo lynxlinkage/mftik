@@ -15,13 +15,15 @@ use mftik_proto::wire::mftiko::td::v1 as td;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule, PyTuple};
 
-use crate::error::{ContextError, Error as PyError, NotInInit, ReadError as PyReadError};
+use crate::error::{
+    ContextError, Error as PyError, NotInInit, ReadError as PyReadError, context_error,
+};
 use crate::proto::ToPyMessage;
 use crate::sdk::{
     PyBalanceEvent, PyBookUpdate, PyFillEvent, PyInfo, PyOrder, PyOrderEvent, PyPositionEvent,
     PyReconEvent, PyRejectEvent, PyTapeQuery,
 };
-use crate::{context_error, feed_to_py, init_module, read_error};
+use crate::{feed_to_py, init_module, read_error};
 
 fn with_mftik(body: impl FnOnce(Python<'_>)) {
     // One interpreter, and `import` inside registration can drop the GIL.

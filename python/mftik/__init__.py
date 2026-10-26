@@ -1,4 +1,4 @@
-"""Python SDK. Protocol logic and IO stay in the Rust crates."""
+"""STS Python SDK. Protocol logic and IO stay in the Rust crates."""
 
 import sys
 
@@ -6,6 +6,7 @@ from mftik._mftik import (
     AlgoNotDeclared,
     BalanceEvent,
     BookUpdate,
+    Context,
     ContextError,
     Error,
     Feed,
@@ -18,6 +19,7 @@ from mftik._mftik import (
     OrderEvent,
     Origin,
     PositionEvent,
+    Poster,
     ReadError,
     ReconEvent,
     RejectedRequest,
@@ -32,6 +34,8 @@ from mftik._mftik import (
     md,
     td,
 )
+from mftik._version import package_version
+from mftik.strategy import Strategy
 
 sys.modules["mftik.common"] = common
 sys.modules["mftik.common.v1"] = common.v1
@@ -44,6 +48,7 @@ __all__ = [
     "AlgoNotDeclared",
     "BalanceEvent",
     "BookUpdate",
+    "Context",
     "ContextError",
     "Error",
     "Feed",
@@ -56,11 +61,13 @@ __all__ = [
     "OrderEvent",
     "Origin",
     "PositionEvent",
+    "Poster",
     "ReadError",
     "ReconEvent",
     "RejectEvent",
     "RejectedRequest",
     "Stopping",
+    "Strategy",
     "TapeQuery",
     "Td",
     "UniversalTicker",
@@ -68,5 +75,18 @@ __all__ = [
     "UnknownUid",
     "common",
     "md",
+    "run",
     "td",
 ]
+
+__version__ = package_version()
+
+
+def __getattr__(name: str):
+    # ``python -m mftik.run`` imports this package first. Importing ``mftik.run``
+    # here would leave it in ``sys.modules`` before that entrypoint executes.
+    if name == "run":
+        from mftik.run import run
+
+        return run
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -15,7 +15,7 @@ use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::td::v1 as td;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyListMethods, PyTuple};
 
 use crate::proto::{self, ToPyMessage, cursor_from_py, enum_value, repr_value};
 
@@ -1057,6 +1057,9 @@ pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyInfo>()?;
     module.add_class::<PyOrder>()?;
     module.add_class::<PyTapeQuery>()?;
+    let index = module.index()?;
+    index.append("Origin")?;
+    index.append("RejectedRequest")?;
     let modules = py.import("sys")?.getattr("modules")?;
     if let Ok(package) = modules.get_item("mftik")
         && !package.is(module)

@@ -5,6 +5,7 @@ members = [
     "crates/mftik-core",
     "crates/mftik-py",
     "crates/mftik-rt",
+    "crates/mftik-testkit",
     "examples/conform",
 ]
 

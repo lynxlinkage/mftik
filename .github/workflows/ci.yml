@@ -35,7 +35,8 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-  # E01-D006: uv + maturin wheel, import smoke test, and ruff.
+  # E01-D006, E04-D007, E04-D014: Python 3.11, the wheel, unit tests,
+  # stubtest, and the Python session e2e. A version matrix waits for E04-06.
   python:
     name: python
     runs-on: ubuntu-latest
@@ -44,20 +45,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v10.3.2
         with:
-          python-version: "3.12"
-      - name: Install CPython
-        run: uv python install 3.12
-      - name: Sync ruff and maturin
-        run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.12
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install nats-server
+        run: |
+          GOBIN="$RUNNER_TEMP/nats-bin" go install github.com/nats-io/nats-server/v2@v2.15.0
+          echo "MFTIK_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
+      - name: Install CPython and headers
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-dev
+          uv python install 3.11
+      - name: Sync dev tools
+        run: uv sync --frozen --only-dev --no-install-project --managed-python --python 3.11
       - name: Ruff
-        run: uv run --frozen --no-sync ruff check python tests/python
+        run: uv run --frozen --no-sync ruff check python tests/python crates/mftik-py/tests/pystrategies
       - name: Ruff format
-        run: uv run --frozen --no-sync ruff format --check python tests/python
+        run: uv run --frozen --no-sync ruff format --check python tests/python crates/mftik-py/tests/pystrategies
       - name: Build the mftik wheel
         run: uv run --frozen --no-sync maturin build --release --out dist
-      - name: Install the wheel and import mftik
+      - name: Install the wheel
         run: |
-          uv venv --managed-python --python 3.12 /tmp/mftik-smoke
+          uv venv --managed-python --python 3.11 /tmp/mftik-smoke
           uv pip install --python /tmp/mftik-smoke/bin/python dist/*.whl
           meta="$(unzip -p dist/*.whl 'mftik-*.dist-info/METADATA')"
           if printf '%s\n' "$meta" | grep -i protobuf; then
@@ -67,11 +78,23 @@ jobs:
           unzip -l dist/*.whl | grep -q 'mftik/md/v1.pyi'
           unzip -l dist/*.whl | grep -q 'mftik/td/v1.pyi'
           unzip -l dist/*.whl | grep -q 'mftik/common/v1.pyi'
-          /tmp/mftik-smoke/bin/python tests/python/smoke_import.py
-          /tmp/mftik-smoke/bin/python -m unittest tests/python/test_types.py
-          uv pip install --python /tmp/mftik-smoke/bin/python 'mypy>=1.13,<2'
+          uv export --frozen --only-dev --no-emit-project --no-hashes -o /tmp/mftik-dev.txt
+          uv pip install --python /tmp/mftik-smoke/bin/python -r /tmp/mftik-dev.txt
+      - name: Import smoke
+        run: /tmp/mftik-smoke/bin/python tests/python/smoke_import.py
+      - name: Python unit tests
+        run: /tmp/mftik-smoke/bin/python -m unittest discover -s tests/python -v
+      - name: stubtest
+        run: |
           cd /tmp
-          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik._mftik
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest mftik.common.v1 mftik.md.v1 mftik.td.v1
+          /tmp/mftik-smoke/bin/python -m mypy.stubtest --ignore-missing-stub mftik
+      - name: Python session e2e
+        run: |
+          test -n "$MFTIK_NATS_SERVER"
+          test -x /tmp/mftik-smoke/bin/python
+          MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --test session -- --ignored --test-threads=1
 
   # Temporary copy only. The committed proto tree is not edited.
   proto-drift:
