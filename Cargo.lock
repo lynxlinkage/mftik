@@ -736,7 +736,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mftik-conform"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "mftik-proto",
  "mftik-rt",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "mftik-core"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "criterion",
  "mftik-proto",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "mftik-proto"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "mftik-py"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "async-nats",
  "futures-util",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "mftik-rt"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "async-nats",
  "bytes",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "mftik-testkit"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "base64 0.23.1",
  "libc",

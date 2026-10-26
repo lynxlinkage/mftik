@@ -1,4 +1,4 @@
-"""Import the installed mftik wheel and check version 0.12.0 when it is exposed."""
+"""Import the installed mftik wheel and check the package version."""
 
 import importlib.metadata
 import sys
@@ -6,7 +6,8 @@ from pathlib import Path
 
 import mftik
 
-EXPECTED_VERSION = "0.12.0"
+# scripts/release-check versions keeps this equal to the workspace version.
+EXPECTED_VERSION = "0.14.0"
 
 
 def main() -> None:

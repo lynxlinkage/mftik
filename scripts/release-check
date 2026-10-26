@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Check the package version sources, and smoke a built wheel.
+
+`versions` requires these four strings to be identical:
+
+- ``Cargo.toml`` ``workspace.package.version``
+- ``pyproject.toml`` ``project.version``
+- ``tests/python/smoke_import.py`` ``EXPECTED_VERSION``
+- ``python/mftik/_version.py`` ``FALLBACK``, which ``mftik.__version__``
+  returns when the distribution is not installed
+
+``python/mftik/__init__.py`` must set ``__version__`` from that function.
+The installed name comes from the wheel metadata; ``wheel`` checks it by
+running ``tests/python/smoke_import.py`` in a clean virtual environment.
+
+``Cargo.lock`` workspace members and the ``mftik`` entry in ``uv.lock`` must
+use the same version. ``wheel`` and ``dist`` also require abi3-py311 metadata:
+``cp311-abi3``, ``Requires-Python: >=3.11``, and the E04-D064 classifiers.
+``--tag`` requires the tag to be ``v`` plus that version.
+"""
+
+from __future__ import annotations
+
+import argparse
+import email
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+import zipfile
+from pathlib import Path, PurePosixPath
+
+ROOT = Path(__file__).resolve().parent.parent
+
+CLASSIFIERS = (
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+)
+REQUIRES_PYTHON = ">=3.11"
+PYI = (
+    "mftik/common/v1.pyi",
+    "mftik/md/v1.pyi",
+    "mftik/td/v1.pyi",
+)
+LEGACY_MANYLINUX_X86_64 = frozenset(
+    {
+        "manylinux1_x86_64",
+        "manylinux2010_x86_64",
+        "manylinux2014_x86_64",
+    }
+)
+PLATFORMS = ("manylinux_2_28_x86_64", "macos_arm64")
+EM_X86_64 = 62
+MACHO_64_LE = 0xFEEDFACF
+CPU_TYPE_ARM64 = 0x0100000C
+
+
+class CheckError(Exception):
+    """The release sources or a wheel do not match the rules."""
+
+
+def load_toml(path: Path) -> dict:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def assignment(path: Path, name: str) -> str:
+    pattern = re.compile(rf'^{re.escape(name)} = "([^"]*)"$', re.MULTILINE)
+    found = pattern.findall(path.read_text(encoding="utf-8"))
+    if len(found) != 1:
+        raise CheckError(f"{path.relative_to(ROOT)} has {len(found)} {name} assignments")
+    return found[0]
+
+
+def package_names(root: Path) -> list[str]:
+    workspace = load_toml(root / "Cargo.toml")
+    names = []
+    for member in workspace["workspace"]["members"]:
+        manifest = load_toml(root / member / "Cargo.toml")
+        names.append(manifest["package"]["name"])
+    return names
+
+
+def lock_versions(path: Path, names: set[str]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for package in load_toml(path).get("package", []):
+        name = package.get("name")
+        if name not in names:
+            continue
+        if name in found:
+            raise CheckError(f"{path.relative_to(ROOT)} lists {name} more than once")
+        found[name] = package["version"]
+    missing = names - found.keys()
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise CheckError(f"{path.relative_to(ROOT)} is missing {missing_list}")
+    return found
+
+
+def read_sources(root: Path) -> str:
+    """Return the shared version, or raise when the sources disagree."""
+    workspace = load_toml(root / "Cargo.toml")["workspace"]["package"]["version"]
+    project = load_toml(root / "pyproject.toml")["project"]
+    pyproject = project["version"]
+    expected = assignment(root / "tests/python/smoke_import.py", "EXPECTED_VERSION")
+    fallback = assignment(root / "python/mftik/_version.py", "FALLBACK")
+    sources = {
+        "Cargo.toml workspace version": workspace,
+        "pyproject.toml version": pyproject,
+        "smoke EXPECTED_VERSION": expected,
+        "mftik.__version__ fallback": fallback,
+    }
+    init_py = (root / "python/mftik/__init__.py").read_text(encoding="utf-8")
+    if not re.search(r"^__version__ = package_version\(\)$", init_py, re.MULTILINE):
+        raise CheckError("mftik.__version__ is not assigned from package_version()")
+    if project.get("requires-python") != REQUIRES_PYTHON:
+        raise CheckError(
+            f"requires-python is {project.get('requires-python')!r}, want {REQUIRES_PYTHON!r}"
+        )
+    classifiers = project.get("classifiers")
+    if list(classifiers or []) != list(CLASSIFIERS):
+        raise CheckError(f"classifiers are {classifiers!r}")
+    features = load_toml(root / "crates/mftik-py/Cargo.toml")["dependencies"]["pyo3"]["features"]
+    if features != ["abi3-py311"]:
+        raise CheckError(f"pyo3 features are {features!r}, want ['abi3-py311']")
+    versions = set(sources.values())
+    if len(versions) != 1:
+        lines = [f"{label}: {value}" for label, value in sources.items()]
+        raise CheckError("version sources disagree:\n" + "\n".join(lines))
+    version = workspace
+    if not version or any(char.isspace() for char in version) or "-" in version:
+        raise CheckError(f"unsupported version string {version!r}")
+    for label, found in (
+        ("Cargo.lock", lock_versions(root / "Cargo.lock", set(package_names(root)))),
+        ("uv.lock", lock_versions(root / "uv.lock", {"mftik"})),
+    ):
+        mismatched = {name: value for name, value in found.items() if value != version}
+        if mismatched:
+            raise CheckError(f"{label} version mismatch: {mismatched}")
+    return version
+
+
+def check_tag(version: str, tag: str) -> None:
+    expected = f"v{version}"
+    if tag != expected:
+        raise CheckError(f"tag {tag!r} does not match version {version} (want {expected})")
+
+
+def parse_wheel_filename(path: Path, version: str) -> str:
+    if path.suffix != ".whl":
+        raise CheckError(f"{path.name} is not a wheel")
+    parts = path.name[: -len(".whl")].split("-")
+    if len(parts) != 5:
+        raise CheckError(f"unexpected wheel name {path.name}")
+    distribution, wheel_version, python, abi, platform = parts
+    if distribution != "mftik":
+        raise CheckError(f"wheel distribution is {distribution!r}")
+    if wheel_version != version:
+        raise CheckError(f"wheel version is {wheel_version!r}, want {version!r}")
+    if python != "cp311" or abi != "abi3":
+        raise CheckError(f"wheel tags are {python}-{abi}, want cp311-abi3")
+    return platform
+
+
+def platform_kind(platform: str) -> str:
+    tags = platform.split(".")
+    if "manylinux_2_28_x86_64" in tags:
+        for tag in tags:
+            if tag in LEGACY_MANYLINUX_X86_64:
+                continue
+            match = re.fullmatch(r"manylinux_2_(\d+)_x86_64", tag)
+            if match is None or int(match.group(1)) > 28:
+                raise CheckError(f"linux platform tag {tag} is not manylinux_2_28 x86_64")
+        return "manylinux_2_28_x86_64"
+    if re.fullmatch(r"macosx_[0-9]+_[0-9]+_arm64", platform):
+        return "macos_arm64"
+    raise CheckError(f"platform {platform} is not a release wheel")
+
+
+def metadata_bytes(zf: zipfile.ZipFile) -> bytes:
+    matches = [name for name in zf.namelist() if name.endswith(".dist-info/METADATA")]
+    if len(matches) != 1:
+        raise CheckError(f"expected one METADATA, found {matches}")
+    return zf.read(matches[0])
+
+
+def check_metadata(raw: bytes, version: str) -> None:
+    text = raw.decode("utf-8")
+    if re.search(r"protobuf", text, re.IGNORECASE):
+        raise CheckError("wheel metadata mentions protobuf")
+    message = email.message_from_bytes(raw)
+    name = message.get("Name")
+    if name is None or name.lower() != "mftik":
+        raise CheckError(f"wheel Name is {name!r}")
+    if message.get("Version") != version:
+        raise CheckError(f"wheel Version is {message.get('Version')!r}, want {version!r}")
+    if message.get("Requires-Python") != REQUIRES_PYTHON:
+        raise CheckError(f"wheel Requires-Python is {message.get('Requires-Python')!r}")
+    if message.get_all("Requires-Dist"):
+        raise CheckError(f"wheel has Requires-Dist: {message.get_all('Requires-Dist')}")
+    got = message.get_all("Classifier") or []
+    if set(got) != set(CLASSIFIERS) or len(got) != len(CLASSIFIERS):
+        raise CheckError(f"wheel classifiers are {got!r}")
+
+
+def extension_name(zf: zipfile.ZipFile) -> str:
+    found = []
+    for name in zf.namelist():
+        path = PurePosixPath(name)
+        if (
+            path.parent.as_posix() == "mftik"
+            and path.name.startswith("_mftik")
+            and path.suffix == ".so"
+        ):
+            found.append(name)
+    if len(found) != 1:
+        raise CheckError(f"expected one _mftik extension, found {found}")
+    return found[0]
+
+
+def check_extension(blob: bytes, kind: str) -> None:
+    if kind == "manylinux_2_28_x86_64":
+        if len(blob) < 20 or blob[:4] != b"\x7fELF" or blob[4] != 2 or blob[5] != 1:
+            raise CheckError("extension is not little-endian ELF64")
+        machine = int.from_bytes(blob[18:20], "little")
+        if machine != EM_X86_64:
+            raise CheckError(f"ELF machine is {machine}, want {EM_X86_64}")
+        return
+    if len(blob) < 8:
+        raise CheckError("extension is too small to be Mach-O")
+    magic = int.from_bytes(blob[:4], "little")
+    cputype = int.from_bytes(blob[4:8], "little")
+    if magic != MACHO_64_LE or cputype != CPU_TYPE_ARM64:
+        raise CheckError(f"Mach-O magic {magic:#x} cputype {cputype:#x} is not arm64")
+
+
+def check_pyi(zf: zipfile.ZipFile) -> None:
+    names = set(zf.namelist())
+    missing = [name for name in PYI if name not in names]
+    if missing:
+        raise CheckError(f"wheel is missing {missing}")
+
+
+def check_wheel_file(path: Path, version: str, kind: str | None = None) -> str:
+    platform = parse_wheel_filename(path, version)
+    detected = platform_kind(platform)
+    if kind is not None and detected != kind:
+        raise CheckError(f"{path.name} is {detected}, want {kind}")
+    with zipfile.ZipFile(path) as zf:
+        check_metadata(metadata_bytes(zf), version)
+        check_pyi(zf)
+        check_extension(zf.read(extension_name(zf)), detected)
+    return detected
+
+
+def smoke_import(wheel: Path, python: str) -> None:
+    interpreter = shutil.which(python)
+    if interpreter is None:
+        raise CheckError(f"interpreter not found: {python}")
+    script = ROOT / "tests/python/smoke_import.py"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    with tempfile.TemporaryDirectory(prefix="mftik-smoke-") as tmp:
+        venv = Path(tmp) / "venv"
+        subprocess.run([interpreter, "-m", "venv", str(venv)], check=True, env=env)
+        exe = venv / "bin" / "python"
+        subprocess.run(
+            [
+                str(exe),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-index",
+                "--no-deps",
+                str(wheel),
+            ],
+            check=True,
+            env=env,
+        )
+        subprocess.run([str(exe), str(script)], cwd=tmp, env=env, check=True)
+
+
+def check_wheel(path: Path, kind: str, python: str, do_import: bool) -> None:
+    version = read_sources(ROOT)
+    check_wheel_file(path, version, kind)
+    if do_import:
+        smoke_import(path, python)
+    print(f"wheel {path.name} ok")
+
+
+def check_dist(directory: Path) -> None:
+    version = read_sources(ROOT)
+    if not directory.is_dir():
+        raise CheckError(f"{directory} is not a directory")
+    entries = list(directory.iterdir())
+    if any(entry.is_dir() for entry in entries):
+        raise CheckError(f"{directory} contains a directory")
+    wheels = [entry for entry in entries if entry.suffix == ".whl"]
+    extras = [entry for entry in entries if entry.suffix != ".whl"]
+    if extras:
+        raise CheckError(f"unexpected files in {directory}: {[entry.name for entry in extras]}")
+    if len(wheels) != 2:
+        raise CheckError(f"expected 2 wheels, found {[entry.name for entry in wheels]}")
+    kinds = sorted(check_wheel_file(wheel, version) for wheel in wheels)
+    if kinds != sorted(PLATFORMS):
+        raise CheckError(f"wheel platforms are {kinds}")
+    print("dist ok: " + ", ".join(sorted(wheel.name for wheel in wheels)))
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    versions = sub.add_parser("versions", help="check the four version sources")
+    versions.add_argument("--tag", help="git tag that must equal v<version>")
+    wheel = sub.add_parser("wheel", help="check one wheel and smoke it")
+    wheel.add_argument("wheel", type=Path)
+    wheel.add_argument("--platform", required=True, choices=PLATFORMS)
+    wheel.add_argument("--python", default="python3.11")
+    wheel.add_argument("--no-import", action="store_true")
+    dist = sub.add_parser("dist", help="check a directory of the two release wheels")
+    dist.add_argument("directory", type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    try:
+        if args.command == "versions":
+            version = read_sources(ROOT)
+            if args.tag is not None:
+                check_tag(version, args.tag)
+            print(f"version {version}")
+        elif args.command == "wheel":
+            check_wheel(args.wheel, args.platform, args.python, not args.no_import)
+        else:
+            check_dist(args.directory)
+    except CheckError as exc:
+        print(f"release-check: {exc}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        print(f"release-check: command failed ({exc.returncode}): {exc.cmd}", file=sys.stderr)
+        return exc.returncode or 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
