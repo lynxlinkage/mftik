@@ -222,6 +222,15 @@ E04-02 Python 端的型別與錯誤。只做型別與轉換，不接 hook。
 - E04-D023 欄位對應：`optional` 與沒設的 message 欄位為 `None`；oneof 每個分支各是一個屬性，未選為 `None`，另有屬性回傳選中分支名（未設為 `None`）；`repeated` 為 `tuple`；`map` 為 `dict`，每次讀取回新的副本。
 - E04-D024 一期不提供以 prost 編解碼 bytes 的進出（Go `proto.Marshal` 對應），有需要再加。
 
+## 決定（2026-10-26，E04-D031–E04-D034）
+
+E04-03 選用 hook 的交付。Yi Te 於 #428 確認。
+
+- E04-D031 是否覆寫只看類別：`type(s).on_x is not Strategy.on_x`，OnInit 前判斷一次；執行期掛在 instance 上的屬性不算（同 Go 註冊時固定）。
+- E04-D032 `async def` 的 hook（含 `on_init`、`on_start`、`on_stop`）在註冊時以 `TypeError` 拒絕，session 為 `INIT_FAILED`；SDK 不開 event loop。
+- E04-D033 hook 的回傳值忽略，不檢查（同 Go hook 無回傳值）。
+- E04-D034 每次交付建立新的 frozen 事件物件，不重用；BestQuote、Trade、OrderEvent 每則從轉換到呼叫的耗時記在 PR，無硬門檻（同 E02-D004）。
+
 ## 決定（2026-10-26，E04-D041–E04-D044）
 
 Yi Te 於 #429 確認 E04-D041–E04-D044。E04-04 Context 的商品、下單、本地狀態與 volume。

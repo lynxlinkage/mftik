@@ -158,5 +158,16 @@ pub(crate) fn require_callable(py: Python<'_>, callback: &Py<PyAny>) -> PyResult
     }
 }
 
+/// One interpreter for every `mftik-py` test. Registration and conversion both
+/// install modules, and a test that drops the GIL can interleave with another.
+#[cfg(test)]
+pub(crate) fn lock_python_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+#[cfg(test)]
+mod hook_tests;
+
 #[cfg(test)]
 mod tests;
