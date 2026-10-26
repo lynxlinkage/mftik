@@ -278,3 +278,47 @@ class TradeExit(Strategy):
 
     def on_trade(self, ctx, ev):
         raise SystemExit("stop-via-sys")
+
+
+class Cancel(Strategy):
+    """One order, then a cancel that TD cannot answer."""
+
+    def on_init(self, ctx):
+        return None
+
+    def on_start(self, ctx):
+        return None
+
+    def on_stop(self, ctx):
+        emit("stop")
+
+    def on_order(self, ctx, ev):
+        ctx.cancel(ev.td.api_id, ev.order.client_order_id)
+
+    def on_reject(self, ctx, ev):
+        emit(
+            "reject",
+            cloid=ev.client_order_ids[0],
+            code=ev.code,
+            reason=ev.reason,
+            request=int(ev.request),
+        )
+        ctx.exit()
+
+
+class Book(Strategy):
+    """Resolve in OnStart, then record the first synced book delta."""
+
+    def on_init(self, ctx):
+        return None
+
+    def on_start(self, ctx):
+        info = ctx.resolve("Bybit_Spot_BTCUSDT")
+        emit("resolved", tick=info.price_tick(), uid=info.uid)
+
+    def on_stop(self, ctx):
+        emit("stop")
+
+    def on_book(self, ctx, ev):
+        emit("book", exch=ev.exch_ts_ns, seq=ev.md.seq, uid=ev.md.uid)
+        ctx.exit()

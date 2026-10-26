@@ -5,24 +5,28 @@
 //! compiles this file and does not run it (`#[ignore]`). The python CI job
 //! runs it with `--ignored`.
 //!
-//! `on_book` is not delivered here. The book waits until it is synced, and
-//! that needs `ctx.resolve` (E04-04). An unresolved delta is logged and the
-//! hook is not called. `on_reject` is not delivered here either: a reject is
-//! a locally refused cancel, which needs `ctx.cancel` (E04-04), and `td.evt`
-//! does not carry one. Both hooks' field delivery is covered by the crate
-//! tests, which call the same trait methods the runtime calls.
+//! The wired-hook test leaves `on_book` and `on_reject` unfired on purpose:
+//! an unresolved delta is logged and not delivered, and `td.evt` does not
+//! carry a reject. `on_book` is delivered by a later test once `ctx.resolve`
+//! has stored the tick and `md.view` has synced the book. `on_reject` is
+//! delivered when `ctx.cancel` is refused locally because `td.order` has no
+//! responder.
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use mftik_core::cloid::{self, EPOCH_MS};
 use mftik_core::tdpath::evt_subject;
 use mftik_proto::wire::mftiko::common::v1::{self as common, Outcome, Version};
-use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event};
+use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event, view_reply as md_view};
 use mftik_proto::wire::mftiko::session::v1::AccountDecl;
 use mftik_proto::wire::mftiko::stsctl::v1::{Bindings, FeedBinding};
+use mftik_proto::wire::mftiko::sym::v1::{self as sym, reply, request};
 use mftik_proto::wire::mftiko::td::v1::{self as td, view_reply};
 use mftik_proto::wire::mftiko::worker::v1::{Verb, worker_up};
 use mftik_rt::io::Io;
@@ -138,6 +142,189 @@ impl Peer {
     }
 }
 
+struct BookPeer {
+    io: Io,
+    client: async_nats::Client,
+    views: Arc<AtomicUsize>,
+    subjects: Arc<Mutex<Vec<String>>>,
+}
+
+impl BookPeer {
+    fn start(nats: &Nats) -> Self {
+        let io = Io::start().expect("book peer io");
+        let mut creds = nats.creds.clone();
+        creds.inbox_prefix = "_INBOX_peer".into();
+        let url = nats.url.clone();
+        let client = io
+            .block_on(async move {
+                mftik_rt::nats::dial(&url, &creds, Duration::from_secs(5), None).await
+            })
+            .expect("book peer connects");
+        let views = Arc::new(AtomicUsize::new(0));
+        let subjects = Arc::new(Mutex::new(Vec::new()));
+        serve_sym(&io, client.clone());
+        serve_book_view(
+            &io,
+            client.clone(),
+            Arc::clone(&views),
+            Arc::clone(&subjects),
+        );
+        let peer = Self {
+            io,
+            client,
+            views,
+            subjects,
+        };
+        peer.barrier();
+        peer
+    }
+
+    fn views(&self) -> usize {
+        self.views.load(Ordering::SeqCst)
+    }
+
+    fn subjects(&self) -> Vec<String> {
+        self.subjects.lock().expect("subjects").clone()
+    }
+
+    fn publish(&self, subject: &str, body: Vec<u8>) {
+        let client = self.client.clone();
+        let subject = subject.to_owned();
+        self.io.block_on(async move {
+            client.publish(subject, body.into()).await.expect("publish");
+            client.flush().await.expect("flush");
+        });
+    }
+
+    fn barrier(&self) {
+        let client = self.client.clone();
+        self.io
+            .block_on(async move { mftik_rt::nats::barrier(&client, Duration::from_secs(5)).await })
+            .expect("barrier");
+    }
+}
+
+fn serve_sym(io: &Io, client: async_nats::Client) {
+    let sub = io
+        .block_on({
+            let client = client.clone();
+            async move { client.subscribe("sym").await }
+        })
+        .expect("subscribe sym");
+    io.spawn(async move {
+        let mut sub = sub;
+        while let Some(msg) = sub.next().await {
+            let Some(reply_to) = msg.reply else {
+                continue;
+            };
+            let body = sym_answer(&msg.payload);
+            client
+                .publish(reply_to, body.into())
+                .await
+                .expect("sym reply");
+        }
+    });
+}
+
+fn sym_answer(payload: &[u8]) -> Vec<u8> {
+    let req = sym::Request::decode(payload).expect("sym request");
+    match req.req.expect("sym request is set") {
+        request::Req::Get(get) if get.universal_ticker == "Bybit_Spot_BTCUSDT" => sym_info(),
+        request::Req::GetByUid(by) if by.uid == 7 => sym_info(),
+        request::Req::Revisions(_) => sym::Reply {
+            result: Some(reply::Result::Revisions(sym::RevisionList {
+                tables: vec![sym::TableRevision {
+                    venue: "Bybit".into(),
+                    category: "Spot".into(),
+                    revision: 1,
+                }],
+            })),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        _ => {
+            let text = b"not_found";
+            let length = u16::try_from(text.len()).expect("short");
+            let mut body = vec![0, 1, 0, 2];
+            body.extend_from_slice(&length.to_be_bytes());
+            body.extend_from_slice(text);
+            body
+        }
+    }
+}
+
+fn sym_info() -> Vec<u8> {
+    let mut filters = std::collections::HashMap::new();
+    filters.insert(
+        mftik_core::symbol::PRICE_TICK.to_owned(),
+        sym::Bound { value: Some(0.01) },
+    );
+    sym::Reply {
+        result: Some(reply::Result::Info(sym::SymbolInfo {
+            universal_ticker: "Bybit_Spot_BTCUSDT".into(),
+            exch_ticker: "BTCUSDT".into(),
+            base: "BTC".into(),
+            quote: "USDT".into(),
+            status: sym::SymbolStatus::Tradable as i32,
+            filters,
+            updated_at_ns: 10,
+            uid: 7,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn serve_book_view(
+    io: &Io,
+    client: async_nats::Client,
+    views: Arc<AtomicUsize>,
+    subjects: Arc<Mutex<Vec<String>>>,
+) {
+    let sub = io
+        .block_on({
+            let client = client.clone();
+            async move { client.subscribe("md.v1.view.>").await }
+        })
+        .expect("subscribe md.view");
+    io.spawn(async move {
+        let mut sub = sub;
+        while let Some(msg) = sub.next().await {
+            subjects
+                .lock()
+                .expect("subjects")
+                .push(msg.subject.to_string());
+            let Some(reply_to) = msg.reply else {
+                continue;
+            };
+            let reply = md::ViewReply {
+                result: Some(md_view::Result::Book(md::BookSnapshot {
+                    uid: 7,
+                    conn_epoch: 1,
+                    seq: 1,
+                    bids: vec![md::Level {
+                        price: 11.0,
+                        qty: 1.0,
+                    }],
+                    asks: vec![md::Level {
+                        price: 12.0,
+                        qty: 1.0,
+                    }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            client
+                .publish(reply_to, reply.encode_to_vec().into())
+                .await
+                .expect("book snapshot");
+            client.flush().await.expect("flush snapshot");
+            views.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+}
+
 fn subject(topic: &str) -> String {
     format!("md.v1.f.m1.{topic}.v")
 }
@@ -150,6 +337,21 @@ fn bindings(topics: &[&str]) -> Bindings {
             .map(|topic| FeedBinding {
                 feed: format!("{topic}.v"),
                 subject: subject(topic),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn bindings_keyed(feeds: &[(&str, &str)]) -> Bindings {
+    Bindings {
+        version: Some(Version { epoch: 1, seq: 1 }),
+        feeds: feeds
+            .iter()
+            .map(|(feed, subject)| FeedBinding {
+                feed: (*feed).to_owned(),
+                subject: (*subject).to_owned(),
                 ..Default::default()
             })
             .collect(),
@@ -183,6 +385,18 @@ fn envelope(seq: u64, md_ts: i64, payload: &[u8]) -> Vec<u8> {
     out[24..32].copy_from_slice(&seq.to_le_bytes());
     out.extend_from_slice(payload);
     out
+}
+
+fn book_delta(seq: u64, md_ts: i64, price: f64, qty: f64) -> Vec<u8> {
+    feed(
+        seq,
+        md_ts,
+        feed_event::Event::OrderBookDelta(md::OrderBookDelta {
+            meta: Some(md::Meta { exch_ts_ns: 42 }),
+            bids: vec![md::Level { price, qty }],
+            ..Default::default()
+        }),
+    )
 }
 
 fn feed(seq: u64, md_ts: i64, event: feed_event::Event) -> Vec<u8> {
@@ -658,6 +872,111 @@ fn on_trade_exception_crashes_and_on_stop_runs() {
 #[ignore = "python CI job: MFTIK_PYTHON is the venv whose wheel is installed"]
 fn system_exit_in_on_trade_is_a_crash() {
     crash_on_trade("hooks:TradeExit", "hook panic: SystemExit: stop-via-sys");
+}
+
+#[test]
+#[ignore = "python CI job: MFTIK_PYTHON is the venv whose wheel is installed"]
+fn on_reject_is_delivered_when_cancel_has_no_responder() {
+    let nats = start_nats();
+    let peer = Peer::connect(&nats);
+    peer.serve_view();
+    let mut shim = spawn(python_module("hooks:Cancel"), &nats);
+    expect_hello(&mut shim, &package_version());
+    init(&shim, with_account(&nats), 5000);
+    expect_applied(&mut shim, "live-1");
+    expect_done(&mut shim, Verb::Init, true, "");
+    start_with(&shim, bindings(&["trade"]));
+    expect_done(&mut shim, Verb::Start, true, "");
+    match shim.expect() {
+        worker_up::Msg::Stage(stage) => assert_eq!(stage.name, "running"),
+        other => panic!("want Stage(running), got {other:?}"),
+    }
+    let id = cloid(1);
+    peer.publish(&evt_subject(7), order_event(6, id.clone()).encode_to_vec());
+    expect_ending(&mut shim, Outcome::Done, "", Some(true));
+    let ended = shim.end();
+    assert_eq!(
+        ended.code,
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        ended.stdout,
+        ended.stderr
+    );
+    let reject = only(&ended.stdout, "reject");
+    assert_eq!(field(reject, "cloid"), id);
+    assert_eq!(
+        field(reject, "request"),
+        (mftik_core::tdpath::RejectedRequest::Cancel as i32).to_string()
+    );
+    assert_eq!(
+        field(reject, "code"),
+        i32::from(td::RejectCode::AccountOffline).to_string()
+    );
+    assert_eq!(field(reject, "reason"), mftik_core::tdpath::REASON_OFFLINE);
+    assert!(ended.stdout.contains("\"hook\": \"stop\""));
+}
+
+#[test]
+#[ignore = "python CI job: MFTIK_PYTHON is the venv whose wheel is installed"]
+fn on_book_is_delivered_once_the_book_is_synced() {
+    let nats = start_nats();
+    let peer = BookPeer::start(&nats);
+    let mut shim = spawn(python_module("hooks:Book"), &nats);
+    expect_hello(&mut shim, &package_version());
+    init(&shim, init_payload(&nats.creds, ""), 5000);
+    expect_applied(&mut shim, "live-1");
+    expect_done(&mut shim, Verb::Init, true, "");
+    start_with(
+        &shim,
+        bindings_keyed(&[(
+            "orderbook_delta.Bybit_Spot_BTCUSDT",
+            "md.v1.f.m1.orderbook_delta.Bybit_Spot_BTCUSDT",
+        )]),
+    );
+    expect_done(&mut shim, Verb::Start, true, "");
+    match shim.expect() {
+        worker_up::Msg::Stage(stage) => assert_eq!(stage.name, "running"),
+        other => panic!("want Stage(running), got {other:?}"),
+    }
+    let now = wall_ns();
+    peer.publish(
+        "md.v1.f.m1.orderbook_delta.Bybit_Spot_BTCUSDT",
+        book_delta(2, now, 11.0, 1.0),
+    );
+    let started = Instant::now();
+    while peer.views() == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "no md.view for the book: {:?}",
+            peer.subjects()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // The snapshot reply is applied on the TD buffer. The next delta has to
+    // follow that apply; one that arrives while the reply is in flight is
+    // folded into the snapshot and is not a hook.
+    thread::sleep(Duration::from_millis(500));
+    peer.publish(
+        "md.v1.f.m1.orderbook_delta.Bybit_Spot_BTCUSDT",
+        book_delta(3, wall_ns(), 11.0, 2.0),
+    );
+    expect_ending(&mut shim, Outcome::Done, "", Some(true));
+    let ended = shim.end();
+    assert_eq!(
+        ended.code,
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        ended.stdout,
+        ended.stderr
+    );
+    let resolved = only(&ended.stdout, "resolved");
+    assert_eq!(field(resolved, "uid"), "7");
+    assert_eq!(field(resolved, "tick"), "0.01");
+    let book = only(&ended.stdout, "book");
+    assert_eq!(field(book, "uid"), "7");
+    assert_eq!(field(book, "seq"), "3");
+    assert_eq!(field(book, "exch"), "42");
+    assert!(ended.stdout.contains("\"hook\": \"stop\""));
 }
 
 fn init_failed(spec: &str, error: &str) {
