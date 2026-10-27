@@ -36,6 +36,12 @@
 
 依賴：E04。
 
+### E06 跟進 mftiko
+
+範圍：1.0.0 之後跟上 mftiko 的改動：pin 移到 testnet 的 release、文件跟上新規則，以及 mftiko 指定由 mftik 守的 Python 端測試（例如 mftiko E15-D010）。一張票一段決策，從 E06-D001 起依序編。
+
+依賴：E05。
+
 ## 決定（2026-10-25，E01-D001–E01-D007）
 - E01-D001 清空前在最後的舊 commit 打 `legacy-final` tag。
 - E01-D002 刪除 `release.yml`、`cleanup.yml`、`tests.yml`；Strategon 上的部署與 PyPI 舊版不動。
@@ -367,3 +373,13 @@ Yi Te 於 #445 確認。E05-07 1.0.0 發佈。本票沒有改 PROTOCOL。
 - E05-D073 不跟著版本改的：`tests/python/test_pack.py` 的 `0.14.0` 是測試資料（其中一處刻意與 fixture 的 1.0.0 不符）；`examples/python/md_watch` 的 image tag `v0.14.0` 與 digest 是 E05-06 在 testnet 實際推送的紀錄。
 
 PR 合併後，等 Yi Te 確認，在 main 打 `v1.0.0`，由 `release.yml` 以 trusted publishing 發到 PyPI（同 E04-D061、E04-D065）。`uv.lock` 只改 `mftik` 那一筆的版本，不以本機較舊的 uv 重寫整份（那會把 `revision` 從 5 降成 3）。
+
+## 決定（2026-10-27，E06-D001–E06-D003）
+
+Yi Te 於 #455 確認。打包後的 Python 策略讀資料 input（mftiko E15-06，BullionBear/mftiko#451，依 mftiko E15-D010）。本票沒有改 PROTOCOL。前一張 #456（pin 改到 v0.3.0、`session.md` 的 inputs）沒有新決定。
+
+- E06-D001 只跑一個直譯器（image 的 3.12），不跑 3.11–3.13。input 的路徑與直譯器無關；PyO3 那層由 `mftiko-conformance-python` 在三版各跑一次（E05-D002）。
+- E06-D002 寫入被拒由測試行程檢查：worker 結束後，以與 worker 相同的使用者在 input 裡新建檔案、寫入既有檔案，兩者都要 `PermissionDenied`。範例策略不放測試用的程式碼。這需要非 root 的 runner；GitHub 的 `ubuntu-latest` 是 `runner` 使用者。
+- E06-D003 範例叫 `pretrained`，input 叫 `model`，檔案是 `weights.json`。它是第五個範例目錄（含 `conform`），有自己的 `test_e2e.py`、README 與 `session.yaml`，`examples` job 跑它的測試並打包（E05-D004）。
+
+`tests/python/data_input_e2e.py` 由新的 `data-input` job 執行：以釘住的 `mftiko-pack data` 推兩次並要求同一個 digest（E15-D008）；`tests/pack/data/main.go` 以 `PullData`、`UnpackReadOnly` 解到 `sessions/s1/inputs/model`，與 `internal/sts/agent/inputs.go` 相同；檢查 config 沒有 `source`（E15-D003），內容與上傳逐位元組相同、檔案 0444、目錄 0555；再以 `MFTIKO_INPUT_DIR` 經假的 shim 跑 rootfs（`crates/mftik-py/tests/pack.rs` 的 `unpacked_rootfs_reads_a_data_input`）。這支腳本從 `pack_e2e.py` import pin 與 registry 的 helper，不再多一份 `MFTIKO_COMMIT`。`UnpackReadOnly` 依賴 Linux 允許在同一個父目錄內 rename 唯讀目錄，macOS 上最後的 rename 會失敗；STS 只跑 Linux，CI 也是 Linux。
