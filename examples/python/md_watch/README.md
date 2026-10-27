@@ -35,7 +35,7 @@ python -m mftik.pack \
 
 ## Deploying
 
-The image is pushed and the session is run with the `mftiko` CLI (v0.2.0 or
+The image is pushed and the session is run with the `mftiko` CLI (v0.3.0 or
 later). [`session.yaml`](session.yaml) is the session from the first testnet
 run (E05-06): the digest is the one this command printed then.
 
@@ -51,7 +51,9 @@ python -m mftik.pack \
 ```bash
 mftiko session create -f examples/python/md_watch/session.yaml --wait running
 mftiko session show <session_id>
+mftiko session logs <session_id>
 mftiko session end <session_id> --wait
+mftiko session export-logs <session_id>
 mftiko session delete <session_id>
 mftiko record list
 mftiko record show <record_id>
