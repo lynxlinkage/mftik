@@ -346,10 +346,14 @@ Yi Te 於 #443 確認。E05-04 使用文件（`docs/python/`）。與 Go 版語�
 
 Yi Te 於 #444 確認。E05-06 testnet 實機部署。本票沒有改 PROTOCOL。
 
-- E05-D061 pin 改到 testnet 跑的 mftiko v0.2.0（`7c9135766fdd`）。`scripts/sync-proto`（proto 與 `mftiko-conformance`）和 `tests/python/conformance_rootfs.py`、`tests/python/pack_e2e.py` 的 `MFTIKO_COMMIT` 一起改，取代 E01-D004 與 E04-D076 的 commit。
+- E05-D061 pin 改到 testnet 跑的 mftiko v0.2.1（`7a8c64493109`）。`scripts/sync-proto`（proto 與 `mftiko-conformance`）和 `tests/python/conformance_rootfs.py`、`tests/python/pack_e2e.py` 的 `MFTIKO_COMMIT` 一起改，取代 E01-D004 與 E04-D076 的 commit。
 - E05-D062 由 Claude 經 testnet 的 API（`mftiko.lynxlinkage.com`）與 `mftiko` CLI 執行，不重架環境（E05-D007）。worker 的 log 在 STS 主機上，由 Yi Te 讀取。
 - E05-D063 image 推到 `ghcr.io/lynxlinkage/strategies/<name>`。SDK 用 main 的 CI 建的 abi3 wheel（`-wheel`），因為 PyPI 上的 0.14.0 早於 `mftik.pack`。在 `linux/amd64` 容器內打包。
-- E05-D064 結束後的狀態沒有 `last_exit`（BullionBear/mftiko#433），所以先以 log 的 `OnStop` 行記錄 OnStop 已完成。#433 修好後重跑，取得 `on_stop_completed: true` 才勾完成標準。
+- E05-D064 v0.2.0 上結束後的狀態沒有 `last_exit`（BullionBear/mftiko#433），第一次執行先以 log 的 `OnStop` 行記錄 OnStop 已完成。#433 在 v0.2.1 修好後重跑，以 API 的 `last_exit.on_stop_completed: true` 勾完成標準。
 - E05-D065 session 檔放在 `examples/python/md_watch/session.yaml`，推送與 `mftiko` 命令寫在同目錄的 README，`docs/python/pack.md` 的「Deploy a session」照 E05-D042 引用它們。
 
-第一次執行的 session 是 `2407bf`（2026-10-27，`sts-jp-1`、`md-jp-1`，image `sha256:0037ffce4ec7…`）。Init、Start、running 都正常，收到 330 筆 `OnBook`，`session end` 後 OnStop 跑完，record 的 `final` 是 `done`/`ended_by_spec`，紀錄貼在 #444。執行中發現的兩個 mftiko 問題：建 session 只能用 API 設定列出的 repository（BullionBear/mftiko#429，已由 v0.2.0 的 #431 修好，改為 `{repository, ref}` 加前綴允許清單）；`session end` 被當成 spec 變更，多 spawn 一個 incarnation，終態沒有 `last_exit`（#433）。`pack.md` 原本說 macOS 能打包，但 packer 要執行釘住的直譯器來編 bytecode，在非 linux x86_64 的機器上，本機 Python 必須是同一個 patch 版本，文件已改正。
+第一次執行的 session 是 `2407bf`（2026-10-27，`sts-jp-1`、`md-jp-1`，image `sha256:0037ffce4ec7…`）。Init、Start、running 都正常，收到 330 筆 `OnBook`，`session end` 後 OnStop 跑完，record 的 `final` 是 `done`/`ended_by_spec`，紀錄貼在 #444。執行中發現的兩個 mftiko 問題：建 session 只能用 API 設定列出的 repository（BullionBear/mftiko#429，已由 v0.2.0 的 #431 修好，改為 `{repository, ref}` 加前綴允許清單）；`session end` 被當成 spec 變更，多 spawn 一個 incarnation，終態沒有 `last_exit`（#433，v0.2.1 修好）。
+
+第二次執行是 v0.2.1 上的 session `6dfca4`（同一個 image 與 session 檔）。`session end` 之後狀態是 `done`/`ended_by_spec`，`incarnation` 1，`last_exit` 為 `outcome` `done`、`code` 0、`on_stop_completed` true，沒有多 spawn。
+
+`pack.md` 原本說 macOS 能打包，但 packer 要執行釘住的直譯器來編 bytecode，在非 linux x86_64 的機器上，本機 Python 必須是同一個 patch 版本，文件已改正。

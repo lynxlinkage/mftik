@@ -78,8 +78,6 @@ mftiko record list
 mftiko record show <record_id>
 ```
 
-`create` prints the session id and the resolved digest. `--wait running` returns once the session is `running`. `session show` lists the phase, each feed's ack, and where the worker's stdout and stderr are. `session end --wait` sends Stop. The worker runs `on_stop` and exits, and the session ends `done` with reason `ended_by_spec`.
+`create` prints the session id and the resolved digest. `--wait running` returns once the session is `running`. `session show` lists the phase, each feed's ack, and where the worker's stdout and stderr are. `session end --wait` sends Stop. The worker runs `on_stop` and exits, and the session ends `done` with reason `ended_by_spec`. The status's `last_exit` then has `on_stop_completed: true`. Before mftiko v0.2.1 it had no `last_exit` (BullionBear/mftiko#433).
 
 The API does not serve the worker's log. It is a file on the STS host, at the path `session show` prints. `session delete` removes that file, so copy the log before deleting the session. The record's `final` is written when the session is deleted. Until then, `record show` reports the state `created`.
-
-On mftiko v0.2.0, the final status after `session end` has no `last_exit`, so the record does not show `on_stop_completed` (BullionBear/mftiko#433). Until that is fixed, `on_stop`'s own log line is what shows that it finished.
