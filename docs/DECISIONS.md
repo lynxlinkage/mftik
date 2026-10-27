@@ -341,3 +341,15 @@ Yi Te 於 #443 確認。E05-04 使用文件（`docs/python/`）。與 Go 版語�
 - E05-D045 兩支檢查腳本放在現有 `python` job，不另開 job。
 
 使用文件在 `docs/python/`，英文，README 連到該目錄。程式碼區塊只來自 `examples/python`，info string 是 `<language> <path>:<start>-<end>`（行號從 1 起，含尾）。`scripts/check-python-doc-snippets` 把區塊本文與那些行逐行比對；沒有區塊時通過。`scripts/check-python-doc-api` 收集手寫的 `__all__` 與手寫 `.pyi` 的公開定義（dunder 算，單底線只在 `__all__` 裡才算）。產生的 `common/`、`md/`、`td/` stub 排除（E04-D021）；文件寫對應規則與簽章型別，不逐欄手抄產生碼。每個名稱必須以完整單字出現在行內程式碼或區塊本文。兩支腳本在 `python` job、`maturin build` 之前跑。#450（`94f26533`，#442 的範例）合併進 main 之後，本 PR 以 merge main（不 rebase）補上範例片段。區塊標的是 `examples/python/md_watch/md_watch.py`、`examples/python/maker/maker.py`、`examples/python/stateful/stateful.py`，以及 `md_watch` README 的啟動與打包命令。
+
+## 決定（2026-10-27，E05-D061–E05-D065）
+
+Yi Te 於 #444 確認。E05-06 testnet 實機部署。本票沒有改 PROTOCOL。
+
+- E05-D061 pin 改到 testnet 跑的 mftiko v0.2.0（`7c9135766fdd`）。`scripts/sync-proto`（proto 與 `mftiko-conformance`）和 `tests/python/conformance_rootfs.py`、`tests/python/pack_e2e.py` 的 `MFTIKO_COMMIT` 一起改，取代 E01-D004 與 E04-D076 的 commit。
+- E05-D062 由 Claude 經 testnet 的 API（`mftiko.lynxlinkage.com`）與 `mftiko` CLI 執行，不重架環境（E05-D007）。worker 的 log 在 STS 主機上，由 Yi Te 讀取。
+- E05-D063 image 推到 `ghcr.io/lynxlinkage/strategies/<name>`。SDK 用 main 的 CI 建的 abi3 wheel（`-wheel`），因為 PyPI 上的 0.14.0 早於 `mftik.pack`。在 `linux/amd64` 容器內打包。
+- E05-D064 結束後的狀態沒有 `last_exit`（BullionBear/mftiko#433），所以先以 log 的 `OnStop` 行記錄 OnStop 已完成。#433 修好後重跑，取得 `on_stop_completed: true` 才勾完成標準。
+- E05-D065 session 檔放在 `examples/python/md_watch/session.yaml`，推送與 `mftiko` 命令寫在同目錄的 README，`docs/python/pack.md` 的「Deploy a session」照 E05-D042 引用它們。
+
+第一次執行的 session 是 `2407bf`（2026-10-27，`sts-jp-1`、`md-jp-1`，image `sha256:0037ffce4ec7…`）。Init、Start、running 都正常，收到 330 筆 `OnBook`，`session end` 後 OnStop 跑完，record 的 `final` 是 `done`/`ended_by_spec`，紀錄貼在 #444。執行中發現的兩個 mftiko 問題：建 session 只能用 API 設定列出的 repository（BullionBear/mftiko#429，已由 v0.2.0 的 #431 修好，改為 `{repository, ref}` 加前綴允許清單）；`session end` 被當成 spec 變更，多 spawn 一個 incarnation，終態沒有 `last_exit`（#433）。`pack.md` 原本說 macOS 能打包，但 packer 要執行釘住的直譯器來編 bytecode，在非 linux x86_64 的機器上，本機 Python 必須是同一個 patch 版本，文件已改正。
