@@ -2,7 +2,7 @@
 
 Phase 1 is an STS Python SDK, written in Rust and exposed with PyO3, that is compatible with [mftiko](https://github.com/BullionBear/mftiko). Acceptance is `mftiko-conformance` passing every check in mftiko PROTOCOL §9.
 
-The Python package name is `mftik` (`import mftik`). Version 0.14.0 is a Rust rewrite and is incompatible with the previous API. Older releases already on PyPI, including 0.12.x, stay there. The tree before this rewrite is the `legacy-final` tag.
+The Python package name is `mftik` (`import mftik`). Version 0.14.0 was the first Rust rewrite and is incompatible with the earlier API. Version 1.0.0 is the first stable release, after a Python strategy ran on the mftiko testnet (E05-06). Older releases already on PyPI, including 0.12.x, stay there. The tree before this rewrite is the `legacy-final` tag.
 
 Decisions for this repo are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
@@ -58,7 +58,7 @@ The Python job uses Python 3.11 (E04-D014). It syncs the locked uv tools, checks
 
 The wheels job builds the two release wheels on every pull request and installs each into a clean virtual environment for the same smoke test (E04-D063): manylinux_2_28 x86_64 and macOS arm64. Both are abi3 wheels for Python 3.11 (`cp311-abi3`). There is no source distribution. [`scripts/release-check`](scripts/release-check) checks that the workspace version, `pyproject.toml`, the smoke test's expected version, and `mftik.__version__` match.
 
-A `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml). That workflow builds those wheels, smokes them, and uploads them to PyPI with trusted publishing from the GitHub environment `pypi`. The tag is `v` plus the package version, and the tagged commit is on `main`. The project owner registers that workflow filename and environment on the existing PyPI project `mftik` before the tag is pushed. The first tag is `v0.14.0`, after this work is merged and Yi Te confirms.
+A `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml). That workflow builds those wheels, smokes them, and uploads them to PyPI with trusted publishing from the GitHub environment `pypi`. The tag is `v` plus the package version, and the tagged commit is on `main`. The project owner registers that workflow filename and environment on the existing PyPI project `mftik` before the tag is pushed. The first tag was `v0.14.0`. Each tag is pushed after its release PR is merged and Yi Te confirms.
 
 The `mftiko-conformance` job runs the suite on every pull request. [`scripts/install-mftiko-conformance`](scripts/install-mftiko-conformance) is the `go install` of `mftiko-conformance` from the pinned mftiko commit. The job runs it against the Rust standard strategy [`examples/conform`](examples/conform), keeps `report.json` as an artifact, and fails on any failed check. To run it locally (Go 1.26 or newer):
 

@@ -1,6 +1,6 @@
 # Install and run
 
-`mftik` 0.14.0 is the Python SDK. It requires Python 3.11, 3.12, or 3.13. The published artifacts are abi3 wheels for manylinux_2_28 x86_64 and macOS arm64. There is no source distribution. The macOS wheel is for development, type checking, and `python -m mftik.pack`. A session worker runs from the linux image that packer builds, not from a macOS process.
+`mftik` 1.0.0 is the Python SDK. It requires Python 3.11, 3.12, or 3.13. The published artifacts are abi3 wheels for manylinux_2_28 x86_64 and macOS arm64. There is no source distribution. The macOS wheel is for development, type checking, and `python -m mftik.pack`. A session worker runs from the linux image that packer builds, not from a macOS process.
 
 Install the package from PyPI with `pip install mftik`. The import name is `mftik`. `__version__` is the installed distribution's version. This release is a rewrite. Programs written for the 0.12 packages that remain on PyPI do not run on it.
 

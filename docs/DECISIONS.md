@@ -357,3 +357,13 @@ Yi Te 於 #444 確認。E05-06 testnet 實機部署。本票沒有改 PROTOCOL�
 第二次執行是 v0.2.1 上的 session `6dfca4`（同一個 image 與 session 檔）。`session end` 之後狀態是 `done`/`ended_by_spec`，`incarnation` 1，`last_exit` 為 `outcome` `done`、`code` 0、`on_stop_completed` true，沒有多 spawn。
 
 `pack.md` 原本說 macOS 能打包，但 packer 要執行釘住的直譯器來編 bytecode，在非 linux x86_64 的機器上，本機 Python 必須是同一個 patch 版本，文件已改正。
+
+## 決定（2026-10-27，E05-D071–E05-D073）
+
+Yi Te 於 #445 確認。E05-07 1.0.0 發佈。本票沒有改 PROTOCOL。
+
+- E05-D071 版本改成 1.0.0：`Cargo.toml` workspace version、`pyproject.toml`、`tests/python/smoke_import.py`、`python/mftik/_version.py`，以及 `Cargo.lock` 的 workspace 成員與 `uv.lock` 的 `mftik`。`tests/python/pack_e2e.py` 比對安裝的 SDK 版本（`sdk_version`、`MFTIK_RELEASE`），跟著改。
+- E05-D072 classifier 改成 `Development Status :: 4 - Beta`，修改 E04-D064 的 Alpha；`scripts/release-check` 的 `CLASSIFIERS` 跟著改。其餘 metadata（3.11–3.13、`requires-python >=3.11`、abi3-py311）與兩個 wheel 平台不變。
+- E05-D073 不跟著版本改的：`tests/python/test_pack.py` 的 `0.14.0` 是測試資料（其中一處刻意與 fixture 的 1.0.0 不符）；`examples/python/md_watch` 的 image tag `v0.14.0` 與 digest 是 E05-06 在 testnet 實際推送的紀錄。
+
+PR 合併後，等 Yi Te 確認，在 main 打 `v1.0.0`，由 `release.yml` 以 trusted publishing 發到 PyPI（同 E04-D061、E04-D065）。`uv.lock` 只改 `mftik` 那一筆的版本，不以本機較舊的 uv 重寫整份（那會把 `revision` 從 5 降成 3）。
