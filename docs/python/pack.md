@@ -49,7 +49,7 @@ python -m mftik.pack \
   -tag v0.14.0
 ```
 
-2. Write the session file. Its fields are the API's `SessionCreate` in snake_case. `strategy` is the `repository` and a `ref`. The `ref` is the digest the packer printed. A tag also works: the API resolves it once and stores the digest. `params` is the strategy's own JSON. `feeds` names each feed and its MD instance. `sts_instance` and `md_instance` come from `mftiko instance list`. A strategy that trades also lists `accounts`.
+2. Write the session file. Its fields are the API's `SessionCreate` in snake_case. `strategy` is the `repository` and a `ref`. The `ref` is the digest the packer printed. A tag also works: the API resolves it once and stores the digest. `params` is the strategy's own JSON. `feeds` names each feed and its MD instance. `sts_instance` and `md_instance` come from `mftiko instance list`. A strategy that trades also lists `accounts`. [Session spec](session.md) covers every field.
 
 ```yaml examples/python/md_watch/session.yaml:1-13
 name: md-watch-btc

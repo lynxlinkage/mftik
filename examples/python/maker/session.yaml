@@ -1,0 +1,22 @@
+name: maker-abc
+labels:
+  owner: research
+sts_instance: sts-1
+strategy:
+  repository: registry.example/acme/maker
+  ref: v0.14.0
+params:
+  ticker: Ex_Spot_ABC
+  api_id: 7
+  algo_id: 1
+  qty: 1
+  price: 10
+accounts:
+  - name: main
+    api_id: 7
+    algo_ids: [1]
+restart:
+  mode: on_failure
+  max_restarts: 3
+  window_s: 600
+grace_ms: 15000
