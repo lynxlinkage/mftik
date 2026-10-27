@@ -1,0 +1,13 @@
+name: md-watch-btc
+sts_instance: sts-jp-1
+strategy:
+  repository: ghcr.io/lynxlinkage/strategies/md_watch
+  ref: sha256:0037ffce4ec733f5036bf290030f8b391af83f29ae240704b956993929e38d4a
+params:
+  ticker: BinanceUM_Perp_BTCUSDT
+  every_s: 10
+feeds:
+  - feed: orderbook_delta.BinanceUM_Perp_BTCUSDT
+    md_instance: md-jp-1
+restart:
+  mode: never
