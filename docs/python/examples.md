@@ -1,6 +1,6 @@
 # Examples
 
-Three strategies live under `examples/python`: `md_watch`, `maker`, and `stateful`. Each directory has an English README and `test_e2e.py`. A session starts the class with `python -m mftik.run module:Class`. The class is constructed with no arguments. Settings come from `params`, which is the session's `InitPayload.params` JSON. The platform does not interpret that JSON. None of these files names a venue or a product.
+Four strategies live under `examples/python`: `md_watch`, `maker`, `stateful`, and `pretrained`. Each directory has an English README and `test_e2e.py`. A session starts the class with `python -m mftik.run module:Class`. The class is constructed with no arguments. Settings come from `params`, which is the session's `InitPayload.params` JSON. `pretrained` reads an input instead. The platform does not interpret that JSON. None of these files names a venue or a product.
 
 Every listing below is a range of one of those files. The info string is the path and the inclusive line numbers. `scripts/check-python-doc-snippets` compares the listing to those lines.
 
@@ -9,6 +9,7 @@ Every listing below is a range of one of those files. The info string is the pat
 | `md_watch` | `python -m mftik.run md_watch:MdWatch` | Trades, the local book, and an `after` heartbeat. It does not send orders |
 | `maker` | `python -m mftik.run maker:Maker` | `submit`, `cancel`, `batch_cancel`, `open_orders`, and `position` |
 | `stateful` | `python -m mftik.run stateful:Stateful` | A fill count restored with `read` and replaced with `write` |
+| `pretrained` | `python -m mftik.run pretrained:Pretrained` | A model read in `on_init` from a read-only input |
 
 ## md_watch
 
@@ -232,3 +233,9 @@ The first `on_recon` for the account reads `position` and `open_orders`. Open or
 ```
 
 `stateful` is started with `python -m mftik.run stateful:Stateful`. Its pack command uses `-dir examples/python/stateful` and `-target stateful:Stateful`.
+
+## pretrained
+
+`on_init` reads `weights.json` from `ctx.input_dir("model")` and keeps it in memory. The input is a data artifact uploaded with `mftiko-pack data`. [Volume and inputs](volume.md#pretrained-models) quotes the hook, the upload command, and the session file's `inputs`.
+
+`pretrained` is started with `python -m mftik.run pretrained:Pretrained`. Its pack command uses `-dir examples/python/pretrained` and `-target pretrained:Pretrained`. Besides its own `test_e2e.py`, `tests/python/data_input_e2e.py` packs it and runs it from the rootfs against a real data artifact.

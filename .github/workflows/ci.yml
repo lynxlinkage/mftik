@@ -274,6 +274,43 @@ jobs:
       - name: Pack, check, and run
         run: uv run --frozen --no-sync python tests/python/pack_e2e.py
 
+  # #455 (mftiko E15-06, E15-D010): a data artifact pushed with the pinned
+  # mftiko-pack data, unpacked read-only the way the STS agent stages an input,
+  # and read by examples/python/pretrained from the packed rootfs. One
+  # interpreter: the input path does not depend on it, and the PyO3 layer is
+  # covered on 3.11-3.13 by mftiko-conformance-python (E05-D002).
+  data-input:
+    name: data-input
+    needs: python-conform-wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install nats-server
+        run: |
+          GOBIN="$RUNNER_TEMP/nats-bin" go install github.com/nats-io/nats-server/v2@v2.15.0
+          echo "MFTIK_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
+      - name: Install CPython headers
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-dev
+          uv python install 3.11
+      - uses: actions/download-artifact@v4
+        with:
+          name: mftik-abi3-wheel
+          path: dist
+      - name: Push the input, pack, unpack, and run
+        run: |
+          set -euo pipefail
+          wheel=(dist/*.whl)
+          MFTIK_PACK_WHEEL="${wheel[0]}" python3 tests/python/data_input_e2e.py
+
   # E05-D021–E05-D025: pack examples/python/conform once per interpreter, unpack
   # with the pinned mftiko artifact client, and run mftiko-conformance in that
   # rootfs. The pack job is unchanged. The wheel is python-conform-wheel's
@@ -358,7 +395,7 @@ jobs:
           set -euo pipefail
           test -n "$MFTIK_NATS_SERVER"
           test -x "$MFTIK_PYTHON"
-          for name in md_watch maker stateful; do
+          for name in md_watch maker stateful pretrained; do
             "$MFTIK_PYTHON" "examples/python/$name/test_e2e.py"
           done
       - name: Pack each example without pushing
@@ -366,7 +403,7 @@ jobs:
           set -euo pipefail
           wheel=(dist/*.whl)
           py=/tmp/mftik-examples/bin/python
-          for spec in md_watch:MdWatch maker:Maker stateful:Stateful; do
+          for spec in md_watch:MdWatch maker:Maker stateful:Stateful pretrained:Pretrained; do
             name="${spec%%:*}"
             "$py" -m mftik.pack \
               -dir "examples/python/$name" \

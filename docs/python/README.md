@@ -13,7 +13,7 @@
 | [Pack and deploy](pack.md) | `python -m mftik.pack`, `StrategyRef.code`, and running a session with `mftiko` |
 | [Session spec](session.md) | Every field of the session file and what it means to a Python strategy |
 | [Volume and inputs](volume.md) | Durable files and read-only inputs |
-| [Examples](examples.md) | `md_watch`, `maker`, and `stateful`, quoted from `examples/python` |
+| [Examples](examples.md) | `md_watch`, `maker`, `stateful`, and `pretrained`, quoted from `examples/python` |
 | [API reference](reference.md) | Every public name |
 
 A hook runs on one thread, one at a time. It must return. The only object that may cross threads is a `Poster`. `Context` and `BookView` work only inside the hook that received them.

@@ -22,6 +22,48 @@ The replace is atomic. A temporary file is created in the destination directory,
 
 `write` and `read` release the GIL during the filesystem calls. They still occupy the hook until they return. Keep the files small. The account and market-data hooks after start should not do large copies. `on_init`, `on_stop`, and a timer are the usual places to persist state.
 
+## Pretrained models
+
+A model, a parameter table, or any other file the strategy only reads goes in an input. It is uploaded once, before any session uses it, as a data artifact. mftiko's `mftiko-pack data` uploads a directory and prints the manifest digest on stdout. A summary goes to stderr.
+
+```bash examples/python/pretrained/README.md:11-11
+mftiko-pack data -dir ./model -repo registry.example/acme/models/abc -tag v1
+```
+
+`-repo` is the full path, registry host included. The registry credentials come from Docker's config file, as for `mftik.pack`. `-tag` is optional and is only a name a person can look up. The session refers to the digest. The same tree uploads to the same digest, and blobs the registry already has are not sent again. The upload checks the limits before it sends anything: 1 GiB compressed, 4 GiB unpacked, and 100,000 entries. Weights hardly compress, so 1 GiB is the limit that matters. The directory may hold regular files, directories, and relative symlinks that stay inside it. Any other entry is an error that names its path. `-L` copies what each symlink points to instead. A Hugging Face cache, whose `snapshots` link into `../../blobs`, needs it. The tool ships with the `mftiko` CLI. `mftiko-pack data -h` lists its flags.
+
+The session file names the digest under `inputs`. The input's repository has to be on the API's allowed list, and its size under the API's limit. See [Session spec](session.md#inputs).
+
+```yaml examples/python/pretrained/session.yaml:6-9
+inputs:
+  - name: model
+    repository: registry.example/acme/models/abc
+    digest: sha256:4d1f0c2b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817060f5e
+```
+
+The platform unpacks the input before the process starts. Every session unpacks its own copy. Files are mode 0444 and directories 0555, so a write there fails with `PermissionError`. Read the model in `on_init`, which has the session's `start_timeout_s` to finish. An exception there ends the session `INIT_FAILED`.
+
+```python examples/python/pretrained/pretrained.py:42-57
+    def on_init(self, ctx: mftik.Context) -> None:
+        directory = ctx.input_dir(_INPUT)
+        if not directory:
+            raise RuntimeError("pretrained: the session has no model input")
+        raw = (Path(directory) / _FILE).read_bytes()
+        weights = json.loads(raw)
+        if not isinstance(weights, dict):
+            raise ValueError(f"pretrained: {_FILE} must be a JSON object")
+        self._weights = weights
+        _log(
+            {
+                "hook": "OnInit",
+                "keys": sorted(weights),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+```
+
+A model that the strategy updates while it runs is state, not an input. Keep that in the volume, and start the next session from its `state_out`.
+
 ## The platform's limit
 
 The SDK does not enforce a quota. The platform measures the volume directory and, when it exceeds `Limits.volume_mb` (a zero in the spec means the platform default, 1024 MiB), stops the session with outcome `FAILED` and reason `volume_over_limit`. The session is not restarted for that reason. Write only what the next incarnation needs.

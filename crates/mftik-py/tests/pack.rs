@@ -2,11 +2,14 @@
 //!
 //! `cargo test --workspace` compiles this and does not run it (`#[ignore]`).
 //! The pack CI job sets `MFTIK_PACK_LAUNCH` to a file describing the rootfs
-//! `internal/platform/artifact` unpacked, and `MFTIK_NATS_SERVER`.
+//! `internal/platform/artifact` unpacked, and `MFTIK_NATS_SERVER`. The
+//! data-input job's launch file also names the read-only input directory and
+//! the sha256 the strategy must read from it.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -37,6 +40,10 @@ struct Launch {
     args: Vec<String>,
     env: Vec<(String, String)>,
     release: String,
+    /// `MFTIKO_INPUT_DIR`, laid out as the STS agent stages it.
+    input_dir: Option<PathBuf>,
+    /// sha256 of the input file the strategy reads.
+    sha256: Option<String>,
 }
 
 fn load_launch() -> Launch {
@@ -47,6 +54,8 @@ fn load_launch() -> Launch {
     let mut release = None;
     let mut args = Vec::new();
     let mut env = Vec::new();
+    let mut input_dir = None;
+    let mut sha256 = None;
     for line in text.lines() {
         if line.is_empty() {
             continue;
@@ -57,6 +66,8 @@ fn load_launch() -> Launch {
             "rootfs" => rootfs = Some(PathBuf::from(parts.next().expect("rootfs"))),
             "program" => program = Some(PathBuf::from(parts.next().expect("program"))),
             "release" => release = Some(parts.next().expect("release").to_owned()),
+            "input_dir" => input_dir = Some(PathBuf::from(parts.next().expect("input_dir"))),
+            "sha256" => sha256 = Some(parts.next().expect("sha256").to_owned()),
             "arg" => args.push(parts.next().expect("arg").to_owned()),
             "env" => env.push((
                 parts.next().expect("env key").to_owned(),
@@ -71,6 +82,8 @@ fn load_launch() -> Launch {
         args,
         env,
         release: release.expect("release"),
+        input_dir,
+        sha256,
     }
 }
 
@@ -127,11 +140,9 @@ fn fingerprint(root: &Path) -> u64 {
     hasher.finish()
 }
 
-#[test]
-#[ignore = "pack CI job: MFTIK_PACK_LAUNCH describes the unpacked rootfs"]
-fn unpacked_rootfs_runs_without_host_python() {
-    let launch = load_launch();
-    let before = fingerprint(&launch.rootfs);
+/// Spawns the rootfs entrypoint with no host Python on `PATH`, runs Init,
+/// Start, and Stop, and returns the worker's stdout.
+fn run_rootfs(launch: &Launch, extra_env: &[(&str, &Path)]) -> String {
     let nats = start_nats();
     let path_dir = std::env::temp_dir().join(format!("mftik-pack-path-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path_dir);
@@ -145,6 +156,9 @@ fn unpacked_rootfs_runs_without_host_python() {
     }
     worker = worker.env("PATH", &path_dir);
     for (key, value) in &launch.env {
+        worker = worker.env(key, value);
+    }
+    for (key, value) in extra_env {
         worker = worker.env(key, value);
     }
 
@@ -166,16 +180,64 @@ fn unpacked_rootfs_runs_without_host_python() {
     expect_ending(&mut shim, Outcome::Done, "operator", Some(true));
     let ended = shim.end();
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
-    assert!(ended.stdout.contains("PACK-init"), "{}", ended.stdout);
-    assert!(ended.stdout.contains("PACK-start"), "{}", ended.stdout);
-    assert!(ended.stdout.contains("PACK-stop"), "{}", ended.stdout);
-    assert!(ended.stdout.contains("WHICH None"), "{}", ended.stdout);
+    let _ = fs::remove_dir_all(&path_dir);
+    ended.stdout
+}
+
+#[test]
+#[ignore = "pack CI job: MFTIK_PACK_LAUNCH describes the unpacked rootfs"]
+fn unpacked_rootfs_runs_without_host_python() {
+    let launch = load_launch();
+    let before = fingerprint(&launch.rootfs);
+    let stdout = run_rootfs(&launch, &[]);
+    assert!(stdout.contains("PACK-init"), "{stdout}");
+    assert!(stdout.contains("PACK-start"), "{stdout}");
+    assert!(stdout.contains("PACK-stop"), "{stdout}");
+    assert!(stdout.contains("WHICH None"), "{stdout}");
     let root = launch.rootfs.to_string_lossy().into_owned();
-    let exe = field(&ended.stdout, "EXE");
-    let prefix = field(&ended.stdout, "PREFIX");
+    let exe = field(&stdout, "EXE");
+    let prefix = field(&stdout, "PREFIX");
     assert!(exe.starts_with(&root), "{exe}");
     assert!(prefix.starts_with(&root), "{prefix}");
     let after = fingerprint(&launch.rootfs);
     assert_eq!(before, after, "rootfs changed while the worker ran");
-    let _ = fs::remove_dir_all(&path_dir);
+}
+
+/// The STS agent unpacks an input read-only (mftiko E09-D075). Running as the
+/// worker's user, a new file and a write to an existing one are both refused.
+fn assert_read_only(dir: &Path, existing: &Path) {
+    let created = dir.join("written-by-test");
+    let err = fs::write(&created, b"x").expect_err("create in a read-only input");
+    assert_eq!(err.kind(), ErrorKind::PermissionDenied, "{err}");
+    let err = fs::OpenOptions::new()
+        .write(true)
+        .open(existing)
+        .expect_err("write to a read-only input file");
+    assert_eq!(err.kind(), ErrorKind::PermissionDenied, "{err}");
+}
+
+#[test]
+#[ignore = "data-input CI job: MFTIK_PACK_LAUNCH also names the input"]
+fn unpacked_rootfs_reads_a_data_input() {
+    let launch = load_launch();
+    let inputs = launch
+        .input_dir
+        .clone()
+        .expect("input_dir in the launch file");
+    let sha256 = launch.sha256.clone().expect("sha256 in the launch file");
+    let model = inputs.join("model");
+    let rootfs_before = fingerprint(&launch.rootfs);
+    let input_before = fingerprint(&model);
+
+    let stdout = run_rootfs(&launch, &[("MFTIKO_INPUT_DIR", &inputs)]);
+    let init = stdout
+        .lines()
+        .find(|line| line.contains(r#""hook":"OnInit""#))
+        .unwrap_or_else(|| panic!("no OnInit line in {stdout}"));
+    assert!(init.contains(&format!(r#""sha256":"{sha256}""#)), "{init}");
+    assert!(stdout.contains(r#""hook":"OnStop""#), "{stdout}");
+
+    assert_read_only(&model, &model.join("weights.json"));
+    assert_eq!(input_before, fingerprint(&model), "input changed");
+    assert_eq!(rootfs_before, fingerprint(&launch.rootfs), "rootfs changed");
 }

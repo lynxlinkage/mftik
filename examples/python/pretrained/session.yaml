@@ -1,0 +1,9 @@
+name: pretrained-abc
+sts_instance: sts-1
+strategy:
+  repository: registry.example/acme/strategies/pretrained
+  ref: v1.0.0
+inputs:
+  - name: model
+    repository: registry.example/acme/models/abc
+    digest: sha256:4d1f0c2b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a392817060f5e
