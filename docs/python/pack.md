@@ -36,7 +36,7 @@ The platform checks the manifest before it starts the process. A contract the pl
 
 ## Deploy a session
 
-A session is created through the mftiko API, usually with the `mftiko` CLI (v0.2.0 or later). The CLI talks only to the API. It needs a context and a token; see mftiko's `docs/cli.md`. The steps below are the first testnet run of `md_watch` (E05-06).
+A session is created through the mftiko API, usually with the `mftiko` CLI (v0.3.0 or later). The CLI talks only to the API. It needs a context and a token; see mftiko's `docs/cli.md`. The steps below are the first testnet run of `md_watch` (E05-06).
 
 1. Pack and push. The repository is the full image path. Its prefix has to be on the API's allowed list of registry prefixes, or `session create` fails with `/strategy/repository is not allowed`. The STS agent pulls with the platform's registry credentials, so the image has to be readable with them.
 
@@ -69,10 +69,12 @@ restart:
 
 3. Create the session, end it, then read its record.
 
-```bash examples/python/md_watch/README.md:52-57
+```bash examples/python/md_watch/README.md:52-59
 mftiko session create -f examples/python/md_watch/session.yaml --wait running
 mftiko session show <session_id>
+mftiko session logs <session_id>
 mftiko session end <session_id> --wait
+mftiko session export-logs <session_id>
 mftiko session delete <session_id>
 mftiko record list
 mftiko record show <record_id>
@@ -80,4 +82,4 @@ mftiko record show <record_id>
 
 `create` prints the session id and the resolved digest. `--wait running` returns once the session is `running`. `session show` lists the phase, each feed's ack, and where the worker's stdout and stderr are. `session end --wait` sends Stop. The worker runs `on_stop` and exits, and the session ends `done` with reason `ended_by_spec`. The status's `last_exit` then has `on_stop_completed: true`. Before mftiko v0.2.1 it had no `last_exit` (BullionBear/mftiko#433).
 
-The API does not serve the worker's log. It is a file on the STS host, at the path `session show` prints. `session delete` removes that file, so copy the log before deleting the session. The record's `final` is written when the session is deleted. Until then, `record show` reports the state `created`.
+`session logs` prints the worker's stdout and stderr. `-f` follows them, `--tail N` starts from the last N lines, and `--stream` picks one. `session export-logs` downloads both as a tar.gz. The log lives on the STS host, and `session delete` removes it, so export it first if you need to keep it. The record's `final` is written when the session is deleted. Until then, `record show` reports the state `created`.

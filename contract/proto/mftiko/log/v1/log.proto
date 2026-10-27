@@ -1,0 +1,18 @@
+// Source of truth: docs/PROTOCOL.md. Keep the two in sync.
+syntax = "proto3";
+
+package mftiko.log.v1;
+
+option go_package = "github.com/BullionBear/mftiko/contract/gen/mftiko/log/v1;logv1";
+
+// 契約 L 的一則（草案，E14-D003，PROTOCOL §11）。
+// 每一則前面是 protobuf unsigned varint，值是這則序列化之後的位元組數。
+// 心跳是一則空的 Frame：所有欄位都是預設，長度是 0。
+message Frame {
+  bytes data = 1;   // 這一段 log 的位元組，最多 262144。空的表示這則沒有內容。
+  string next = 2;  // 這則之後的不透明 cursor。心跳不帶。不含分號（U+003B）與空白。
+  bool gap = 3;     // cursor 接不上。不帶遺失的位元組數。
+  bool eof = 4;     // 沒有 follow，可讀的內容已經送完。
+  bool final = 5;   // follow 中，session 在這台 agent 已是 terminal，而且檔案讀到結尾。
+  bool removed = 6; // follow 中，spec 已經不在。
+}

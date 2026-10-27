@@ -1,6 +1,6 @@
 # Session spec
 
-A session is created from a `SessionCreate` request. The `mftiko` CLI reads it from a YAML or JSON file whose fields are `SessionCreate` in snake_case (`mftiko session create -f FILE`). The API checks the request and stores it as the `SessionSpec` the platform runs. This page says what each field means to a Python strategy. The authority is mftiko's `contract/openapi/api/v1.yaml` (`SessionCreate`) and PROTOCOL §3. The defaults below are mftiko v0.2.1's. A default marked "STS default" comes from the STS deployment and can differ per instance.
+A session is created from a `SessionCreate` request. The `mftiko` CLI reads it from a YAML or JSON file whose fields are `SessionCreate` in snake_case (`mftiko session create -f FILE`). The API checks the request and stores it as the `SessionSpec` the platform runs. This page says what each field means to a Python strategy. The authority is mftiko's `contract/openapi/api/v1.yaml` (`SessionCreate`) and PROTOCOL §3. The defaults below are mftiko v0.3.0's. A default marked "STS default" comes from the STS deployment and can differ per instance.
 
 `name`, `sts_instance`, and `strategy` are required. Every other field may be left out. A number left out, or written as 0, takes its default.
 
@@ -128,9 +128,9 @@ A restart is a new process, a new incarnation of the same session. Nothing in me
 
 `inputs` is read-only data the platform unpacks before the process starts. Each entry is `name`, `repository`, and `digest`.
 
-`name` matches `^[a-z0-9][a-z0-9_-]{0,63}$` and is unique in the spec. The strategy finds the files at `ctx.input_dir(name)`. `repository` is the full path of a data artifact. It is not checked against the allowed list. `digest` pins it.
+`name` matches `^[a-z0-9][a-z0-9_-]{0,63}$` and is unique in the spec. The strategy finds the files at `ctx.input_dir(name)`. `repository` is the full path of a data artifact. Like `strategy.repository`, its prefix must be on the API's allowed list, or the request fails with `/inputs/<i>/repository is not allowed`. `digest` pins it, and is required: an input does not take a tag. The API reads the input's manifest when the session is created. An input whose declared size is above the API's `max_input_bytes` (1 GiB unless the deployment changes it) fails with `/inputs/<i>/digest is too large`.
 
-A finished session's volume is packed into a data artifact, and its digest is the session status's `state_out`. Give that digest to the next session as an input to carry the state over. The `stateful` example reads its `state` input this way, when its volume is empty. See [Volume and inputs](volume.md).
+A finished session's volume is packed into a data artifact, and its digest is the session status's `state_out`. Give that digest to the next session as an input to carry the state over. Its repository is the one the STS pushes `state_out` to, so that repository must be on the allowed list too. The `stateful` example reads its `state` input this way, when its volume is empty. See [Volume and inputs](volume.md).
 
 ## Not in the file
 

@@ -144,6 +144,7 @@ message AgentRecord {
   int64 started_at_ns = 5;
   string host = 6;     // os.Hostname()，當選時寫入（E10-D092）。取不到則空字串。
   string work_dir = 7; // 該行程的 WORK_DIR（E10-D092）。controller 沒有 WORK_DIR，留空。
+  string log_addr = 8; // STS 當選時寫入（E14-D002）。值是 -log-advertise，預設 <hostname>:7442。MD、TD、controller 留空。
 }
 
 // 不綁 lease（§3.2 W7）。階段或 conditions 改變時寫；worker 確定不在之後由 agent 刪除。
