@@ -21,7 +21,7 @@ The Python API is snake_case and matches the Go SDK's hook and context names. Th
 
 ## Proto
 
-`contract/proto/mftiko` is a copy of BullionBear/mftiko `contract/proto/mftiko` at `7c9135766fdd5706cb54420613f318b3b516c498`. [`scripts/sync-proto`](scripts/sync-proto) reproduces that copy and writes the source commit to `contract/proto/SOURCE`.
+`contract/proto/mftiko` is a copy of BullionBear/mftiko `contract/proto/mftiko` at `7a8c644931095539a88c2db6cc6a0791c7bc70d8`. [`scripts/sync-proto`](scripts/sync-proto) reproduces that copy and writes the source commit to `contract/proto/SOURCE`.
 
 ```bash
 scripts/sync-proto          # copy again and rewrite SOURCE
