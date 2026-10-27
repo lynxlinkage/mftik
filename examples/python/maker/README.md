@@ -30,3 +30,7 @@ python -m mftik.pack \
   -repo 127.0.0.1:9/mftik/maker \
   -no-push
 ```
+
+[`session.yaml`](session.yaml) is a session file for this strategy. Its
+registry and account are placeholders. `accounts` declares the `api_id` and
+`algo_id` that `params` names. See [Session spec](../../../docs/python/session.md).

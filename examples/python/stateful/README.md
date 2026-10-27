@@ -34,3 +34,7 @@ python -m mftik.pack \
   -repo 127.0.0.1:9/mftik/stateful \
   -no-push
 ```
+
+[`session.yaml`](session.yaml) is a session file for this strategy. Its
+registry, account, and input digest are placeholders. The `state` input is
+an earlier session's `state_out`. See [Session spec](../../../docs/python/session.md).

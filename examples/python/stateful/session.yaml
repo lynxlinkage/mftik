@@ -1,0 +1,20 @@
+name: stateful-abc
+sts_instance: sts-1
+strategy:
+  repository: registry.example/acme/stateful
+  ref: v0.14.0
+params:
+  ticker: Ex_Spot_ABC
+  api_id: 7
+  every_s: 30
+accounts:
+  - name: main
+    api_id: 7
+    algo_ids: [2]
+inputs:
+  - name: state
+    repository: registry.example/acme/stateful-state
+    digest: sha256:9f2c4e7a1b3d5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8
+limits:
+  volume_mb: 64
+  hook_timeout_s: 5

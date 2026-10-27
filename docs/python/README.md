@@ -11,6 +11,7 @@
 | [Threads](threads.md) | The GIL, `Poster`, and how long a `Context` or `BookView` stays valid |
 | [Runtime notes](runtime.md) | `multiprocessing`, SIGTERM, and `Limits.memory_mb` |
 | [Pack and deploy](pack.md) | `python -m mftik.pack`, `StrategyRef.code`, and running a session with `mftiko` |
+| [Session spec](session.md) | Every field of the session file and what it means to a Python strategy |
 | [Volume and inputs](volume.md) | Durable files and read-only inputs |
 | [Examples](examples.md) | `md_watch`, `maker`, and `stateful`, quoted from `examples/python` |
 | [API reference](reference.md) | Every public name |
