@@ -11,11 +11,13 @@ repository.workspace = true
 async-nats = { version = "0.50.0", default-features = false, features = ["nkeys", "ring"] }
 bytes = "1.12.1"
 futures-util = { version = "0.3.34", default-features = false }
+itoa = "1.0.18"
 libc = "0.2.191"
 mftik-core = { path = "../mftik-core" }
 mftik-proto = { path = "../mftik-proto" }
 nkeys = "0.4.5"
 prost = "0.14.4"
+ryu = "1.0.23"
 signal-hook = "0.4.5"
 tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
 
