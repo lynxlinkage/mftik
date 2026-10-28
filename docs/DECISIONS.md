@@ -397,3 +397,16 @@ Yi Te 於 #459 確認。自寫 log 庫與 Python logging API，格式對齊 Bull
 - E06-D010 範圍。`note()` 的 `mftik sdk:` 輸出與 Python 範例裡的 `_log()` 都改用新模組。conformance 的 `{"hook":"gate"}` 照舊留在 stdout。加 benchmark，只報數字，不和 Go 比。
 
 `sdk_version` 是套件版本、`+`、完整 git sha，由 vergen-gitcl 在 `mftik-rt` 的 `build.rs` 寫入（vergen 9 起 git 後端拆成這個 crate）。manylinux 容器裡 git 若不把 checkout 當成 worktree，同一個 sha 仍寫入：先 `git -c safe.directory=* rev-parse HEAD`，否則用 `GITHUB_SHA`。vergen 在失敗路徑讀 `VERGEN_GIT_SHA`，不改成 idempotent 的佔位字串。`mftik.run` 的 `version` 與 `commit` 是 keyword-only，預設空字串，不取代 `Hello.release`（`release` 仍走 `resolve_release`）。`note()` 的 message 不再加 `mftik sdk:` 前綴，與 Go `plane.note` 相同。範例裡本來以 list 寫出的欄位（maker 的 open client order id、pretrained 的 weights keys）改成逗號串起來的 str，因為 E06-D006 不接受 list。
+
+## 決定（2026-10-28，E06-D011–E06-D016）
+
+Yi Te 於 #461 確認。Rust 一行 JSON log 的成本對照 Go zerolog（#459 的後續）。本票沒有改 PROTOCOL。
+
+- E06-D011 JSON path reuses one thread-local buffer per thread; rendering a JSON line performs zero heap allocations; the line is written directly to stderr.
+- E06-D012 Integers are formatted with the `itoa` crate, floats with the `ryu` crate; float output is adjusted to match Go zerolog's output exactly, with tests covering the cases (including large/small magnitudes, NaN/Inf handling as zerolog does).
+- E06-D013 Timestamp: cache the formatted date-time prefix for the current second; per line only the nanosecond part is written by hand.
+- E06-D014 Acceptance: on the same machine, a JSON line is no slower than Go zerolog with the same fields. A test using a counting allocator asserts zero allocations per JSON line. CI enforces no timing threshold.
+- E06-D015 Exception to E06-D010's no-comparison rule for this ticket: the PR reports Rust and Go zerolog numbers side by side (same fields, same machine), plus the end-to-end cost of `ctx.log.info(...)` called from Python.
+- E06-D016 Scope: only the JSON output is optimized; the console format stays as it is. Log format, key order and E06-D004–D010 semantics are unchanged.
+
+每條執行緒的 JSON 緩衝一開始是 1 KiB；某一行讓它超過 64 KiB 時，那一行寫完就釋放，下一行重新配置（zerolog 的 event pool 也不收超過 64 KiB 的）。緩衝正在用（sink 裡又寫 log）或執行緒已經釋放它時，那一行用一個新的緩衝。`emit` 照舊只在 render 時拿 identity 的讀鎖，寫之前放開，寫法仍是 `io::stderr().lock().write_all`，一行一次 `write`（E06-D007）。`note()` 的 session id 改存 `Arc<str>`，SDK 自己的行也不配置。ryu 與 Go 的文字差在三處，各自改寫：整數多一個 `.0`、正指數沒有 `+`、ryu 在 `[1e-5, 1e16)` 之外改用指數而 Go 的 `'f'` 是 `[1e-6, 1e21)`；ryu 的指數本來沒有前導零，就是 zerolog 的 `e-X`。#460 的 JSON 用 Rust 的 `{}`：兩個最短寫法一樣近時（例如 `1245315403051669.25`）它取離零遠的一個，Go `strconv` 取偶數，所以那種值的最後一位與 Go 不同；現在 JSON 與 Go 相同。console 照 E06-D016 不動，那種值的最後一位因此與 JSON 不同。`log.rs` 的浮點、字串表由 Go zerolog v1.35.1（mftiko 釘住的版本）產生，時間表由 Go `time.Format(time.RFC3339Nano)` 產生。`tests/log_alloc.rs` 的 global allocator 依執行緒計數：每條執行緒先寫一行建立緩衝，之後 `Logger::write` 1000 行（跨過幾個秒）與經 pipe 寫到 fd 2 的 `emit` 1000 行都是 0 次配置。另在本機以 Go zerolog 對照約 595 萬個值（splitmix64 的位元型樣、1e-6、1e-5、1e16、1e21 前後各兩萬個 ulp、短小數、整數、2 的冪），JSON 全部相同；這份對照不進 CI。benchmark 多一個 `json_line_clock`，每行讀牆鐘，與 zerolog 的 `Timestamp` 相同；兩邊的數字只寫在 PR（E06-D015）。
