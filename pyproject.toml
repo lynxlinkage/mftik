@@ -1,6 +1,6 @@
 [project]
 name = "mftik"
-version = "1.0.0"
+version = "1.1.0"
 description = "STS Python SDK compatible with mftiko (PROTOCOL §9)."
 readme = "README.md"
 requires-python = ">=3.11"
