@@ -302,7 +302,7 @@ def assert_report(report: dict[str, object], digest: str) -> None:
         "os": "linux",
         "arch": "amd64",
         "sdk_lang": "python",
-        "sdk_version": "1.0.0",
+        "sdk_version": "1.1.0",
         "digest": digest,
     }
     for key, value in expect.items():
@@ -317,7 +317,7 @@ def assert_report(report: dict[str, object], digest: str) -> None:
     if not isinstance(env, dict):
         raise SystemExit(f"env {env!r}")
     if env != {
-        "MFTIK_RELEASE": "1.0.0",
+        "MFTIK_RELEASE": "1.1.0",
         "PACK_MARK": "pack-mark",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": "app:site-packages",
