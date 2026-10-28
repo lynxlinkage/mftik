@@ -19,7 +19,15 @@ prost = "0.14.4"
 signal-hook = "0.4.5"
 tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
 
+[build-dependencies]
+vergen-gitcl = "10.0.3"
+
 [dev-dependencies]
+criterion = { version = "0.5", default-features = false }
 mftik-testkit = { path = "../mftik-testkit" }
 tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros", "test-util"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "log"
+harness = false

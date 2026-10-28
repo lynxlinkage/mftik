@@ -13,6 +13,8 @@
 //!   callback that runs just before that `_exit` (E04-D002).
 //! - [`clock`]: the injected `now_ns` (E03-D004). [`timers`]: one timer
 //!   table on the IO thread. [`io`]: the tokio `current_thread` runtime.
+//! - [`log`]: one stderr line per event, in the zerolog JSON shape plus
+//!   `sdk_version`, or the console layout (E06-D004–E06-D010).
 //! - [`nats`]: the connection with the session's credentials, retried inside
 //!   `deadline_ms` (E03-D006, E08-D050). [`call`]: a plane call's context.
 //! - [`sym`]: the SYM path, `symclient` over NATS (E03-08).
@@ -35,6 +37,7 @@ mod dcell;
 pub mod exit;
 pub mod frame;
 pub mod io;
+pub mod log;
 mod md;
 pub mod nats;
 mod plane;

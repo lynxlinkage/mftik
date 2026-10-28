@@ -11,14 +11,13 @@ The first ``on_recon`` reads ``position`` and ``open_orders``. If that algo
 already has orders (an earlier incarnation's, or the exchange's), it
 ``batch_cancel``s them, then ``submit``s one limit buy. ``on_order`` calls
 ``cancel`` when that order is accepted. ``on_fill`` logs the fill. Each of
-those is one JSON line on stdout.
+those is one JSON line on stderr.
 """
 
 from __future__ import annotations
 
 import json
 import math
-import sys
 from typing import Any
 
 import mftik
@@ -82,10 +81,10 @@ def _parse(raw: bytes) -> _Params:
     )
 
 
-def _log(fields: dict[str, Any]) -> None:
+def _log(ctx: mftik.Context, fields: dict[str, Any]) -> None:
     payload = {key: value for key, value in fields.items() if value is not None}
-    sys.stdout.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=True) + "\n")
-    sys.stdout.flush()
+    hook = payload.get("hook", "")
+    ctx.log.info(hook if isinstance(hook, str) else "", **payload)
 
 
 class Maker(Strategy):
@@ -111,13 +110,13 @@ class Maker(Strategy):
         self._uid = info.uid
         self._qty = params.qty
         self._price = params.price
-        _log({"hook": "OnInit", "ticker": params.ticker, "uid": info.uid})
+        _log(ctx, {"hook": "OnInit", "ticker": params.ticker, "uid": info.uid})
 
     def on_start(self, _ctx: mftik.Context) -> None:
-        _log({"hook": "OnStart", "uid": self._uid})
+        _log(_ctx, {"hook": "OnStart", "uid": self._uid})
 
     def on_stop(self, _ctx: mftik.Context) -> None:
-        _log({"hook": "OnStop", "cloid": self._cloid})
+        _log(_ctx, {"hook": "OnStop", "cloid": self._cloid})
 
     def on_recon(self, ctx: mftik.Context, ev: mftik.ReconEvent) -> None:
         if ev.td.api_id != self._api_id:
@@ -126,21 +125,22 @@ class Maker(Strategy):
         orders = ctx.open_orders(self._api_id, self._algo_id)
         ids = [order.client_order_id for order in orders]
         _log(
+            ctx,
             {
                 "hook": "OnRecon",
                 "api_id": self._api_id,
                 "uid": self._uid,
                 "position": None if position is None else position.size,
-                "open": ids,
-            }
+                "open": ",".join(ids),
+            },
         )
         if ids and not self._placed:
             try:
                 ctx.batch_cancel(self._api_id, self._algo_id)
             except mftik.Error as exc:
-                _log({"hook": "batch_cancel_error", "reason": str(exc)})
+                _log(ctx, {"hook": "batch_cancel_error", "reason": str(exc)})
                 return
-            _log({"hook": "batch_cancel", "open": len(ids)})
+            _log(ctx, {"hook": "batch_cancel", "open": len(ids)})
         if self._placed:
             return
         try:
@@ -157,32 +157,33 @@ class Maker(Strategy):
                 )
             )
         except mftik.Error as exc:
-            _log({"hook": "submit_error", "reason": str(exc)})
+            _log(ctx, {"hook": "submit_error", "reason": str(exc)})
             return
         self._placed = True
         self._cloid = cloid
-        _log({"hook": "submit", "cloid": cloid, "qty": self._qty, "price": self._price})
+        _log(ctx, {"hook": "submit", "cloid": cloid, "qty": self._qty, "price": self._price})
 
     def on_order(self, ctx: mftik.Context, ev: mftik.OrderEvent) -> None:
         cloid = ev.order.client_order_id
         if cloid != self._cloid or not self._cloid:
             return
-        _log({"hook": "OnOrder", "cloid": cloid, "status": int(ev.order.status)})
+        _log(ctx, {"hook": "OnOrder", "cloid": cloid, "status": int(ev.order.status)})
         if ev.order.status != OrderStatus.ORDER_STATUS_ACCEPTED or self._cancelled:
             return
         self._cancelled = True
         try:
             ctx.cancel(self._api_id, cloid)
         except mftik.Error as exc:
-            _log({"hook": "cancel_error", "cloid": cloid, "reason": str(exc)})
+            _log(ctx, {"hook": "cancel_error", "cloid": cloid, "reason": str(exc)})
             self._cancelled = False
             return
-        _log({"hook": "cancel", "cloid": cloid})
+        _log(ctx, {"hook": "cancel", "cloid": cloid})
 
     def on_fill(self, _ctx: mftik.Context, ev: mftik.FillEvent) -> None:
         if ev.td.api_id != self._api_id or ev.fill.uid != self._uid:
             return
         _log(
+            _ctx,
             {
                 "hook": "OnFill",
                 "uid": ev.fill.uid,
@@ -190,5 +191,5 @@ class Maker(Strategy):
                 "cloid": ev.fill.client_order_id,
                 "qty": ev.fill.qty,
                 "price": ev.fill.price,
-            }
+            },
         )

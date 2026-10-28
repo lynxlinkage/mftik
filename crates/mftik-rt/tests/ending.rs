@@ -408,11 +408,7 @@ fn a_full_td_buffer_is_failed_and_delivers_what_it_holds() {
             format!("OnStop {TD_CAP}"),
         ]
     );
-    assert!(
-        ended.stderr.contains("mftik sdk: td buffer full"),
-        "{}",
-        ended.stderr
-    );
+    assert!(ended.stderr.contains("td buffer full"), "{}", ended.stderr);
 }
 
 #[test]

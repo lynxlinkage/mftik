@@ -16,7 +16,7 @@ must be finite and above 0.
 `open_orders`. Open orders for that algo are cleared with `batch_cancel`
 (an earlier run can leave one on the exchange). It then `submit`s one
 limit buy. `on_order` calls `cancel` when that order is accepted. `on_fill`
-logs the fill. Each step is one JSON line on stdout.
+logs the fill. Each step is one JSON line on stderr.
 
 ```bash
 python -m mftik.run maker:Maker

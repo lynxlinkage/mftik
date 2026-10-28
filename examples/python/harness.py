@@ -64,19 +64,19 @@ def drive(scenario: dict[str, Any]) -> dict[str, Any]:
 
 
 def logs(report: dict[str, Any]) -> list[dict[str, Any]]:
-    """Strategy JSON lines. The runtime's ``gate`` line is left out."""
+    """Strategy JSON lines on stderr. Lines without ``hook`` are left out."""
     found: list[dict[str, Any]] = []
-    stdout = report.get("stdout", "")
-    if not isinstance(stdout, str):
-        raise AssertionError(repr(stdout))
-    for line in stdout.splitlines():
+    stderr = report.get("stderr", "")
+    if not isinstance(stderr, str):
+        raise AssertionError(repr(stderr))
+    for line in stderr.splitlines():
         text = line.strip()
         if not text.startswith("{"):
             continue
         row = json.loads(text)
         if not isinstance(row, dict):
             raise AssertionError(text)
-        if row.get("hook") == "gate":
+        if "hook" not in row or row.get("hook") == "gate":
             continue
         found.append(row)
     return found

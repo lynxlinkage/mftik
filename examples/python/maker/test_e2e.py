@@ -52,13 +52,12 @@ class MakerE2E(unittest.TestCase):
         recon = by_hook(rows, "OnRecon")
         self.assertEqual(len(recon), 1, rows)
         self.assertEqual(recon[0]["position"], 2.0)
-        self.assertEqual(len(recon[0]["open"]), 1)
 
         orders = report["orders"]
         self.assertEqual([row["op"] for row in orders], ["batch_cancel", "submit", "cancel"])
         batch, submit, cancel = orders
         self.assertEqual(len(batch["ids"]), 1)
-        self.assertEqual(batch["ids"], recon[0]["open"])
+        self.assertEqual(recon[0]["open"], ",".join(batch["ids"]))
         self.assertEqual(submit["uid"], 7)
         self.assertEqual(submit["qty"], 1.0)
         self.assertEqual(submit["price"], 10.0)

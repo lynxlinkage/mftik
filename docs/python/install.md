@@ -16,6 +16,8 @@ The platform starts one process:
 
 `run` is the same entry as a function. `run(strategy)` hosts that instance and does not return. The process ends with the status in [Errors and exit codes](errors.md). The function takes an optional `release` string, which is sent as `Hello.release` and shown as the worker's release. The module entrypoint has no flag for it. It uses the environment variable `MFTIK_RELEASE` when that variable is set, and otherwise `__version__`. A packed image sets `MFTIK_RELEASE` to the SDK version that was packed. See [Pack and deploy](pack.md).
 
+`run` also takes keyword-only `version` and `commit` strings. They are the strategy's `version` and `commit` on each log line. The default is an empty string. They are not `Hello.release`. `log` writes one JSON object per line to stderr. Inside a hook, use `ctx.log`. Outside a hook, use the module-level `log`. The level and the layout come from `MFTIKO_LOG_LEVEL` and `MFTIKO_LOG_FORMAT`.
+
 The class has to implement `on_init`, `on_start`, and `on_stop`. Those three, and the optional hooks, are the [lifecycle](lifecycle.md). The object is constructed before any of them runs, with no arguments, so configuration belongs in `on_init`, read from `params`. The strategies under `examples/python` all read their configuration in `on_init`. See [Examples](examples.md).
 
 ## When the class cannot be loaded

@@ -141,8 +141,8 @@ fn fingerprint(root: &Path) -> u64 {
 }
 
 /// Spawns the rootfs entrypoint with no host Python on `PATH`, runs Init,
-/// Start, and Stop, and returns the worker's stdout.
-fn run_rootfs(launch: &Launch, extra_env: &[(&str, &Path)]) -> String {
+/// Start, and Stop, and returns the worker's stdout and stderr.
+fn run_rootfs(launch: &Launch, extra_env: &[(&str, &Path)]) -> (String, String) {
     let nats = start_nats();
     let path_dir = std::env::temp_dir().join(format!("mftik-pack-path-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path_dir);
@@ -181,7 +181,7 @@ fn run_rootfs(launch: &Launch, extra_env: &[(&str, &Path)]) -> String {
     let ended = shim.end();
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     let _ = fs::remove_dir_all(&path_dir);
-    ended.stdout
+    (ended.stdout, ended.stderr)
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn run_rootfs(launch: &Launch, extra_env: &[(&str, &Path)]) -> String {
 fn unpacked_rootfs_runs_without_host_python() {
     let launch = load_launch();
     let before = fingerprint(&launch.rootfs);
-    let stdout = run_rootfs(&launch, &[]);
+    let (stdout, _stderr) = run_rootfs(&launch, &[]);
     assert!(stdout.contains("PACK-init"), "{stdout}");
     assert!(stdout.contains("PACK-start"), "{stdout}");
     assert!(stdout.contains("PACK-stop"), "{stdout}");
@@ -229,13 +229,13 @@ fn unpacked_rootfs_reads_a_data_input() {
     let rootfs_before = fingerprint(&launch.rootfs);
     let input_before = fingerprint(&model);
 
-    let stdout = run_rootfs(&launch, &[("MFTIKO_INPUT_DIR", &inputs)]);
-    let init = stdout
+    let (_stdout, stderr) = run_rootfs(&launch, &[("MFTIKO_INPUT_DIR", &inputs)]);
+    let init = stderr
         .lines()
         .find(|line| line.contains(r#""hook":"OnInit""#))
-        .unwrap_or_else(|| panic!("no OnInit line in {stdout}"));
+        .unwrap_or_else(|| panic!("no OnInit line in {stderr}"));
     assert!(init.contains(&format!(r#""sha256":"{sha256}""#)), "{init}");
-    assert!(stdout.contains(r#""hook":"OnStop""#), "{stdout}");
+    assert!(stderr.contains(r#""hook":"OnStop""#), "{stderr}");
 
     assert_read_only(&model, &model.join("weights.json"));
     assert_eq!(input_before, fingerprint(&model), "input changed");
