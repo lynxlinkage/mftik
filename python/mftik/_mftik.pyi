@@ -45,6 +45,8 @@ __all__ = [
     "td",
     "Context",
     "Poster",
+    "Log",
+    "log",
     "topic",
     "volume_read",
     "volume_write",

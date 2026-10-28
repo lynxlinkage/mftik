@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 import mftik
-from mftik.run import format_load_error, load_strategy, resolve_release
+from mftik.run import format_load_error, load_strategy, resolve_release, run
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -70,10 +70,10 @@ class LoadTests(unittest.TestCase):
     def test_version_and_commit_are_strings(self):
         strategy = load_strategy("sample_mod:Sample")
         with self.assertRaises(TypeError) as caught:
-            mftik.run(strategy, version=1)
+            run(strategy, version=1)
         self.assertEqual(str(caught.exception), "version must be str")
         with self.assertRaises(TypeError) as caught:
-            mftik.run(strategy, commit=1)
+            run(strategy, commit=1)
         self.assertEqual(str(caught.exception), "commit must be str")
 
     def test_constructor_failure(self):
