@@ -2,7 +2,7 @@ name: pretrained-abc
 sts_instance: sts-1
 strategy:
   repository: registry.example/acme/strategies/pretrained
-  ref: v1.0.0
+  ref: v1.1.0
 inputs:
   - name: model
     repository: registry.example/acme/models/abc
