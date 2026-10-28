@@ -43,7 +43,7 @@ inputs:
 
 The platform unpacks the input before the process starts. Every session unpacks its own copy. Files are mode 0444 and directories 0555, so a write there fails with `PermissionError`. Read the model in `on_init`, which has the session's `start_timeout_s` to finish. An exception there ends the session `INIT_FAILED`.
 
-```python examples/python/pretrained/pretrained.py:42-57
+```python examples/python/pretrained/pretrained.py:42-58
     def on_init(self, ctx: mftik.Context) -> None:
         directory = ctx.input_dir(_INPUT)
         if not directory:
@@ -54,11 +54,12 @@ The platform unpacks the input before the process starts. Every session unpacks 
             raise ValueError(f"pretrained: {_FILE} must be a JSON object")
         self._weights = weights
         _log(
+            ctx,
             {
                 "hook": "OnInit",
-                "keys": sorted(weights),
+                "keys": ",".join(sorted(weights)),
                 "sha256": hashlib.sha256(raw).hexdigest(),
-            }
+            },
         )
 ```
 

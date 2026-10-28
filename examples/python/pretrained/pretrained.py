@@ -7,7 +7,7 @@ from ``ctx.input_dir("model")`` and keeps it in memory. The input is
 read-only, so the strategy never writes there. A missing input or file
 ends the session ``INIT_FAILED``.
 
-``params`` is not used. Each hook writes one JSON line to stdout.
+``params`` is not used. Each hook writes one JSON line to stderr.
 ``sha256`` is the digest of the bytes that were read.
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +27,10 @@ _INPUT = "model"
 _FILE = "weights.json"
 
 
-def _log(fields: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(fields, separators=(",", ":"), ensure_ascii=True) + "\n")
-    sys.stdout.flush()
+def _log(ctx: mftik.Context, fields: dict[str, Any]) -> None:
+    payload = {key: value for key, value in fields.items() if value is not None}
+    hook = payload.get("hook", "")
+    ctx.log.info(hook if isinstance(hook, str) else "", **payload)
 
 
 class Pretrained(Strategy):
@@ -49,15 +49,16 @@ class Pretrained(Strategy):
             raise ValueError(f"pretrained: {_FILE} must be a JSON object")
         self._weights = weights
         _log(
+            ctx,
             {
                 "hook": "OnInit",
-                "keys": sorted(weights),
+                "keys": ",".join(sorted(weights)),
                 "sha256": hashlib.sha256(raw).hexdigest(),
-            }
+            },
         )
 
     def on_start(self, _ctx: mftik.Context) -> None:
-        _log({"hook": "OnStart", "keys": len(self._weights)})
+        _log(_ctx, {"hook": "OnStart", "keys": len(self._weights)})
 
     def on_stop(self, _ctx: mftik.Context) -> None:
-        _log({"hook": "OnStop", "keys": len(self._weights)})
+        _log(_ctx, {"hook": "OnStop", "keys": len(self._weights)})

@@ -18,6 +18,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 
+use crate::log::PyLog;
 use crate::proto::ToPyMessage;
 use crate::sdk::{PyInfo, PyOrder, PyTapeQuery};
 use crate::strategy::PyStrategy;
@@ -338,6 +339,18 @@ impl PyContext {
         with_context(self.token, |ctx| ctx.session_id().to_owned())
     }
 
+    /// A logger that carries this hook's `session_id` (E06-D005).
+    ///
+    /// The id is copied while the context is valid. The returned `Log` may
+    /// be used after the hook returns.
+    #[getter]
+    fn log(&self) -> PyResult<PyLog> {
+        let session_id = with_context(self.token, |ctx| ctx.session_id().to_owned())?;
+        Ok(PyLog {
+            session_id: Some(session_id),
+        })
+    }
+
     fn params<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         with_context(self.token, |ctx| PyBytes::new(py, ctx.params()))
     }
@@ -591,6 +604,19 @@ impl PyPoster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_outside_a_hook_is_a_context_error() {
+        let _guard = crate::lock_python_tests();
+        Python::initialize();
+        Python::attach(|py| {
+            let ctx = PyContext { token: 0 };
+            let Err(err) = ctx.log() else {
+                panic!("log outside a hook returned a logger");
+            };
+            assert!(err.is_instance_of::<crate::error::ContextError>(py));
+        });
+    }
 
     #[test]
     fn delay_rejects_non_finite_and_negative() {

@@ -383,3 +383,17 @@ Yi Te 於 #455 確認。打包後的 Python 策略讀資料 input（mftiko E15-0
 - E06-D003 範例叫 `pretrained`，input 叫 `model`，檔案是 `weights.json`。它是第五個範例目錄（含 `conform`），有自己的 `test_e2e.py`、README 與 `session.yaml`，`examples` job 跑它的測試並打包（E05-D004）。
 
 `tests/python/data_input_e2e.py` 由新的 `data-input` job 執行：以釘住的 `mftiko-pack data` 推兩次並要求同一個 digest（E15-D008）；`tests/pack/data/main.go` 以 `PullData`、`UnpackReadOnly` 解到 `sessions/s1/inputs/model`，與 `internal/sts/agent/inputs.go` 相同；檢查 config 沒有 `source`（E15-D003），內容與上傳逐位元組相同、檔案 0444、目錄 0555；再以 `MFTIKO_INPUT_DIR` 經假的 shim 跑 rootfs（`crates/mftik-py/tests/pack.rs` 的 `unpacked_rootfs_reads_a_data_input`）。這支腳本從 `pack_e2e.py` import pin 與 registry 的 helper，不再多一份 `MFTIKO_COMMIT`。`UnpackReadOnly` 依賴 Linux 允許在同一個父目錄內 rename 唯讀目錄，macOS 上最後的 rename 會失敗；STS 只跑 Linux，CI 也是 Linux。
+
+## 決定（2026-10-28，E06-D004–E06-D010）
+
+Yi Te 於 #459 確認。自寫 log 庫與 Python logging API，格式對齊 BullionBear/mftiko `pkg/logger` 與 `sdk/log.go`（553ece5，E15-D017–D022）。mftiko 本身不改。本票沒有改 PROTOCOL。
+
+- E06-D004 自寫 log 庫。Rust 端日誌全部改寫成自己的 log 模組，放在 `mftik-rt`。不用 zerolog 的 Rust crate，也不用 `tracing` 或 `log`。輸出與 Go zerolog 相同：一行一個 JSON，鍵為 `level`、`time`（UTC RFC3339Nano）、`component`、`version`、`commit`、`sdk_version`、（`session_id`）、其他欄位、`message`。mftiko Go 照舊用 zerolog。
+- E06-D005 Python API 比照 Go。`ctx.log` 帶 `session_id`，給 hook 內用；`mftik.log` 是模組層級，不帶 `session_id`，給 hook 外用。提供 `debug`、`info`、`warn`、`error`，寫法是 `ctx.log.info("msg", key=value, ...)`。不接 Python 標準的 `logging`。
+- E06-D006 欄位值型別。只接受 str、int、float、bool、None，其他型別丟 `TypeError`，不自動轉字串。
+- E06-D007 寫出方式。在 Rust 端序列化，釋放 GIL，每行一次 `write` 到 stderr，同步寫，不排隊也不丟行。
+- E06-D008 版本欄位。`build.rs` 用 vergen 把 mftik 的版本與 commit 寫成 `sdk_version`。策略的 `version`、`commit` 由 `mftik.run()` 的選填參數傳入，不填就是空字串。`component` 是 `strategy`。
+- E06-D009 level 與 format。讀 `MFTIKO_LOG_LEVEL`（預設 info）與 `MFTIKO_LOG_FORMAT`，`console` 格式也支援，和 Go 一樣。
+- E06-D010 範圍。`note()` 的 `mftik sdk:` 輸出與 Python 範例裡的 `_log()` 都改用新模組。conformance 的 `{"hook":"gate"}` 照舊留在 stdout。加 benchmark，只報數字，不和 Go 比。
+
+`sdk_version` 是套件版本、`+`、完整 git sha，由 vergen-gitcl 在 `mftik-rt` 的 `build.rs` 寫入（vergen 9 起 git 後端拆成這個 crate）。`mftik.run` 的 `version` 與 `commit` 是 keyword-only，預設空字串，不取代 `Hello.release`（`release` 仍走 `resolve_release`）。`note()` 的 message 不再加 `mftik sdk:` 前綴，與 Go `plane.note` 相同。範例裡本來以 list 寫出的欄位（maker 的 open client order id、pretrained 的 weights keys）改成逗號串起來的 str，因為 E06-D006 不接受 list。

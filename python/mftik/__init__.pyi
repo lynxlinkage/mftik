@@ -9,6 +9,7 @@ from mftik._mftik import (
     Feed,
     FillEvent,
     Info,
+    Log,
     Md,
     NoFeed,
     NotInInit,
@@ -28,6 +29,7 @@ from mftik._mftik import (
     UnknownAccount,
     UnknownUid,
     common,
+    log,
     md,
     td,
 )
@@ -47,6 +49,7 @@ __all__ = [
     "Feed",
     "FillEvent",
     "Info",
+    "Log",
     "Md",
     "NoFeed",
     "NotInInit",
@@ -68,6 +71,7 @@ __all__ = [
     "UnknownAccount",
     "UnknownUid",
     "common",
+    "log",
     "md",
     "run",
     "td",
@@ -76,4 +80,10 @@ __all__ = [
 
 __version__: str
 
-def run(strategy: Strategy, release: str | None = None) -> None: ...
+def run(
+    strategy: Strategy,
+    release: str | None = None,
+    *,
+    version: str = "",
+    commit: str = "",
+) -> None: ...

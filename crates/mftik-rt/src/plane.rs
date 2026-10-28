@@ -56,9 +56,9 @@ pub const GATE_LINE: &str = "{\"hook\":\"gate\"}\n";
 /// watchdog sees the budget run out.
 pub const CLOCK_TICK: Duration = Duration::from_millis(10);
 
-/// One stderr line, as the Go SDK's `note`.
+/// One stderr line, as the Go SDK's `note` (E06-D010).
 pub(crate) fn note(line: &str) {
-    eprintln!("mftik sdk: {line}");
+    crate::log::note(line);
 }
 
 /// What `InitPayload` set for the whole session.
@@ -233,6 +233,8 @@ impl<S: Strategy> Plane<S> {
         let recv_window = Duration::from_millis(u64::from(init.recv_window_ms));
         let hook_timeout = Duration::from_secs(u64::from(init.hook_timeout_s));
         // A second Init never reaches the plane (C4 ends INIT_FAILED first).
+        // Later `note` lines carry this id once it is known (E06-D004).
+        crate::log::set_note_session(&init.session_id);
         let _ = self.session.set(Session {
             id: init.session_id,
             params: init.params,

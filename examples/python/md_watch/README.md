@@ -15,7 +15,7 @@ venue or product.
 heartbeat period in seconds and must be above 0. `OnInit` calls `resolve`.
 `on_trade` logs the trade. `on_book` reads `BookView` (`bids`, `asks`,
 `price`) once `md.view` has synced the local book; before that the line has
-`"synced": false`. Each line is one JSON object on stdout.
+`"synced": false`. Each line is one JSON object on stderr.
 
 ```bash
 python -m mftik.run md_watch:MdWatch

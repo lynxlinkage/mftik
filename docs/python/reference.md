@@ -8,7 +8,9 @@ A name that starts with one underscore is part of the native module. Strategy co
 
 `__version__` is the installed distribution's version. A checkout that has not been installed reports the fallback written next to the package.
 
-`run` hosts one `Strategy` until the process exits. It does not return. `run(strategy, release=None)` sends `release` as `Hello.release` when that argument is set. See [Install and run](install.md).
+`run` hosts one `Strategy` until the process exits. It does not return. `run(strategy, release=None, *, version="", commit="")` sends `release` as `Hello.release` when that argument is set. `version` and `commit` are the strategy's log fields. Empty strings are still written. They do not change `Hello.release`. See [Install and run](install.md).
+
+`log` is the module-level `Log`. Use it outside a hook. It does not carry `session_id`. `debug`, `info`, `warn`, and `error` take a positional-only message and keyword fields: `log.info("msg", key=value)`. A field value must be a `str`, `int`, `float`, `bool`, or `None`. Anything else, including a subclass or a list, raises `TypeError`. Lines are JSON objects on stderr. `MFTIKO_LOG_LEVEL` defaults to info. `MFTIKO_LOG_FORMAT=console` selects the console layout.
 
 `Strategy` is the base class. Construct it with no arguments. `on_init`, `on_start`, and `on_stop` are required. The 17 optional hooks are listed in [Lifecycle](lifecycle.md).
 
@@ -23,6 +25,7 @@ Every hook receives a `Context`. The methods below raise `ContextError` outside 
 | Method | Role |
 | --- | --- |
 | `session_id` | Session id, or empty when the record is absent |
+| `log` | `Log` for this hook. It carries `session_id` |
 | `params` | The strategy's parameter bytes |
 | `exit` | Request outcome `DONE` |
 | `fail` | Request outcome `FAILED` and store the reason |

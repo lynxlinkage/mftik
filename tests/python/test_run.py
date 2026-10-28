@@ -67,6 +67,15 @@ class LoadTests(unittest.TestCase):
             "load sample_mod:Plain: TypeError: sample_mod:Plain is not a mftik.Strategy",
         )
 
+    def test_version_and_commit_are_strings(self):
+        strategy = load_strategy("sample_mod:Sample")
+        with self.assertRaises(TypeError) as caught:
+            mftik.run(strategy, version=1)
+        self.assertEqual(str(caught.exception), "version must be str")
+        with self.assertRaises(TypeError) as caught:
+            mftik.run(strategy, commit=1)
+        self.assertEqual(str(caught.exception), "commit must be str")
+
     def test_constructor_failure(self):
         with self.assertRaises(RuntimeError) as caught:
             load_strategy("sample_mod:Boom")

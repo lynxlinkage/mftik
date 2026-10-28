@@ -11,14 +11,13 @@ file does not name a venue or a product.
 ``OnInit`` resolves the ticker. ``on_trade`` and ``on_book`` each write one
 JSON line. ``on_book`` reads the local ``BookView`` (empty until ``md.view``
 has synced). ``every_s`` is the ``after`` heartbeat, in seconds. Lines go to
-stdout, the same way the other examples do.
+stderr through ``ctx.log``.
 """
 
 from __future__ import annotations
 
 import json
 import math
-import sys
 from typing import Any
 
 import mftik
@@ -62,10 +61,10 @@ def _parse(raw: bytes) -> _Params:
     return _Params(ticker, every_s)
 
 
-def _log(fields: dict[str, Any]) -> None:
+def _log(ctx: mftik.Context, fields: dict[str, Any]) -> None:
     payload = {key: value for key, value in fields.items() if value is not None}
-    sys.stdout.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=True) + "\n")
-    sys.stdout.flush()
+    hook = payload.get("hook", "")
+    ctx.log.info(hook if isinstance(hook, str) else "", **payload)
 
 
 def _top(view: mftik.BookView, bid: bool) -> dict[str, Any]:
@@ -93,14 +92,14 @@ class MdWatch(Strategy):
         self._ticker = params.ticker
         self._uid = info.uid
         self._every = params.every_s
-        _log({"hook": "OnInit", "ticker": params.ticker, "uid": info.uid})
+        _log(ctx, {"hook": "OnInit", "ticker": params.ticker, "uid": info.uid})
 
     def on_start(self, ctx: mftik.Context) -> None:
         ctx.after(self._every, self._on_timer)
-        _log({"hook": "OnStart", "uid": self._uid})
+        _log(ctx, {"hook": "OnStart", "uid": self._uid})
 
     def on_stop(self, _ctx: mftik.Context) -> None:
-        _log({"hook": "OnStop", "trades": self._trades, "books": self._books})
+        _log(_ctx, {"hook": "OnStop", "trades": self._trades, "books": self._books})
 
     def on_trade(self, _ctx: mftik.Context, ev: mftik.Feed) -> None:
         if ev.md.uid != self._uid:
@@ -108,6 +107,7 @@ class MdWatch(Strategy):
         trade = ev.data
         self._trades += 1
         _log(
+            _ctx,
             {
                 "hook": "OnTrade",
                 "uid": ev.md.uid,
@@ -116,7 +116,7 @@ class MdWatch(Strategy):
                 "price": trade.price,
                 "qty": trade.qty,
                 "side": int(trade.side),
-            }
+            },
         )
 
     def on_book(self, ctx: mftik.Context, ev: mftik.BookUpdate) -> None:
@@ -131,8 +131,10 @@ class MdWatch(Strategy):
             fields["synced"] = True
             fields.update(_top(view, True))
             fields.update(_top(view, False))
-        _log(fields)
+        _log(ctx, fields)
 
     def _on_timer(self, ctx: mftik.Context) -> None:
-        _log({"hook": "OnTimer", "uid": self._uid, "trades": self._trades, "books": self._books})
+        _log(
+            ctx, {"hook": "OnTimer", "uid": self._uid, "trades": self._trades, "books": self._books}
+        )
         ctx.after(self._every, self._on_timer)

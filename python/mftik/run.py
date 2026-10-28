@@ -40,11 +40,25 @@ def load_strategy(spec: str) -> Strategy:
     return obj
 
 
-def run(strategy: Strategy, release: str | None = None) -> None:
-    """Host ``strategy`` until the process exits. Does not return."""
+def run(
+    strategy: Strategy,
+    release: str | None = None,
+    *,
+    version: str = "",
+    commit: str = "",
+) -> None:
+    """Host ``strategy`` until the process exits. Does not return.
+
+    ``version`` and ``commit`` are the strategy's log fields. They do not
+    replace ``Hello.release``.
+    """
     if not isinstance(strategy, Strategy):
         raise TypeError("strategy must be an instance of mftik.Strategy")
-    _run(strategy, resolve_release(release))
+    if not isinstance(version, str):
+        raise TypeError("version must be str")
+    if not isinstance(commit, str):
+        raise TypeError("commit must be str")
+    _run(strategy, resolve_release(release), version, commit)
 
 
 def configure_line_buffering() -> None:

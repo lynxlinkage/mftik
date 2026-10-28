@@ -19,7 +19,7 @@ strategy. Its registry and digest are placeholders.
 `OnInit` reads `weights.json` and keeps it in memory. A missing input or file
 ends the session `INIT_FAILED`. The line it logs has the file's top-level
 keys and the sha256 of the bytes it read. Each line is one JSON object on
-stdout.
+stderr.
 
 ```bash
 python -m mftik.run pretrained:Pretrained

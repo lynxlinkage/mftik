@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import math
-import sys
 from typing import Any
 
 import mftik
@@ -90,9 +89,10 @@ def _dump(count: int) -> bytes:
     return json.dumps({"fills": count}, separators=(",", ":")).encode("ascii")
 
 
-def _log(fields: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(fields, separators=(",", ":"), ensure_ascii=True) + "\n")
-    sys.stdout.flush()
+def _log(ctx: mftik.Context, fields: dict[str, Any]) -> None:
+    payload = {key: value for key, value in fields.items() if value is not None}
+    hook = payload.get("hook", "")
+    ctx.log.info(hook if isinstance(hook, str) else "", **payload)
 
 
 class Stateful(Strategy):
@@ -114,25 +114,27 @@ class Stateful(Strategy):
         self._every = params.every_s
         raw = mftik.volume.read(ctx.volume_dir(), ctx.input_dir(_INPUT), _STATE)
         self._fills = _count(raw)
-        _log({"hook": "OnInit", "ticker": params.ticker, "uid": info.uid, "fills": self._fills})
+        _log(
+            ctx, {"hook": "OnInit", "ticker": params.ticker, "uid": info.uid, "fills": self._fills}
+        )
 
     def on_start(self, ctx: mftik.Context) -> None:
         ctx.after(self._every, self._on_timer)
-        _log({"hook": "OnStart", "fills": self._fills})
+        _log(ctx, {"hook": "OnStart", "fills": self._fills})
 
     def on_fill(self, _ctx: mftik.Context, ev: mftik.FillEvent) -> None:
         if ev.td.api_id != self._api_id or ev.fill.uid != self._uid:
             return
         self._fills += 1
-        _log({"hook": "OnFill", "fills": self._fills, "fill_id": ev.fill.fill_id})
+        _log(_ctx, {"hook": "OnFill", "fills": self._fills, "fill_id": ev.fill.fill_id})
 
     def on_stop(self, ctx: mftik.Context) -> None:
         self._save(ctx)
-        _log({"hook": "OnStop", "fills": self._fills})
+        _log(ctx, {"hook": "OnStop", "fills": self._fills})
 
     def _on_timer(self, ctx: mftik.Context) -> None:
         self._save(ctx)
-        _log({"hook": "OnTimer", "fills": self._fills})
+        _log(ctx, {"hook": "OnTimer", "fills": self._fills})
         ctx.after(self._every, self._on_timer)
 
     def _save(self, ctx: mftik.Context) -> None:

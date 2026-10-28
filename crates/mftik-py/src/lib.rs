@@ -6,6 +6,7 @@
 
 mod context;
 mod error;
+mod log;
 mod proto;
 mod sdk;
 mod strategy;
@@ -19,6 +20,7 @@ use pyo3::wrap_pyfunction;
 
 use crate::context::{PyBookView, PyContext, PyPoster};
 use crate::error::ContextError;
+use crate::log::PyLog;
 use crate::strategy::{LoadFailed, PyStrategy};
 use crate::volume::{volume_read, volume_write};
 
@@ -48,6 +50,8 @@ fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyContext>()?;
     m.add_class::<PyPoster>()?;
     m.add_class::<PyBookView>()?;
+    m.add_class::<PyLog>()?;
+    m.add("log", PyLog { session_id: None })?;
     m.add_function(wrap_pyfunction!(volume_write, m)?)?;
     m.add_function(wrap_pyfunction!(volume_read, m)?)?;
     m.add_function(wrap_pyfunction!(_run, m)?)?;
@@ -72,9 +76,17 @@ fn session_contracts() -> Vec<String> {
 }
 
 /// Hosts `strategy` until the process `_exit`s. `release` is `Hello.release`.
+/// `version` and `commit` are the strategy's log fields (E06-D008).
 #[pyfunction]
-fn _run(py: Python<'_>, strategy: Py<PyAny>, release: String) -> PyResult<()> {
+fn _run(
+    py: Python<'_>,
+    strategy: Py<PyAny>,
+    release: String,
+    version: String,
+    commit: String,
+) -> PyResult<()> {
     install_before_exit();
+    mftik_rt::log::set_strategy_identity(&version, &commit);
     let strategy = PyStrategy::new(strategy);
     py.detach(move || enter(strategy, release));
     Ok(())
