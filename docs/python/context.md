@@ -8,7 +8,7 @@ Instruments are UIDs after the first lookup. Resolve a ticker once, keep the UID
 
 `session_id` returns the session id. It is empty when the session record is not available.
 
-`log` returns a `Log` for this hook. Reading it outside the hook raises `ContextError`. The object copies `session_id`, including when that id is empty, and may be kept after the hook returns. `debug`, `info`, `warn`, and `error` take the message as a positional-only `str` and the other fields as keywords: `ctx.log.info("msg", key=value)`. A field has to be a `str`, `int`, `float`, `bool`, or `None`. Any other value raises `TypeError` and is not turned into a string. Each call writes one JSON object to stderr. Outside a hook, use the module-level `log`, which omits `session_id`. See [API reference](reference.md).
+`log` returns a `Log` for this hook. Reading it outside the hook raises `ContextError`. The object copies `session_id`, including when that id is empty, and may be kept after the hook returns. `debug`, `info`, `warn`, and `error` take the message as a positional-only `str` and the other fields as keywords: `ctx.log.info("msg", key=value)`. A field has to be a `str`, `int`, `float`, `bool`, or `None`. Any other value raises `TypeError` and is not turned into a string. Each call at or above `MFTIKO_LOG_LEVEL` writes one JSON object to stderr. A call below it returns at once and checks neither the message nor the fields, so it raises no `TypeError`. Outside a hook, use the module-level `log`, which omits `session_id`. See [API reference](reference.md).
 
 `params` returns the strategy's own parameter bytes from the session spec. The platform does not interpret them. A strategy that wants structured settings decodes this bytes value itself, usually as JSON.
 

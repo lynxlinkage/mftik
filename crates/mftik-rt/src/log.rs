@@ -1,12 +1,18 @@
-//! Stderr log lines (E06-D004–E06-D010).
+//! Stderr log lines (E06-D004–E06-D017).
 //!
 //! One JSON object per line, or zerolog's console layout. The keys and their
 //! order match Go zerolog, with `sdk_version` added. This module does not use
 //! the `log` or `tracing` crates.
+//!
+//! A JSON line is rendered into its thread's buffer and written to stderr from
+//! there. Once that buffer exists, a line allocates nothing (E06-D011).
+//! Integers go through `itoa` and floats through `ryu` (E06-D012). The `time`
+//! text up to the second is formatted once per second on each thread
+//! (E06-D013). The console layout is rendered as before (E06-D016).
 
 use std::cell::RefCell;
 use std::io::{self, Write};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `component` on every strategy line (E06-D008).
@@ -19,6 +25,13 @@ pub const SDK_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("VERG
 pub const DISABLED: i8 = 7;
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// A thread's JSON line buffer starts at this capacity.
+const LINE_CAPACITY: usize = 1024;
+
+/// A line buffer that grew past this is freed after its line, the cap zerolog
+/// puts on the events it pools.
+const LINE_KEEP: usize = 64 * 1024;
 
 /// A level this module can emit. The discriminant is zerolog's `Level` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,22 +113,21 @@ impl Logger {
         if !allows(self.min, level as i8) {
             return;
         }
-        let line = render(
-            &Record {
-                level,
-                now_ns,
-                component: &self.component,
-                version: &self.version,
-                commit: &self.commit,
-                sdk_version: &self.sdk_version,
-                session_id: self.session_id.as_deref(),
-                fields,
-                message,
-            },
-            self.style,
-            self.no_color,
-        );
-        write_line(out, &line);
+        let record = Record {
+            level,
+            now_ns,
+            component: &self.component,
+            version: &self.version,
+            commit: &self.commit,
+            sdk_version: &self.sdk_version,
+            session_id: self.session_id.as_deref(),
+            fields,
+            message,
+        };
+        match self.style {
+            Style::Json => with_scratch(|scratch| write_line(out, scratch.json(&record))),
+            Style::Console => write_line(out, &console_line(&record, self.no_color)),
+        }
     }
 }
 
@@ -169,20 +181,27 @@ pub(crate) fn set_note_session(id: &str) {
     let mut guard = note_session()
         .write()
         .unwrap_or_else(|err| err.into_inner());
-    *guard = id.to_owned();
+    *guard = Some(Arc::from(id));
 }
 
 /// `plane.note`: info, the text as the message, `session_id` only when set.
 pub(crate) fn note(line: &str) {
-    let session = {
-        let guard = note_session().read().unwrap_or_else(|err| err.into_inner());
-        if guard.is_empty() {
-            None
-        } else {
-            Some(guard.clone())
-        }
-    };
-    emit(Level::Info, line, &[], session.as_deref());
+    let session = note_session()
+        .read()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    emit(
+        Level::Info,
+        line,
+        &[],
+        session.as_deref().filter(|id| !id.is_empty()),
+    );
+}
+
+/// Whether [`emit`] writes a line at `level`. A caller checks this before it
+/// builds the fields (E06-D017).
+pub fn enabled(level: Level) -> bool {
+    allows(config().min, level as i8)
 }
 
 /// One line on stderr, or into the buffer installed by [`capture`].
@@ -191,24 +210,22 @@ pub fn emit(level: Level, message: &str, fields: &[Field], session_id: Option<&s
     if !allows(cfg.min, level as i8) {
         return;
     }
-    let guard = identity().read().unwrap_or_else(|err| err.into_inner());
-    let line = render(
-        &Record {
-            level,
-            now_ns: now_ns(),
-            component: COMPONENT,
-            version: &guard.version,
-            commit: &guard.commit,
-            sdk_version: SDK_VERSION,
-            session_id,
-            fields,
-            message,
-        },
-        cfg.style,
-        cfg.no_color,
-    );
-    drop(guard);
-    write_out(&line);
+    let now_ns = now_ns();
+    match cfg.style {
+        Style::Json => with_scratch(|scratch| {
+            let guard = identity().read().unwrap_or_else(|err| err.into_inner());
+            let line = scratch.json(&guard.record(level, now_ns, session_id, fields, message));
+            drop(guard);
+            write_out(line);
+        }),
+        Style::Console => {
+            let guard = identity().read().unwrap_or_else(|err| err.into_inner());
+            let record = guard.record(level, now_ns, session_id, fields, message);
+            let line = console_line(&record, cfg.no_color);
+            drop(guard);
+            write_out(&line);
+        }
+    }
 }
 
 /// Diverts [`emit`] on this thread into a buffer, then restores stderr.
@@ -233,11 +250,79 @@ impl Drop for CaptureGuard {
 
 thread_local! {
     static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    static SCRATCH: RefCell<Scratch> = const { RefCell::new(Scratch::new()) };
+}
+
+/// One thread's JSON line, and the `time` text of the last second it wrote.
+struct Scratch {
+    line: Vec<u8>,
+    stamp: Stamp,
+}
+
+impl Scratch {
+    const fn new() -> Self {
+        Self {
+            line: Vec::new(),
+            stamp: Stamp::new(),
+        }
+    }
+
+    /// The JSON line for `record`, newline included.
+    fn json(&mut self, record: &Record<'_>) -> &[u8] {
+        self.line.clear();
+        self.line.reserve(LINE_CAPACITY);
+        render_json(record, &mut self.stamp, &mut self.line);
+        &self.line
+    }
+}
+
+/// Runs `body` with this thread's [`Scratch`]. A line rendered while it is in
+/// use, or after the thread has dropped it, gets a new one instead.
+fn with_scratch(body: impl FnOnce(&mut Scratch)) {
+    let mut body = Some(body);
+    let _ = SCRATCH.try_with(|cell| {
+        let Ok(mut scratch) = cell.try_borrow_mut() else {
+            return;
+        };
+        if let Some(body) = body.take() {
+            body(&mut scratch);
+        }
+        if scratch.line.capacity() > LINE_KEEP {
+            scratch.line = Vec::new();
+        }
+    });
+    if let Some(body) = body {
+        body(&mut Scratch::new());
+    }
 }
 
 struct Identity {
     version: String,
     commit: String,
+}
+
+impl Identity {
+    /// A strategy line under this identity (E06-D008).
+    fn record<'a>(
+        &'a self,
+        level: Level,
+        now_ns: i64,
+        session_id: Option<&'a str>,
+        fields: &'a [Field],
+        message: &'a str,
+    ) -> Record<'a> {
+        Record {
+            level,
+            now_ns,
+            component: COMPONENT,
+            version: &self.version,
+            commit: &self.commit,
+            sdk_version: SDK_VERSION,
+            session_id,
+            fields,
+            message,
+        }
+    }
 }
 
 fn identity() -> &'static RwLock<Identity> {
@@ -248,8 +333,9 @@ fn identity() -> &'static RwLock<Identity> {
     &IDENTITY
 }
 
-fn note_session() -> &'static RwLock<String> {
-    static SESSION: RwLock<String> = RwLock::new(String::new());
+/// An `Arc` so that [`note`] borrows the id without copying it.
+fn note_session() -> &'static RwLock<Option<Arc<str>>> {
+    static SESSION: RwLock<Option<Arc<str>>> = RwLock::new(None);
     &SESSION
 }
 
@@ -283,55 +369,57 @@ fn now_ns() -> i64 {
     }
 }
 
-fn render(record: &Record<'_>, style: Style, no_color: bool) -> Vec<u8> {
+/// The console layout allocates its line, as before (E06-D016).
+fn console_line(record: &Record<'_>, no_color: bool) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
-    match style {
-        Style::Json => render_json(record, &mut buf),
-        Style::Console => render_console(record, no_color, &mut buf),
-    }
+    render_console(record, no_color, &mut buf);
     buf.push(b'\n');
     buf
 }
 
-fn render_json(record: &Record<'_>, buf: &mut Vec<u8>) {
-    buf.push(b'{');
-    append_key(buf, "level", true);
-    append_json_str(buf, level_name(record.level));
-    append_key(buf, "time", false);
-    append_json_str(buf, &format_utc_nano(record.now_ns));
-    append_key(buf, "component", false);
+fn render_json(record: &Record<'_>, stamp: &mut Stamp, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(level_head(record.level));
+    stamp.append(buf, record.now_ns);
+    buf.extend_from_slice(br#"","component":"#);
     append_json_str(buf, record.component);
-    append_key(buf, "version", false);
+    buf.extend_from_slice(br#","version":"#);
     append_json_str(buf, record.version);
-    append_key(buf, "commit", false);
+    buf.extend_from_slice(br#","commit":"#);
     append_json_str(buf, record.commit);
-    append_key(buf, "sdk_version", false);
+    buf.extend_from_slice(br#","sdk_version":"#);
     append_json_str(buf, record.sdk_version);
     if let Some(session) = record.session_id {
-        append_key(buf, "session_id", false);
+        buf.extend_from_slice(br#","session_id":"#);
         append_json_str(buf, session);
     }
     for field in record.fields {
-        append_key(buf, &field.name, false);
+        buf.push(b',');
+        append_json_str(buf, &field.name);
+        buf.push(b':');
         append_value(buf, &field.value);
     }
-    append_key(buf, "message", false);
+    buf.extend_from_slice(br#","message":"#);
     append_json_str(buf, record.message);
-    buf.push(b'}');
+    buf.extend_from_slice(b"}\n");
 }
 
-fn append_key(buf: &mut Vec<u8>, name: &str, first: bool) {
-    if !first {
-        buf.push(b',');
+/// Every JSON line up to the `time` text.
+fn level_head(level: Level) -> &'static [u8] {
+    match level {
+        Level::Trace => br#"{"level":"trace","time":""#,
+        Level::Debug => br#"{"level":"debug","time":""#,
+        Level::Info => br#"{"level":"info","time":""#,
+        Level::Warn => br#"{"level":"warn","time":""#,
+        Level::Error => br#"{"level":"error","time":""#,
+        Level::Fatal => br#"{"level":"fatal","time":""#,
+        Level::Panic => br#"{"level":"panic","time":""#,
     }
-    append_json_str(buf, name);
-    buf.push(b':');
 }
 
 fn append_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
         Value::Str(text) => append_json_str(buf, text),
-        Value::Int(number) => buf.extend_from_slice(number.to_string().as_bytes()),
+        Value::Int(number) => buf.extend_from_slice(itoa::Buffer::new().format(*number).as_bytes()),
         Value::Big(text) => buf.extend_from_slice(text.as_bytes()),
         Value::Float(number) => append_float(buf, *number),
         Value::Bool(true) => buf.extend_from_slice(b"true"),
@@ -340,38 +428,35 @@ fn append_value(buf: &mut Vec<u8>, value: &Value) {
     }
 }
 
-fn level_name(level: Level) -> &'static str {
-    match level {
-        Level::Trace => "trace",
-        Level::Debug => "debug",
-        Level::Info => "info",
-        Level::Warn => "warn",
-        Level::Error => "error",
-        Level::Fatal => "fatal",
-        Level::Panic => "panic",
-    }
-}
-
 /// zerolog's string encoder: UTF-8 passes through, controls are `\u00XX`.
 fn append_json_str(buf: &mut Vec<u8>, text: &str) {
-    buf.push(b'"');
     let bytes = text.as_bytes();
-    let mut index = 0;
+    buf.push(b'"');
+    // No early exit, so that the scan vectorizes.
+    if bytes
+        .iter()
+        .fold(false, |found, &byte| found | escapes(byte))
+    {
+        append_escaped(buf, bytes);
+    } else {
+        buf.extend_from_slice(bytes);
+    }
+    buf.push(b'"');
+}
+
+/// The bytes zerolog's `noEscapeTable` sends to its slow path, except that
+/// bytes from 0x80 up are always valid UTF-8 here and pass through.
+fn escapes(byte: u8) -> bool {
+    (byte < 0x20) | (byte == b'"') | (byte == b'\\') | (byte == 0x7f)
+}
+
+fn append_escaped(buf: &mut Vec<u8>, bytes: &[u8]) {
     let mut start = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if (0x20..0x7f).contains(&byte) && byte != b'"' && byte != b'\\' {
-            index += 1;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if !escapes(byte) {
             continue;
         }
-        if byte >= 0x80 {
-            let ch = text[index..].chars().next().expect("utf-8");
-            index += ch.len_utf8();
-            continue;
-        }
-        if start < index {
-            buf.extend_from_slice(&bytes[start..index]);
-        }
+        buf.extend_from_slice(&bytes[start..index]);
         match byte {
             b'"' | b'\\' => {
                 buf.push(b'\\');
@@ -388,33 +473,114 @@ fn append_json_str(buf: &mut Vec<u8>, text: &str) {
                 buf.push(HEX[(byte & 0x0f) as usize]);
             }
         }
-        index += 1;
-        start = index;
+        start = index + 1;
     }
-    if start < bytes.len() {
-        buf.extend_from_slice(&bytes[start..]);
-    }
-    buf.push(b'"');
+    buf.extend_from_slice(&bytes[start..]);
 }
 
-/// zerolog `appendFloat`: `strconv.AppendFloat` prec -1, `'f'` unless the
-/// magnitude is outside `[1e-6, 1e21)`, then `'e'` with a `+` on the exponent.
+/// zerolog `appendFloat` with precision -1 (E06-D012). NaN and the
+/// infinities are JSON strings.
 fn append_float(buf: &mut Vec<u8>, value: f64) {
-    if value.is_nan() {
-        buf.extend_from_slice(br#""NaN""#);
-        return;
+    match non_finite(value) {
+        Some(text) => {
+            buf.push(b'"');
+            buf.extend_from_slice(text.as_bytes());
+            buf.push(b'"');
+        }
+        None => append_finite(buf, value),
     }
-    if value.is_infinite() {
-        buf.extend_from_slice(if value.is_sign_positive() {
-            br#""+Inf""#
-        } else {
-            br#""-Inf""#
-        });
-        return;
-    }
-    buf.extend_from_slice(float_body(value).as_bytes());
 }
 
+/// zerolog's text for NaN and the infinities.
+fn non_finite(value: f64) -> Option<&'static str> {
+    if value.is_nan() {
+        Some("NaN")
+    } else if value == f64::INFINITY {
+        Some("+Inf")
+    } else if value == f64::NEG_INFINITY {
+        Some("-Inf")
+    } else {
+        None
+    }
+}
+
+/// `strconv.AppendFloat(v, f, -1, 64)`: `f` is `'e'` when the magnitude is
+/// below 1e-6 or at least 1e21 and `'f'` otherwise. zerolog then turns
+/// `e-0X` into `e-X`.
+///
+/// ryu gives the same shortest digits. Its text differs from Go's in three
+/// places: a whole number ends in `.0`, a positive exponent has no `+`, and
+/// it switches to an exponent outside `[1e-5, 1e16)` where Go's `'f'` range
+/// is `[1e-6, 1e21)`. ryu writes no leading zero in an exponent, which is
+/// already zerolog's `e-X`.
+fn append_finite(buf: &mut Vec<u8>, value: f64) {
+    let mut ryu = ryu::Buffer::new();
+    let text = ryu.format_finite(value).as_bytes();
+    let Some(at) = text.iter().position(|&byte| byte == b'e') else {
+        buf.extend_from_slice(text.strip_suffix(b".0").unwrap_or(text));
+        return;
+    };
+    let (mantissa, exp) = (&text[..at], &text[at + 1..]);
+    let abs = value.abs();
+    if abs < 1e-6 || abs >= 1e21 {
+        buf.extend_from_slice(mantissa);
+        buf.push(b'e');
+        if exp[0] != b'-' {
+            buf.push(b'+');
+        }
+        buf.extend_from_slice(exp);
+    } else {
+        append_fixed(buf, mantissa, parse_exp(exp));
+    }
+}
+
+/// ryu's `d.ddd` (or `d`) mantissa times ten to `exp`, in Go's `'f'` layout.
+fn append_fixed(buf: &mut Vec<u8>, mantissa: &[u8], exp: i32) {
+    let digits = match mantissa.strip_prefix(b"-") {
+        Some(digits) => {
+            buf.push(b'-');
+            digits
+        }
+        None => mantissa,
+    };
+    let (lead, rest) = digits.split_at(1);
+    let rest = rest.strip_prefix(b".").unwrap_or(rest);
+    match usize::try_from(exp) {
+        Err(_) => {
+            buf.extend_from_slice(b"0.");
+            let zeros = exp.unsigned_abs() as usize - 1;
+            buf.resize(buf.len() + zeros, b'0');
+            buf.extend_from_slice(lead);
+            buf.extend_from_slice(rest);
+        }
+        Ok(whole) if whole >= rest.len() => {
+            buf.extend_from_slice(lead);
+            buf.extend_from_slice(rest);
+            buf.resize(buf.len() + whole - rest.len(), b'0');
+        }
+        Ok(whole) => {
+            buf.extend_from_slice(lead);
+            buf.extend_from_slice(&rest[..whole]);
+            buf.push(b'.');
+            buf.extend_from_slice(&rest[whole..]);
+        }
+    }
+}
+
+fn parse_exp(text: &[u8]) -> i32 {
+    let (negative, digits) = match text.strip_prefix(b"-") {
+        Some(digits) => (true, digits),
+        None => (false, text),
+    };
+    let magnitude = digits
+        .iter()
+        .fold(0, |acc, &digit| acc * 10 + i32::from(digit - b'0'));
+    if negative { -magnitude } else { magnitude }
+}
+
+/// The console's float text, kept as it was (E06-D016). It can differ from
+/// [`append_float`] in the last digit: where two shortest texts are equally
+/// close, Rust's `{}` rounds away from zero and Go's `strconv` to even.
 fn float_body(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
@@ -614,18 +780,58 @@ fn write_error_value(buf: &mut Vec<u8>, text: &str, no_color: bool) {
     buf.extend_from_slice(b"\x1b[0m\x1b[0m");
 }
 
-fn format_utc_nano(unix_ns: i64) -> String {
-    let secs = unix_ns.div_euclid(1_000_000_000);
-    let nanos = unix_ns.rem_euclid(1_000_000_000) as u32;
-    let (year, month, day, hour, min, sec) = civil_hms(secs);
-    if nanos == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
-    } else {
-        format!(
-            "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{}Z",
-            trim_nanos(nanos)
-        )
+/// `time` as RFC3339Nano in UTC (E06-D013). The text up to the second is
+/// kept for the second it was formatted for.
+struct Stamp {
+    secs: Option<i64>,
+    head: [u8; 32],
+    len: usize,
+}
+
+impl Stamp {
+    const fn new() -> Self {
+        Self {
+            secs: None,
+            head: [0; 32],
+            len: 0,
+        }
     }
+
+    fn append(&mut self, buf: &mut Vec<u8>, unix_ns: i64) {
+        let secs = unix_ns.div_euclid(1_000_000_000);
+        if self.secs != Some(secs) {
+            let (year, month, day, hour, min, sec) = civil_hms(secs);
+            let mut head = io::Cursor::new(&mut self.head[..]);
+            let _ = write!(
+                head,
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}"
+            );
+            self.len = head.position() as usize;
+            self.secs = Some(secs);
+        }
+        buf.extend_from_slice(&self.head[..self.len]);
+        append_nanos(buf, unix_ns.rem_euclid(1_000_000_000) as u32);
+    }
+}
+
+/// `.` and the nanoseconds without trailing zeros, then `Z`. Zero is `Z`.
+fn append_nanos(buf: &mut Vec<u8>, nanos: u32) {
+    if nanos == 0 {
+        buf.push(b'Z');
+        return;
+    }
+    let mut text = [b'.'; 10];
+    let mut rest = nanos;
+    for slot in text[1..].iter_mut().rev() {
+        *slot = b'0' + (rest % 10) as u8;
+        rest /= 10;
+    }
+    let mut end = text.len();
+    while text[end - 1] == b'0' {
+        end -= 1;
+    }
+    buf.extend_from_slice(&text[..end]);
+    buf.push(b'Z');
 }
 
 fn format_local_rfc3339(secs: i64) -> String {
@@ -665,14 +871,6 @@ fn zone_suffix(offset: i64) -> String {
     let hours = offset / 3600;
     let mins = (offset % 3600) / 60;
     format!("{sign}{hours:02}:{mins:02}")
-}
-
-fn trim_nanos(nanos: u32) -> String {
-    let mut text = format!("{nanos:09}");
-    while text.ends_with('0') {
-        text.pop();
-    }
-    text
 }
 
 /// Howard Hinnant's `civil_from_days`, then the time of day.
@@ -818,11 +1016,26 @@ mod tests {
                 name: "wide".to_owned(),
                 value: Value::Big("18446744073709551616".to_owned()),
             },
+            Field {
+                name: "low".to_owned(),
+                value: Value::Int(i64::MIN),
+            },
+            Field {
+                name: "high".to_owned(),
+                value: Value::Int(i64::MAX),
+            },
+            Field {
+                name: "a\"b".to_owned(),
+                value: Value::Float(1e21),
+            },
         ];
         let message = "a\"b\\c\n\u{7f}<café>";
         let text = json_line(message, &fields, 0, None);
         assert!(
-            text.contains(r#""on":true,"off":false,"missing":null,"wide":18446744073709551616"#),
+            text.contains(concat!(
+                r#""on":true,"off":false,"missing":null,"wide":18446744073709551616,"#,
+                r#""low":-9223372036854775808,"high":9223372036854775807,"a\"b":1e+21,"#,
+            )),
             "{text}"
         );
         assert!(
@@ -831,52 +1044,227 @@ mod tests {
         );
     }
 
+    /// Expected text from Go zerolog v1.35.1 `Str`.
     #[test]
-    fn times_match_rfc3339_nano() {
-        assert_eq!(format_utc_nano(0), "1970-01-01T00:00:00Z");
-        assert_eq!(
-            format_utc_nano(1_700_000_000_123_456_789),
-            "2023-11-14T22:13:20.123456789Z"
-        );
-        assert_eq!(
-            format_utc_nano(1_700_000_000_100_000_000),
-            "2023-11-14T22:13:20.1Z"
-        );
+    fn strings_match_zerolog_append_string() {
+        let ascii: String = (0u8..0x80).map(char::from).collect();
+        let cases = [
+            ("", r#""""#),
+            ("hello", r#""hello""#),
+            ("a\"b", r#""a\"b""#),
+            ("a\\b", r#""a\\b""#),
+            ("\u{8}\u{c}\n\r\t", r#""\b\f\n\r\t""#),
+            ("\u{0}\u{1}\u{1f}", r#""\u0000\u0001\u001f""#),
+            ("\u{7f}", r#""\u007f""#),
+            ("café 日本 😀", r#""café 日本 😀""#),
+            (
+                "0123456789abcdef0123456789abcdef\"",
+                r#""0123456789abcdef0123456789abcdef\"""#,
+            ),
+            (
+                "\"0123456789abcdef0123456789abcdef",
+                r#""\"0123456789abcdef0123456789abcdef""#,
+            ),
+            (
+                ascii.as_str(),
+                concat!(
+                    r#""\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r"#,
+                    r#"\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018"#,
+                    r##"\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./"##,
+                    r#"0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"#,
+                    r#"abcdefghijklmnopqrstuvwxyz{|}~\u007f""#,
+                ),
+            ),
+        ];
+        for (text, expect) in cases {
+            let mut buf = Vec::new();
+            append_json_str(&mut buf, text);
+            assert_eq!(String::from_utf8(buf).expect("utf-8"), expect, "{text:?}");
+        }
     }
 
+    /// Expected text from Go `time.Time.Format(time.RFC3339Nano)` in UTC.
+    /// One [`Stamp`] runs through all of them, so a second is reused and
+    /// replaced in both directions.
     #[test]
+    fn times_match_rfc3339_nano() {
+        let cases = [
+            (0, "1970-01-01T00:00:00Z"),
+            (1, "1970-01-01T00:00:00.000000001Z"),
+            (-1, "1969-12-31T23:59:59.999999999Z"),
+            (-1_000_000_000, "1969-12-31T23:59:59Z"),
+            (1_700_000_000_123_456_789, "2023-11-14T22:13:20.123456789Z"),
+            (1_700_000_000_100_000_000, "2023-11-14T22:13:20.1Z"),
+            (1_700_000_000_120_000_000, "2023-11-14T22:13:20.12Z"),
+            (1_700_000_001_000_000_000, "2023-11-14T22:13:21Z"),
+            (951_782_400_000_000_000, "2000-02-29T00:00:00Z"),
+            (i64::MAX, "2262-04-11T23:47:16.854775807Z"),
+            (i64::MIN, "1677-09-21T00:12:43.145224192Z"),
+        ];
+        let mut stamp = Stamp::new();
+        for (unix_ns, expect) in cases {
+            let mut buf = Vec::new();
+            stamp.append(&mut buf, unix_ns);
+            assert_eq!(String::from_utf8(buf).expect("utf-8"), expect, "{unix_ns}");
+        }
+    }
+
+    /// Expected text from Go zerolog v1.35.1 `Float64` (E06-D012).
+    #[test]
+    #[allow(clippy::excessive_precision)]
     fn floats_match_zerolog_append_float() {
         let cases = [
             (0.0, "0"),
             (-0.0, "-0"),
             (1.0, "1"),
+            (-1.0, "-1"),
+            (0.5, "0.5"),
             (1.5, "1.5"),
-            (1e-6, "0.000001"),
-            (1e-7, "1e-7"),
-            (9.9e-7, "9.9e-7"),
-            (1e20, "100000000000000000000"),
-            (1e21, "1e+21"),
-            (1.23e21, "1.23e+21"),
-            (1e-10, "1e-10"),
-            (std::f64::consts::PI, "3.141592653589793"),
-            (2.5e-7, "2.5e-7"),
+            (-2.25, "-2.25"),
+            (100.0, "100"),
+            (1234.5678, "1234.5678"),
             (123_456_789.0, "123456789"),
             (0.1, "0.1"),
+            (0.2, "0.2"),
             (0.3, "0.3"),
-            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
-            (f64::MAX, "1.7976931348623157e+308"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (-2.0 / 3.0, "-0.6666666666666666"),
+            (std::f64::consts::PI, "3.141592653589793"),
+            (std::f64::consts::E, "2.718281828459045"),
+            (1.0 + f64::EPSILON, "1.0000000000000002"),
+            (f64::EPSILON, "2.220446049250313e-16"),
+            (4.35, "4.35"),
+            (2f64.powi(53), "9007199254740992"),
+            (0.000123, "0.000123"),
+            (0.001, "0.001"),
+            (0.0001, "0.0001"),
+            (1e-5, "0.00001"),
+            (1.234e-5, "0.00001234"),
+            (
+                f64::from_bits(1e-5f64.to_bits() - 1),
+                "0.000009999999999999999",
+            ),
+            (1.5e-6, "0.0000015"),
+            (1e-6, "0.000001"),
+            (-1e-6, "-0.000001"),
+            (
+                f64::from_bits(1e-6f64.to_bits() + 1),
+                "0.0000010000000000000002",
+            ),
+            (
+                f64::from_bits(1e-6f64.to_bits() - 1),
+                "9.999999999999997e-7",
+            ),
+            (9.9e-7, "9.9e-7"),
             (5e-7, "5e-7"),
+            (2.5e-7, "2.5e-7"),
+            (1.2e-7, "1.2e-7"),
+            (1e-7, "1e-7"),
+            (-1e-7, "-1e-7"),
+            (1e-8, "1e-8"),
+            (1e-9, "1e-9"),
+            (1e-10, "1e-10"),
+            (1e-300, "1e-300"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+            (
+                f64::from_bits(f64::MIN_POSITIVE.to_bits() - 1),
+                "2.225073858507201e-308",
+            ),
+            (1e-308, "1e-308"),
+            (1e-320, "1e-320"),
+            (f64::from_bits(1), "5e-324"),
+            (-f64::from_bits(1), "-5e-324"),
+            (1e15, "1000000000000000"),
+            (1e15 + 0.3, "1000000000000000.2"),
+            (1e16, "10000000000000000"),
+            (-1e16, "-10000000000000000"),
+            (1.5e16, "15000000000000000"),
+            (12_345_678_901_234_567.0, "12345678901234568"),
+            (1e17, "100000000000000000"),
+            (2f64.powi(63), "9223372036854776000"),
+            (2f64.powi(64), "18446744073709552000"),
+            (1e20, "100000000000000000000"),
+            (
+                f64::from_bits(1e21f64.to_bits() - 1),
+                "999999999999999900000",
+            ),
+            (1e21, "1e+21"),
             (-1e21, "-1e+21"),
-            (f64::NAN, "\"NaN\""),
-            (f64::INFINITY, "\"+Inf\""),
-            (f64::NEG_INFINITY, "\"-Inf\""),
+            (1.23e21, "1.23e+21"),
+            (1e22, "1e+22"),
+            (1e100, "1e+100"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (-f64::MAX, "-1.7976931348623157e+308"),
+            (f64::NAN, r#""NaN""#),
+            (-f64::NAN, r#""NaN""#),
+            (f64::INFINITY, r#""+Inf""#),
+            (f64::NEG_INFINITY, r#""-Inf""#),
+            // Exact binary values on a decimal tie: Go rounds them half to even.
+            (1_245_315_403_051_669.25, "1245315403051669.2"),
+            (135_836_305_628_408.625, "135836305628408.62"),
         ];
         for (value, expect) in cases {
             let mut buf = Vec::new();
             append_float(&mut buf, value);
-            let text = String::from_utf8(buf).expect("utf-8");
-            assert_eq!(text, expect, "{value:?}");
+            assert_eq!(String::from_utf8(buf).expect("utf-8"), expect, "{value:?}");
         }
+    }
+
+    #[test]
+    fn a_thread_keeps_its_line_buffer_unless_a_line_outgrew_the_cap() {
+        let logger = logger(Style::Json, true);
+        let capacity = || SCRATCH.with(|cell| cell.borrow().line.capacity());
+        let mut sink = Vec::new();
+        logger.write(Level::Info, "hello", &[], 0, &mut sink);
+        let kept = capacity();
+        assert!((LINE_CAPACITY..=LINE_KEEP).contains(&kept), "{kept}");
+        logger.write(Level::Info, "hello", &[], 0, &mut sink);
+        assert_eq!(capacity(), kept);
+
+        sink.clear();
+        let long = "x".repeat(LINE_KEEP);
+        logger.write(Level::Info, &long, &[], 0, &mut sink);
+        assert!(sink.ends_with(format!("\"message\":\"{long}\"}}\n").as_bytes()));
+        assert_eq!(capacity(), 0);
+
+        sink.clear();
+        logger.write(Level::Info, "hello", &[], 0, &mut sink);
+        assert_eq!(sink, json_line("hello", &[], 0, None).as_bytes());
+    }
+
+    #[test]
+    fn a_line_logged_from_inside_a_sink_gets_its_own_buffer() {
+        struct Nested<'a> {
+            logger: &'a Logger,
+            inner: Vec<u8>,
+            outer: Vec<u8>,
+        }
+
+        impl Write for Nested<'_> {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                if self.inner.is_empty() {
+                    self.logger
+                        .write(Level::Info, "inner", &[], 0, &mut self.inner);
+                }
+                self.outer.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let logger = logger(Style::Json, true);
+        let mut sink = Nested {
+            logger: &logger,
+            inner: Vec::new(),
+            outer: Vec::new(),
+        };
+        logger.write(Level::Info, "outer", &[], 0, &mut sink);
+        assert_eq!(sink.outer, json_line("outer", &[], 0, None).as_bytes());
+        assert_eq!(sink.inner, json_line("inner", &[], 0, None).as_bytes());
     }
 
     #[test]
