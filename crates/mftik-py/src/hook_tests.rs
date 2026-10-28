@@ -5,7 +5,10 @@
 //! are E04-04. The trait call is the delivery those paths make after the book
 //! is synced or a cancel is refused locally.
 
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, RawFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::thread;
 use std::time::Instant;
 
 use mftik_proto::wire::mftiko::common::v1 as common;
@@ -429,6 +432,79 @@ obj = Fast()
         measured.0, measured.1, measured.2
     );
     assert!(measured.0 > 0 && measured.1 > 0 && measured.2 > 0);
+}
+
+/// `ctx.log.info` timed in Python, with fd 2 on a pipe that a Rust thread
+/// drains. No threshold (E06-D014, E06-D015).
+#[test]
+fn ctx_log_info_cost() {
+    with_mftik(|py| {
+        let (obj, seen) = load(
+            py,
+            r#"
+import time
+
+class Logs(Strategy):
+    def on_init(self, ctx):
+        for _ in range(100):
+            ctx.log.info("hello", k=1, name="abc")
+        started = time.perf_counter_ns()
+        for _ in range(10000):
+            ctx.log.info("hello", k=1, name="abc")
+        seen.append(str((time.perf_counter_ns() - started) // 10000))
+
+seen = []
+obj = Logs()
+"#,
+        );
+        let (mut reader, writer) = io::pipe().expect("pipe");
+        let drain = thread::spawn(move || {
+            let mut text = String::new();
+            reader.read_to_string(&mut text).expect("read stderr");
+            text
+        });
+        let stderr = Fd2::point_at(py, writer.as_raw_fd());
+        drop(writer);
+        mftik_rt::in_one_hook(PyStrategy::new(obj), |strategy, ctx| {
+            strategy.on_init(ctx).unwrap();
+        })
+        .unwrap();
+        drop(stderr);
+        let text = drain.join().expect("drain");
+        let logged = text
+            .lines()
+            .filter(|line| line.starts_with(r#"{"level":"info","time":""#))
+            .filter(|line| line.ends_with(r#","k":1,"name":"abc","message":"hello"}"#))
+            .count();
+        assert_eq!(logged, 10100);
+        eprintln!("ctx.log.info ns/call={}", lines(py, &seen)[0]);
+    });
+}
+
+/// Fd 2 points at another descriptor, through Python's `os`, until this
+/// drops.
+struct Fd2 {
+    saved: Py<PyAny>,
+}
+
+impl Fd2 {
+    fn point_at(py: Python<'_>, target: RawFd) -> Self {
+        let os = py.import("os").unwrap();
+        let saved = os.call_method1("dup", (2,)).unwrap().unbind();
+        os.call_method1("dup2", (target, 2)).unwrap();
+        Self { saved }
+    }
+}
+
+impl Drop for Fd2 {
+    fn drop(&mut self) {
+        Python::attach(|py| {
+            if let Ok(os) = py.import("os") {
+                let _ = os.call_method1("dup2", (self.saved.bind(py), 2));
+                let _ = os.call_method1("close", (self.saved.bind(py),));
+            }
+        });
+    }
 }
 
 fn deliver_one(strategy: &mut PyStrategy, ctx: &mftik_rt::Context<PyStrategy>) {
