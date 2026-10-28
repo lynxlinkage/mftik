@@ -1,7 +1,8 @@
-//! `mftik.Log` and `mftik.log` (E06-D005, E06-D006, E06-D007).
+//! `mftik.Log` and `mftik.log` (E06-D005–E06-D007, E06-D017).
 //!
-//! Field values are converted while the GIL is held. Rendering and the
-//! stderr write run with the GIL released.
+//! A call below the configured level returns first: it checks nothing and
+//! keeps the GIL. Otherwise field values are converted while the GIL is held,
+//! and rendering and the stderr write run with the GIL released.
 
 use mftik_rt::log::{Field, Level, Value};
 use pyo3::PyTypeInfo;
@@ -78,6 +79,9 @@ fn emit(
     message: &Bound<'_, PyAny>,
     fields: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
+    if !mftik_rt::log::enabled(level) {
+        return Ok(());
+    }
     let message = require_message(message)?;
     let fields = convert_fields(fields)?;
     let session = session_id.map(str::to_owned);
@@ -249,9 +253,36 @@ mod tests {
             let fields = PyDict::new(py);
             fields.set_item("k", number).unwrap();
             let err = log
-                .debug(py, &message(py, "hello"), Some(&fields))
+                .warn(py, &message(py, "hello"), Some(&fields))
                 .unwrap_err();
             assert!(err.to_string().contains("log field k must be"), "{err}");
+        });
+    }
+
+    /// E06-D017: `debug` is below the default level, so it returns before it
+    /// looks at the message or the fields. At `info` the same fields raise.
+    #[test]
+    fn a_call_below_the_level_checks_nothing() {
+        let _guard = crate::lock_python_tests();
+        Python::initialize();
+        Python::attach(|py| {
+            assert!(!mftik_rt::log::enabled(Level::Debug));
+            assert!(mftik_rt::log::enabled(Level::Info));
+            let not_a_message = py.eval(c"1", None, None).unwrap();
+            let fields = PyDict::new(py);
+            fields.set_item("k", PyList::empty(py)).unwrap();
+            for session_id in [None, Some("s1".to_owned())] {
+                let log = PyLog { session_id };
+                let (result, bytes) = capture(|| log.debug(py, &not_a_message, Some(&fields)));
+                result.unwrap();
+                assert!(bytes.is_empty(), "{}", String::from_utf8_lossy(&bytes));
+
+                let err = log
+                    .info(py, &message(py, "hello"), Some(&fields))
+                    .unwrap_err();
+                assert!(err.is_instance_of::<PyTypeError>(py));
+                assert!(err.to_string().contains("log field k must be"), "{err}");
+            }
         });
     }
 

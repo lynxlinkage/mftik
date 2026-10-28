@@ -14,6 +14,7 @@ use std::time::Instant;
 use mftik_proto::wire::mftiko::common::v1 as common;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::td::v1 as td;
+use mftik_rt::log::{Level, capture};
 use mftik_rt::{
     AggTrade, AggTradeHandler, BalanceEvent, BalanceHandler, BestQuote, BestQuoteHandler,
     BookHandler, BookUpdate, FillEvent, FillHandler, FundingRate, FundingRateHandler, Greeks,
@@ -434,10 +435,46 @@ obj = Fast()
     assert!(measured.0 > 0 && measured.1 > 0 && measured.2 > 0);
 }
 
-/// `ctx.log.info` timed in Python, with fd 2 on a pipe that a Rust thread
-/// drains. No threshold (E06-D014, E06-D015).
+/// E06-D017: a `ctx.log` call below the level returns before it looks at its
+/// arguments. At `info` the same field is a `TypeError`.
 #[test]
-fn ctx_log_info_cost() {
+fn ctx_log_below_the_level_checks_nothing() {
+    with_mftik(|py| {
+        assert!(!mftik_rt::log::enabled(Level::Debug));
+        let (obj, seen) = load(
+            py,
+            r#"
+class Logs(Strategy):
+    def on_init(self, ctx):
+        seen.append(repr(ctx.log.debug(1, k=[1])))
+        try:
+            ctx.log.info("hello", k=[1])
+        except TypeError as exc:
+            seen.append(str(exc))
+
+seen = []
+obj = Logs()
+"#,
+        );
+        let ((), bytes) = capture(|| {
+            mftik_rt::in_one_hook(PyStrategy::new(obj), |strategy, ctx| {
+                strategy.on_init(ctx).unwrap();
+            })
+            .unwrap();
+        });
+        assert!(bytes.is_empty(), "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            lines(py, &seen),
+            ["None", "log field k must be str, int, float, bool, or None"]
+        );
+    });
+}
+
+/// `ctx.log.info`, and `ctx.log.debug` below the level, timed in Python with
+/// fd 2 on a pipe that a Rust thread drains. No threshold (E06-D014,
+/// E06-D015, E06-D017).
+#[test]
+fn ctx_log_cost() {
     with_mftik(|py| {
         let (obj, seen) = load(
             py,
@@ -448,9 +485,14 @@ class Logs(Strategy):
     def on_init(self, ctx):
         for _ in range(100):
             ctx.log.info("hello", k=1, name="abc")
+            ctx.log.debug("hello", k=1, name="abc")
         started = time.perf_counter_ns()
         for _ in range(10000):
             ctx.log.info("hello", k=1, name="abc")
+        seen.append(str((time.perf_counter_ns() - started) // 10000))
+        started = time.perf_counter_ns()
+        for _ in range(10000):
+            ctx.log.debug("hello", k=1, name="abc")
         seen.append(str((time.perf_counter_ns() - started) // 10000))
 
 seen = []
@@ -477,7 +519,14 @@ obj = Logs()
             .filter(|line| line.ends_with(r#","k":1,"name":"abc","message":"hello"}"#))
             .count();
         assert_eq!(logged, 10100);
-        eprintln!("ctx.log.info ns/call={}", lines(py, &seen)[0]);
+        let debug = text
+            .lines()
+            .filter(|line| line.starts_with(r#"{"level":"debug","#))
+            .count();
+        assert_eq!(debug, 0);
+        let seen = lines(py, &seen);
+        eprintln!("ctx.log.info ns/call={}", seen[0]);
+        eprintln!("ctx.log.debug below the level ns/call={}", seen[1]);
     });
 }
 

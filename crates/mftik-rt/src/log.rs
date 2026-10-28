@@ -1,4 +1,4 @@
-//! Stderr log lines (E06-D004–E06-D016).
+//! Stderr log lines (E06-D004–E06-D017).
 //!
 //! One JSON object per line, or zerolog's console layout. The keys and their
 //! order match Go zerolog, with `sdk_version` added. This module does not use
@@ -196,6 +196,12 @@ pub(crate) fn note(line: &str) {
         &[],
         session.as_deref().filter(|id| !id.is_empty()),
     );
+}
+
+/// Whether [`emit`] writes a line at `level`. A caller checks this before it
+/// builds the fields (E06-D017).
+pub fn enabled(level: Level) -> bool {
+    allows(config().min, level as i8)
 }
 
 /// One line on stderr, or into the buffer installed by [`capture`].
