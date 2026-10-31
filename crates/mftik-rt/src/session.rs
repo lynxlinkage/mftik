@@ -347,9 +347,11 @@ impl<S: Strategy> Driver<S> {
     /// the session without Reports; it is not a reason to end it.
     fn start_report(&mut self, disp: Dispatcher) {
         let plane = Arc::clone(&self.plane);
+        let logged = Arc::clone(&self.plane);
         let source = report::Source {
             stats: Box::new(move || disp.stats()),
             bindings_applied: Box::new(move || plane.wiring.bindings_applied()),
+            event_log: Box::new(move || logged.event_log_stat()),
         };
         match Reporter::spawn(Arc::clone(&self.out), source) {
             Ok(reporter) => {

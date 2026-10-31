@@ -431,3 +431,16 @@ Yi Te 於 #465 確認，修改 E04-D008、E04-D063 的 Linux wheel。起因是 2
 `.github/actions/wheel` 在 Linux 用 setup-python 的 3.11 從 PyPI 裝 maturin 1.15.0，Rust 與其他 job 一樣由 `dtolnay/rust-toolchain` 裝（版本照 `rust-toolchain.toml`），在 runner 上直接 build；之前先檢查 `getconf GNU_LIBC_VERSION` 是 `glibc 2.35`，標籤就是這台 runner 的 glibc。maturin 依 manylinux_2_35 的 policy 檢查 extension：要用比 2.35 新的 glibc 符號，或連到 policy 以外的函式庫，就不出 wheel。macOS 照舊用 maturin-action（macOS 上它本來就不起容器）。兩個 workflow 的 matrix 拿掉 `target` 與 `manylinux`，release 的 artifact 改名為 `wheel-manylinux_2_35_x86_64`。`scripts/release-check` 的 Linux 平台改為 `manylinux_2_35_x86_64`，wheel 檔名的平台標籤必須正好是它。PyPI 這邊：warehouse 的 `_linux_platform_re` 收任何 `manylinux_<major>_<minor>_x86_64`，PyPI 上也已有這個標籤的 wheel（例如 `rerun_sdk-0.2.0-cp38-abi3-manylinux_2_35_x86_64.whl`）；本票沒有上傳任何東西。pip 的 `--platform` 對 PEP 600 標籤是逐字比對，所以 packer 下載 SDK wheel 時列 `manylinux_2_35_x86_64` 與 `manylinux_2_28_x86_64`（1.1.0 以前的版本）；依賴層照 E04-D072，仍是 manylinux_2_28。`mftik-rt` 的 `build.rs` 保留 `safe.directory` 與 `GITHUB_SHA` 的後備，註解不再說 wheel 在容器裡建。
 
 E06-D021 的根因：測試先 bind `127.0.0.1:0` 取得 port、關掉，再把 port 交給 nats-server，然後重試 TCP connect，連上就當作 nats-server 已經 listen。libtest 在多條執行緒上同時跑測試；另一條執行緒在 bind 與 close 之間 `Command::spawn` 出的子行程，在 exec 之前握著那個 listening socket 的複本（close-on-exec 到 exec 才關）。測試執行緒 close 之後 socket 仍在 LISTEN，探測的 connect 由它接受，於是在 nats-server listen 之前就返回，假 SYM 的 `async_nats::connect` 接著被拒。本機把 bind 到 close 與所有 `Command::spawn` 以同一把鎖序列化，sym 測試 150 次 0 失敗；不加鎖交錯跑的 150 次失敗 8 次，都是這一行。修法：nats-server 自己選 port（`-p -1`，設定檔 `listen: 127.0.0.1:-1`），`mftik_testkit::NatsServer` 從它 listen 之後印的 `Listening for client connections on 127.0.0.1:<port>` 讀出 port，之後繼續讀 stderr，pipe 不會塞住。`start_nats`、`tests/sym.rs`、`src/md/tests.rs`、`src/td/tests.rs` 都改用它，`free_port` 刪除。同一檔的 `a_reconnect_compares_revisions_at_once` 另有一個時序問題：pass 先存 row（tick 已變），才送收尾的 Revisions，所以比對呼叫序列之前改為等假 SYM 收到第四個呼叫。根因說明與連跑次數寫在 PR。
+
+## 決定（2026-10-31，E07-D001–E07-D006）
+
+Yi Te 於 #468 核可。策略事件紀錄，跟 BullionBear/mftiko E20（BullionBear/mftiko#499，squash `5fbfd14`，PROTOCOL §12 v1.91，E20-D001–E20-D010）。
+
+- E07-D001 寫入核心用 Rust 實作於 `mftik-rt`（writer thread + ring，不碰 GIL），結構對應 Go SDK。
+- E07-D002 不另寫 Python dump，沿用 `mftiko-eventlog dump`；mftik 檔案必須逐 byte 符合 PROTOCOL §12。
+- E07-D003 檔頭 `sdk_version`/`sdk_commit` 寫 mftik 自己的版本與 commit。
+- E07-D004 `ctx.rand()` 回傳以 init seed 建立的 `random.Random`；`ctx.now()` 回傳 int ns（hook 開始時間），與 Go 一致。
+- E07-D005 replay 範圍對齊 Go §12.6，phase 1 不比對 log。
+- E07-D006 E07-05 完成後升 1.3.0；tag 由 Yi Te 決定，PyPI 由 Yi Te 上傳。
+
+#469（E07-01）把 proto 與 conformance 的 pin 改到 `5fbfd14`：`SessionSpec.event_log`、`InitPayload.event_log`（欄位 12）、`Report.event_log`（欄位 6，`EventLogStat` 的 `records`、`dropped`）。Init 只在 `event_log.enabled` 為真時把它記在 session 上；`Report.event_log` 只在那時有，與 Go `eventLogStat` 相同。本票還沒有 writer，不寫檔，所以開啟時是空的 `EventLogStat`（兩個計數都是 0，編碼為 `32 00`）。關閉（沒有 `event_log`，或 `enabled` 為假）時 Report 不帶這個欄位，編碼與舊 pin 逐 byte 相同；`report/tests.rs` 以舊 pin 下產生的 bytes 檢查。`keep_mb` 留給 E07-02 的 writer。

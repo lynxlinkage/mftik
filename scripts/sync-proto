@@ -6,7 +6,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo_url="https://github.com/BullionBear/mftiko.git"
-commit="a9414bcc74a1dc3df6042d267cc094486834c849"
+commit="5fbfd14ae61a5131326df67ce14a0a79f59c7fd1"
 src_path="contract/proto/mftiko"
 dest="${root}/contract/proto/mftiko"
 source_file="${root}/contract/proto/SOURCE"

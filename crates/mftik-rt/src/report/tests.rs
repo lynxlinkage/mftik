@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use mftik_core::dispatch::{QueueStat as Queue, Stats};
 use mftik_proto::wire::mftiko::common::v1::Version;
-use mftik_proto::wire::mftiko::stsctl::v1::Report;
+use mftik_proto::wire::mftiko::stsctl::v1::{EventLogStat, Report};
 use mftik_proto::wire::mftiko::worker::v1::{WorkerUp, worker_up};
 use prost::Message;
 
@@ -48,7 +48,7 @@ fn the_periods() {
 fn the_first_read_is_sent_with_both_queues() {
     let mut s = Sampler::default();
     let report = s
-        .sample(stats(4, 9, 1), v(1), Instant::now())
+        .sample(stats(4, 9, 1), v(1), None, Instant::now())
         .expect("first");
     assert_eq!(report.bindings_applied, v(1));
     assert_eq!(report.hook, "");
@@ -73,18 +73,18 @@ fn the_first_read_is_sent_with_both_queues() {
 fn an_unchanged_read_waits_until_five_seconds_have_passed() {
     let mut s = Sampler::default();
     let t0 = Instant::now();
-    assert!(s.sample(stats(0, 0, 0), v(1), t0).is_some());
+    assert!(s.sample(stats(0, 0, 0), v(1), None, t0).is_some());
     for ms in [1000, 2000, 4999] {
         let at = t0 + Duration::from_millis(ms);
-        assert!(s.sample(stats(0, 0, 0), v(1), at).is_none(), "{ms}");
+        assert!(s.sample(stats(0, 0, 0), v(1), None, at).is_none(), "{ms}");
     }
     let at = t0 + REPORT_EVERY;
     assert_eq!(s.due_at(), Some(at));
-    assert!(s.sample(stats(0, 0, 0), v(1), at).is_some());
+    assert!(s.sample(stats(0, 0, 0), v(1), None, at).is_some());
     assert_eq!(s.due_at(), Some(at + REPORT_EVERY));
     // The five seconds count from the last Report sent.
     assert!(
-        s.sample(stats(0, 0, 0), v(1), at + Duration::from_secs(4))
+        s.sample(stats(0, 0, 0), v(1), None, at + Duration::from_secs(4))
             .is_none()
     );
 }
@@ -93,16 +93,61 @@ fn an_unchanged_read_waits_until_five_seconds_have_passed() {
 fn any_change_is_sent_at_once() {
     let mut s = Sampler::default();
     let t0 = Instant::now();
-    assert!(s.sample(stats(0, 0, 0), v(1), t0).is_some());
+    assert!(s.sample(stats(0, 0, 0), v(1), None, t0).is_some());
     let at = t0 + Duration::from_millis(1);
-    let r = s.sample(stats(0, 0, 0), v(2), at).expect("bindings");
+    let r = s.sample(stats(0, 0, 0), v(2), None, at).expect("bindings");
     assert_eq!(r.bindings_applied, v(2));
-    let r = s.sample(stats(0, 0, 1), v(2), at).expect("hook_slow");
+    let r = s.sample(stats(0, 0, 1), v(2), None, at).expect("hook_slow");
     assert_eq!(r.hook_slow, 1);
     let mut blocked = stats(0, 0, 1);
     blocked.hook_blocked_ms = 250;
-    let r = s.sample(blocked, v(2), at).expect("hook_blocked_ms");
+    let r = s.sample(blocked, v(2), None, at).expect("hook_blocked_ms");
     assert_eq!(r.hook_blocked_ms, 250);
+    let on = Some(EventLogStat::default());
+    let r = s.sample(blocked, v(2), on, at).expect("event_log on");
+    assert_eq!(r.event_log, on);
+    let counted = Some(EventLogStat {
+        records: 1,
+        dropped: 0,
+    });
+    let r = s
+        .sample(blocked, v(2), counted, at)
+        .expect("event_log records");
+    assert_eq!(r.event_log, counted);
+}
+
+/// The Report fields 1-5 encode to, from the pin before `event_log`
+/// (mftiko a9414bc).
+const REPORT_BEFORE_EVENT_LOG: &[u8] = &[
+    0x0a, 0x04, 0x08, 0x01, 0x10, 0x01, // bindings_applied {epoch 1, seq 1}
+    0x18, 0x02, // hook_blocked_ms 2
+    0x20, 0x01, // hook_slow 1
+    0x2a, 0x08, 0x0a, 0x02, b't', b'd', 0x10, 0x02, 0x20, 0x01, // td: depth 2, max_age 1
+    0x2a, 0x0a, 0x0a, 0x02, b'm', b'd', 0x10, 0x03, 0x18, 0x07, 0x20, 0x01, // md: 3, 7, 1
+];
+
+#[test]
+fn with_the_event_log_off_a_report_is_the_same_bytes() {
+    let mut read = stats(1, 1, 1);
+    read.hook_blocked_ms = 2;
+    let report = Sampler::default()
+        .sample(read, v(1), None, Instant::now())
+        .expect("first");
+    assert_eq!(report.event_log, None);
+    assert_eq!(report.encode_to_vec(), REPORT_BEFORE_EVENT_LOG);
+}
+
+#[test]
+fn with_the_event_log_on_a_report_adds_an_empty_event_log() {
+    let mut read = stats(1, 1, 1);
+    read.hook_blocked_ms = 2;
+    let report = Sampler::default()
+        .sample(read, v(1), Some(EventLogStat::default()), Instant::now())
+        .expect("first");
+    assert_eq!(report.event_log, Some(EventLogStat::default()));
+    let mut want = REPORT_BEFORE_EVENT_LOG.to_vec();
+    want.extend_from_slice(&[0x32, 0x00]); // event_log {}
+    assert_eq!(report.encode_to_vec(), want);
 }
 
 #[test]
@@ -111,25 +156,27 @@ fn max_age_is_the_largest_since_the_last_report() {
     let t0 = Instant::now();
     let sec = |n| t0 + Duration::from_secs(n);
     let ages = |r: &Report| (r.queues[0].max_age_ms, r.queues[1].max_age_ms);
-    let r = s.sample(stats(40, 5, 0), v(1), t0).expect("first");
+    let r = s.sample(stats(40, 5, 0), v(1), None, t0).expect("first");
     assert_eq!(ages(&r), (40, 5));
     // The same ages again: nothing changed, nothing sent.
-    assert!(s.sample(stats(40, 5, 0), v(1), sec(1)).is_none());
+    assert!(s.sample(stats(40, 5, 0), v(1), None, sec(1)).is_none());
     // Stats clears max_age on each read. The ages read at 1 s belong to the
     // next Report, so a quiet read keeps them.
-    assert!(s.sample(stats(0, 0, 0), v(1), sec(2)).is_none());
+    assert!(s.sample(stats(0, 0, 0), v(1), None, sec(2)).is_none());
     let r = s
-        .sample(stats(0, 0, 0), v(1), sec(5))
+        .sample(stats(0, 0, 0), v(1), None, sec(5))
         .expect("five seconds");
     assert_eq!(ages(&r), (40, 5));
     // Sent: the next period starts at zero, which is a change.
     let r = s
-        .sample(stats(0, 0, 0), v(1), sec(6))
+        .sample(stats(0, 0, 0), v(1), None, sec(6))
         .expect("back to zero");
     assert_eq!(ages(&r), (0, 0));
     // The larger of the reads between two Reports.
-    assert!(s.sample(stats(0, 0, 0), v(1), sec(7)).is_none());
-    let r = s.sample(stats(10, 20, 0), v(1), sec(8)).expect("aged");
+    assert!(s.sample(stats(0, 0, 0), v(1), None, sec(7)).is_none());
+    let r = s
+        .sample(stats(10, 20, 0), v(1), None, sec(8))
+        .expect("aged");
     assert_eq!(ages(&r), (10, 20));
 }
 
@@ -170,6 +217,7 @@ fn the_thread_sends_at_once_wakes_on_bindings_and_stops_at_close() {
         Source {
             stats: Box::new(|| stats(0, 0, 0)),
             bindings_applied: Box::new(move || v(read.load(Ordering::SeqCst))),
+            event_log: Box::new(|| None),
         },
     )
     .expect("spawn");
