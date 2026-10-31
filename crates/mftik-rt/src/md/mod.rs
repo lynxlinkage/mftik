@@ -37,7 +37,8 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use mftik_core::book::{Level, OrderBook};
 use mftik_core::bookpath::{self, Snapshot, SnapshotReply, TimerToken};
-use mftik_core::dispatch::Dispatcher;
+use mftik_core::dispatch::{Dispatcher, Input};
+use mftik_core::eventlog::Kind;
 use mftik_core::mdpath::{self, Apply, Delivery, Reply, Request, RequestError, SubId, TapeQuery};
 use mftik_core::symbol::Info;
 use mftik_proto::wire::mftiko::common::v1::Version;
@@ -400,20 +401,29 @@ impl Md {
         Ok(())
     }
 
+    /// Each arm is a new timer, numbered in the event log's sequence when it
+    /// is armed, as Go's `After` makes one per call (PROTOCOL §12.5). An arm
+    /// of the same key replaces the last one, which then never fires.
     fn arm_book_timer(&self, token: TimerToken, deadline_ns: i64) {
         let me = self.me.clone();
         let key = TimerKey::Book {
             uid: token.uid,
             kind: token.kind,
         };
+        let number = self.disp.number_timer();
         self.timers.arm(key, deadline_ns, move || {
             let Some(md) = me.upgrade() else {
                 return;
             };
             md.fresh_now();
             let on_td = me.clone();
+            let input = Input {
+                kind: Kind::TIMER,
+                r#ref: number,
+                ..Input::default()
+            };
             // A stopping session drops it, as Go's `Timer.After` then does.
-            let _ = md.disp.push_td(move || {
+            let _ = md.disp.push_in(input, move || {
                 if let Some(md) = on_td.upgrade() {
                     let effects = md.with_books(|books, now| books.on_timer(now, token));
                     md.perform_book(effects);

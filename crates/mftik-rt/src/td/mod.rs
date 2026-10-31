@@ -25,6 +25,11 @@
 //!   and `FAILED` (§9.2.5): the readers stop, nothing that arrives later is
 //!   pushed, and the drain still feeds what the TD buffer already holds
 //!   (E03-D072).
+//! - With the event log on, a reader keeps each `td.evt`'s bytes and the
+//!   time it came as its `td_event` input. tdpath hands the input back with
+//!   the event's hook, held or live, and the buffer entry that runs that hook
+//!   writes it first with `record_input` (§12.4, E07-D007). An event that is
+//!   dropped, or runs no strategy hook, is not written.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -35,7 +40,8 @@ use std::time::Duration;
 use async_nats::{Client, StatusCode, Subscriber};
 use futures_util::StreamExt;
 use mftik_core::cloidgen;
-use mftik_core::dispatch::{Dispatcher, PushError};
+use mftik_core::dispatch::{self, Dispatcher, PushError};
+use mftik_core::eventlog::Kind;
 use mftik_core::tdpath::{
     self, Bound, ClientOrderIdError, ClientOrderIds, Effect, Hook, ReconOutcome, RoundOutcome,
     RoundTicket,
@@ -119,8 +125,8 @@ struct State {
     path: tdpath::Path,
     /// Inputs not fed yet, in arrival order.
     deferred: VecDeque<Input>,
-    /// Hooks tdpath returned that have not run.
-    chain: VecDeque<Hook>,
+    /// Hooks tdpath returned that have not run, with their event log inputs.
+    chain: VecDeque<(Hook, Option<dispatch::Input>)>,
     /// A `resume` entry is on the TD buffer.
     queued: bool,
     #[cfg(test)]
@@ -131,6 +137,8 @@ enum Input {
     Event {
         api_id: i64,
         event: td::AccountEvent,
+        /// The `td_event` input, with the event log on.
+        logged: Option<dispatch::Input>,
     },
     Order {
         ticket: RoundTicket,
@@ -427,7 +435,10 @@ impl Inner {
                 self.perform(&mut state, effects);
             }
         };
-        if let Some(hook) = hook {
+        if let Some((hook, logged)) = hook {
+            if let Some(logged) = &logged {
+                self.disp.record_input(logged);
+            }
             (self.deliver)(hook);
             let mut state = self.lock();
             let next = state.path.end_hook();
@@ -460,7 +471,10 @@ impl Inner {
     fn perform(self: &Arc<Self>, state: &mut State, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::Hook(hook) => state.chain.push_back(*hook),
+                Effect::Hook(hook) => {
+                    let logged = state.path.take_input();
+                    state.chain.push_back((*hook, logged));
+                }
                 // Go cancels the path's context in Close: no new sends.
                 _ if self.closing() => {}
                 Effect::SendOrder {
@@ -565,9 +579,17 @@ impl Inner {
                     msg = sub.next() => {
                         let Some(msg) = msg else { break };
                         let Some(this) = weak.upgrade() else { break };
+                        let at = this.disp.record_now();
                         match td::AccountEvent::decode(msg.payload.as_ref()) {
                             Ok(event) => {
-                                this.push(Input::Event { api_id, event });
+                                let logged = at.map(|recv_ns| dispatch::Input {
+                                    kind: Kind::TD_EVENT,
+                                    recv_ns,
+                                    r#ref: api_id as u64,
+                                    body: msg.payload,
+                                    ..dispatch::Input::default()
+                                });
+                                this.push(Input::Event { api_id, event, logged });
                             }
                             Err(err) => (this.log)(&format!("td.evt: {err}")),
                         }
@@ -586,7 +608,11 @@ impl State {
             self.fed += 1;
         }
         match input {
-            Input::Event { api_id, event } => self.path.on_account_event(api_id, event),
+            Input::Event {
+                api_id,
+                event,
+                logged,
+            } => self.path.on_account_event_in(api_id, event, logged),
             Input::Order { ticket, outcome } => self.path.on_order_round(ticket, outcome),
             Input::Recon {
                 api_id,

@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mftik_core::dispatch;
+use mftik_core::eventlog::Recorder;
 use mftik_core::mdpath::{Decoded, Hooks, ReadError};
 use mftik_core::symbol::{Category, Info, PRICE_TICK, Status, UniversalTicker};
 use mftik_proto::wire::mftiko::md::v1::{feed_event, fetch_reply, view_reply};
@@ -20,6 +21,7 @@ use mftik_testkit::NatsServer;
 use prost::Message;
 
 use super::*;
+use crate::eventlog::{Record, Scratch};
 
 const FUSE: Duration = Duration::from_secs(10);
 const UID: u32 = 7;
@@ -92,6 +94,7 @@ struct Opts {
     recv_window: Duration,
     ring_bytes: usize,
     hooks: Hooks,
+    rec: Option<Arc<dyn Recorder>>,
 }
 
 impl Default for Opts {
@@ -103,6 +106,7 @@ impl Default for Opts {
                 trade: true,
                 ..Hooks::default()
             },
+            rec: None,
         }
     }
 }
@@ -171,6 +175,7 @@ impl Rig {
             log: Some(Arc::new(move |line: &str| {
                 let _ = lock(&log_tx).send(Seen::Log(line.to_owned()));
             })),
+            rec: opts.rec,
             ..Default::default()
         });
         let rows = Arc::new(Rows::default());
@@ -710,6 +715,91 @@ fn the_book_waits_for_a_stored_row_and_a_failed_view_backs_off() {
     assert_eq!(lock(&asked).len(), 2);
     rig.publish(subject, delta(uid, 4, &[(10.01, 1.0)], &[], false));
     assert_eq!(rig.until(book_seq).0, (4, Some((10.01, 11.0))));
+}
+
+// ---------- the event log ----------
+
+/// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, and the
+/// envelope seq of an MD message.
+fn describe(record: &Record) -> String {
+    let mut line = format!("{} {}", record.seq, record.kind.name().unwrap_or("?"));
+    if record.r#ref != 0 {
+        line += &format!(" ref={}", record.r#ref);
+    }
+    if record.flags != 0 {
+        line += &format!(" flags={}", record.flags);
+    }
+    if matches!(record.kind, Kind::MD_FEED | Kind::MD_BOOK) {
+        let seq = u64::from_le_bytes(record.body[24..32].try_into().expect("envelope"));
+        line += &format!(" seq={seq}");
+    }
+    line
+}
+
+#[test]
+fn md_messages_and_book_timers_are_written_before_their_hooks() {
+    let log = Scratch::open();
+    let rig = Rig::new(Opts {
+        rec: Some(log.recorder()),
+        ..Opts::default()
+    });
+    rig.rows.stored(&info(UID, "BTCUSDT", 0.5));
+    let answers = script([
+        view_error("not_synced"),
+        book_reply(UID, 10, &[(100.0, 1.0)], &[(101.0, 2.0)]),
+    ]);
+    rig.respond(BOOK_VIEW, answers);
+    rig.bind(
+        1,
+        &[
+            ("orderbook_delta.Bybit_Perp_BTCUSDT", BOOK_SUBJECT),
+            ("trade.Bybit_Perp_BTCUSDT", TRADE_SUBJECT),
+        ],
+    )
+    .expect("bind");
+
+    // Delta 11 starts a buffer, whose age timer is 1, and asks md.view.
+    // not_synced arms the backoff, timer 2, and its run asks again.
+    let buffered = delta(UID, 11, &[(100.5, 3.0)], &[], false);
+    rig.publish(BOOK_SUBJECT, buffered.clone());
+    rig.wait_for("synced", || {
+        view_from_test(&rig.md, UID) == Some((100.5, 101.0))
+    });
+    let hooked = delta(UID, 12, &[], &[(101.0, 0.0), (102.0, 1.0)], false);
+    rig.publish(BOOK_SUBJECT, hooked.clone());
+    assert_eq!(rig.until(book_seq).0, (12, Some((100.5, 102.0))));
+    let traded = trade(1, wall_ns(), "t1");
+    rig.publish(TRADE_SUBJECT, traded.clone());
+    assert_eq!(rig.until(md_seq).0, 1);
+
+    // The md.view replies are reads: not written here.
+    let frames = log.close();
+    assert_eq!(
+        frames.iter().map(describe).collect::<Vec<_>>(),
+        [
+            "1 md_book seq=11",
+            "2 hook_end ref=1",
+            "3 timer ref=2",
+            "4 hook_end ref=3",
+            "5 md_book seq=12",
+            "6 hook_end ref=5",
+            "7 md_feed seq=1",
+            "8 hook_end ref=7",
+            "9 end",
+        ]
+    );
+    assert_eq!(frames[0].body, buffered);
+    assert!(frames[2].body.is_empty());
+    assert_eq!(frames[4].body, hooked);
+    assert_eq!(frames[6].body, traded);
+    // recv is when the message reached the ring or the timer fired; t is
+    // when the hook started.
+    for pair in frames[..8].chunks(2) {
+        let (input, end) = (&pair[0], &pair[1]);
+        assert!(0 < input.recv_ns && input.recv_ns <= input.t_ns);
+        assert!(input.t_ns <= end.t_ns);
+    }
+    assert!(frames[2].t_ns - frames[0].t_ns >= 900_000_000);
 }
 
 // ---------- reads ----------

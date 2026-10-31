@@ -1,7 +1,8 @@
 //! The session plane: what C4's plane calls do (Go `sdk/plane.go`).
 //!
-//! Init parses `InitPayload`, connects NATS, builds the dispatcher, opens the
-//! paths, and calls OnInit. Start applies the bindings, listens on TD, prints
+//! Init parses `InitPayload`, connects NATS, starts the event log writer
+//! when the session has it on, builds the dispatcher, opens the paths, and
+//! calls OnInit. Start applies the bindings, listens on TD, prints
 //! the gate line, calls OnStart, and asks for the first Recon. Run is the
 //! dispatcher loop. Live applies a bindings snapshot, Relay queues a
 //! Command, OnStop goes through the dispatcher once Run has started and
@@ -12,6 +13,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -21,6 +23,7 @@ use std::time::Duration;
 use mftik_core::bookpath;
 use mftik_core::c4::CallError;
 use mftik_core::dispatch::{self, Dispatcher, Timer};
+use mftik_core::eventlog::Recorder;
 use mftik_core::mdpath::{self, Data};
 use mftik_core::tdpath;
 use mftik_proto::wire::mftiko::session::v1::{AccountDecl, EventLog};
@@ -32,6 +35,7 @@ use prost::Message;
 use crate::call::CallCtx;
 use crate::clock::Clock;
 use crate::context::{Context, Error};
+use crate::eventlog::{self, Recording};
 use crate::io::Io;
 use crate::md;
 use crate::nats;
@@ -82,6 +86,8 @@ pub(crate) struct Plane<S> {
     session: OnceLock<Session>,
     disp: OnceLock<Dispatcher>,
     nats: OnceLock<async_nats::Client>,
+    /// The event log writer, while the session has the log on.
+    event_log: OnceLock<Arc<eventlog::Log>>,
     /// The context of the Init or Start call C4 started last.
     call: Mutex<Option<CallCtx>>,
     resolve_allowed: AtomicBool,
@@ -115,6 +121,7 @@ impl<S: Strategy> Plane<S> {
             session: OnceLock::new(),
             disp: OnceLock::new(),
             nats: OnceLock::new(),
+            event_log: OnceLock::new(),
             call: Mutex::new(None),
             resolve_allowed: AtomicBool::new(false),
             asked: AtomicBool::new(false),
@@ -148,12 +155,10 @@ impl<S: Strategy> Plane<S> {
     }
 
     /// `Report.event_log`: present only while the event log is on (Go
-    /// `eventLogStat`). Nothing is recorded yet, so the counts are zero.
+    /// `eventLogStat`).
     pub(crate) fn event_log_stat(&self) -> Option<EventLogStat> {
-        self.session()?
-            .event_log
-            .as_ref()
-            .map(|_| EventLogStat::default())
+        let (records, dropped) = self.event_log.get()?.stats();
+        Some(EventLogStat { records, dropped })
     }
 
     pub(crate) fn dispatcher(&self) -> Option<&Dispatcher> {
@@ -270,6 +275,7 @@ impl<S: Strategy> Plane<S> {
         self.wiring
             .open_sym(&self.io, self.clock, &self.timers, &client, Arc::new(note));
         let _ = self.nats.set(client.clone());
+        self.open_event_log(init.incarnation);
 
         let disp = self.new_dispatcher(recv_window, hook_timeout);
         let _ = self.disp.set(disp.clone());
@@ -286,6 +292,36 @@ impl<S: Strategy> Plane<S> {
         self.resolve_allowed.store(false, Ordering::SeqCst);
         hook_result(result)?;
         Ok(hook_timeout)
+    }
+
+    /// Starts the event log writer when the session has the log on (Go
+    /// `openRec`). Files go to `$MFTIKO_VOLUME_DIR/eventlog`; without a
+    /// volume directory the writer counts every frame as dropped and says so
+    /// once (§12.1). The writer is closed at the exit. One that cannot start
+    /// is a line on stderr, and the session runs without the log.
+    fn open_event_log(&self, incarnation: u32) {
+        let Some(session) = self.session.get() else {
+            return;
+        };
+        let Some(spec) = &session.event_log else {
+            return;
+        };
+        let dir = (!session.volume_dir.is_empty())
+            .then(|| Path::new(&session.volume_dir).join(eventlog::DIR));
+        let opened = eventlog::Log::open(eventlog::Config {
+            dir,
+            header: eventlog::Header::mftik(incarnation, &session.id),
+            keep_bytes: u64::from(spec.keep_mb) << 20,
+            ..eventlog::Config::default()
+        });
+        match opened {
+            Ok(log) => {
+                let log = Arc::new(log);
+                crate::exit::close_at_exit(&log);
+                let _ = self.event_log.set(log);
+            }
+            Err(err) => note(&format!("event log: {err}")),
+        }
     }
 
     /// Go's `mdpath.Open` and `bookpath.Open` (E03-06).
@@ -567,6 +603,9 @@ impl<S: Strategy> Plane<S> {
                 disarm_timers.disarm(TimerKey::Dispatch(id));
                 lock(&disarm_ids).remove(&id);
             })),
+            rec: self.event_log.get().map(|log| {
+                Arc::new(Recording::new(Arc::clone(log), self.clock)) as Arc<dyn Recorder>
+            }),
         })
     }
 
