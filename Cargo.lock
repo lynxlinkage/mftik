@@ -869,6 +869,7 @@ dependencies = [
  "proptest",
  "prost",
  "ryu",
+ "serde_json",
  "signal-hook",
  "tokio",
  "vergen-gitcl",

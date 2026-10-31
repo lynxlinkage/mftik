@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use mftik_core::eventlog::outcome;
 use mftik_core::symbol::Info;
 use mftik_core::symclient::{
     self, Client, Config, Effect, Error, Outcome, REQUEST_TIMEOUT, ResolveId, Resolving, SUBJECT,
@@ -55,6 +56,22 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 pub const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
 pub const CANCELED: &str = "context canceled";
 pub const NO_RESPONDERS: &str = "nats: no responders available for request";
+pub const NATS_TIMEOUT: &str = "nats: timeout";
+
+/// Go's `evlog.Outcome` for an error known only by its text: the flags of
+/// the frame that records it (PROTOCOL §12.4). A wrapped error ends with
+/// the text it wraps.
+pub(crate) fn outcome_of(text: &str) -> u16 {
+    if text.ends_with(NO_RESPONDERS) {
+        outcome::NO_RESPONDERS
+    } else if text.ends_with(DEADLINE_EXCEEDED) || text.ends_with(NATS_TIMEOUT) {
+        outcome::TIMEOUT
+    } else if text.ends_with(CANCELED) {
+        outcome::CANCELED
+    } else {
+        outcome::FAILED
+    }
+}
 
 /// How long a subscribe waits for its flush, Go's `FlushTimeout`.
 pub const SUBSCRIBE_FLUSH: Duration = REQUEST_TIMEOUT;
@@ -350,7 +367,7 @@ async fn subscribe(
     // A round trip, not a socket flush (E03-D076).
     match crate::nats::barrier(nats, SUBSCRIBE_FLUSH).await {
         Ok(()) => Ok(sub),
-        Err(err) if err == "timeout" => Err("nats: timeout".to_owned()),
+        Err(err) if err == "timeout" => Err(NATS_TIMEOUT.to_owned()),
         Err(err) => Err(err),
     }
 }

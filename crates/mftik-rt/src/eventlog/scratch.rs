@@ -36,6 +36,11 @@ impl Scratch {
         Arc::new(Recording::new(Arc::clone(&self.log), self.clock))
     }
 
+    /// The writer itself, for a plane that makes its recorder from it.
+    pub(crate) fn log(&self) -> Arc<Log> {
+        Arc::clone(&self.log)
+    }
+
     /// Closes the log and reads its frames back, `end` last.
     pub(crate) fn close(&self) -> Vec<Record> {
         self.log.close();

@@ -86,6 +86,20 @@ fn cancel_batch(api_id: i64) -> u32 {
     if api_id == 7 { 2 } else { 1 }
 }
 
+/// The fixture snapshot of `api_id`.
+fn view_reply(api_id: i64) -> td::ViewReply {
+    td::ViewReply {
+        incarnation: INCARNATION,
+        seq: SNAPSHOT_SEQ,
+        cancel_batch: cancel_batch(api_id),
+        reply: Some(td::view_reply::Reply::Recon(td::Recon {
+            incarnation: INCARNATION,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
 impl Peer {
     fn connect(url: &str) -> Peer {
         let io = Io::start().expect("peer io");
@@ -134,18 +148,8 @@ impl Peer {
                             .expect("evt");
                     }
                 }
-                let reply = td::ViewReply {
-                    incarnation: INCARNATION,
-                    seq: SNAPSHOT_SEQ,
-                    cancel_batch: cancel_batch(api_id),
-                    reply: Some(td::view_reply::Reply::Recon(td::Recon {
-                        incarnation: INCARNATION,
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                };
                 let to = msg.reply.expect("reply subject");
-                nats.publish(to, reply.encode_to_vec().into())
+                nats.publish(to, view_reply(api_id).encode_to_vec().into())
                     .await
                     .expect("view reply");
             }
@@ -207,17 +211,7 @@ impl Peer {
                     *view_slot.lock().expect("view") = Some(to.to_string());
                     continue;
                 }
-                let reply = td::ViewReply {
-                    incarnation: INCARNATION,
-                    seq: SNAPSHOT_SEQ,
-                    cancel_batch: cancel_batch(api_id),
-                    reply: Some(td::view_reply::Reply::Recon(td::Recon {
-                        incarnation: INCARNATION,
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                };
-                nats.publish(to, reply.encode_to_vec().into())
+                nats.publish(to, view_reply(api_id).encode_to_vec().into())
                     .await
                     .expect("view reply");
             }
@@ -554,6 +548,18 @@ impl Rig {
         });
         rx.recv_timeout(FUSE).expect("the session ended")
     }
+
+    /// Waits for an entry queued now to run: the entries before it, and the
+    /// frames they write, are done.
+    fn settle(&self) {
+        let (tx, rx) = std_mpsc::channel();
+        self.disp
+            .push_td(move || {
+                let _ = tx.send(());
+            })
+            .expect("push");
+        rx.recv_timeout(FUSE).expect("the TD buffer ran");
+    }
 }
 
 fn buy(api_id: i64, algo_id: u32) -> Order {
@@ -663,8 +669,9 @@ fn the_recon_watermark_releases_only_the_next_seq_and_api_id_is_the_subject() {
     assert_eq!(rig.peer.views.load(Ordering::SeqCst), 2);
 }
 
-/// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, and the
-/// seq of a `td_event`'s AccountEvent.
+/// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, the seq
+/// of a `td_event`'s AccountEvent, a `td_view`'s generation, and the text of
+/// an `order_reply` that is not a reply.
 fn describe(record: &Record) -> String {
     let mut line = format!("{} {}", record.seq, record.kind.name().unwrap_or("?"));
     if record.r#ref != 0 {
@@ -673,11 +680,46 @@ fn describe(record: &Record) -> String {
     if record.flags != 0 {
         line += &format!(" flags={}", record.flags);
     }
-    if record.kind == Kind::TD_EVENT {
-        let event = td::AccountEvent::decode(record.body.as_slice()).expect("td event");
-        line += &format!(" seq={}", event.seq);
+    match record.kind {
+        Kind::TD_EVENT => {
+            let event = td::AccountEvent::decode(record.body.as_slice()).expect("td event");
+            line += &format!(" seq={}", event.seq);
+        }
+        Kind::TD_VIEW => line += &format!(" gen={}", view_of(record).0),
+        Kind::ORDER_REPLY if record.flags != outcome::OK => {
+            line += &format!(" {:?}", String::from_utf8_lossy(&record.body));
+        }
+        _ => {}
     }
     line
+}
+
+/// A `td_view` body: the request's generation, then the ViewReply.
+fn view_of(record: &Record) -> (u64, td::ViewReply) {
+    let (generation, reply) = record.body.split_at(8);
+    let generation = u64::from_le_bytes(generation.try_into().expect("generation"));
+    (
+        generation,
+        td::ViewReply::decode(reply).expect("view reply"),
+    )
+}
+
+/// An `order_call` body: the account, the generation a Submit recorded, and
+/// the client order ids.
+fn call_of(record: &Record) -> (i64, u64, Vec<String>) {
+    let body = record.body.as_slice();
+    let api_id = i64::from_le_bytes(body[..8].try_into().expect("api id"));
+    let generation = u64::from_le_bytes(body[8..16].try_into().expect("generation"));
+    let count = u16::from_le_bytes(body[16..18].try_into().expect("count"));
+    let mut rest = &body[18..];
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        let len = usize::from(u16::from_le_bytes(rest[..2].try_into().expect("len")));
+        ids.push(String::from_utf8(rest[2..2 + len].to_vec()).expect("id"));
+        rest = &rest[2 + len..];
+    }
+    assert!(rest.is_empty(), "bytes after the ids");
+    (api_id, generation, ids)
 }
 
 #[test]
@@ -714,42 +756,199 @@ fn a_td_event_is_written_by_the_entry_that_runs_its_hook() {
     wait_until("seq 8", || rig.stamps(7).len() == 3);
     assert_eq!(rig.stamps(7)[2], ("order", td_stamp(7, INCARNATION, 8)));
 
+    rig.settle();
+
     let frames = log.close();
     let lines: Vec<String> = frames.iter().map(describe).collect();
-    // OnRecon writes nothing here. The two releases run in the order the
-    // replies came.
+    // Each account's OnRecon has its td_view, then its release runs; the
+    // accounts go in the order their replies came.
     let released = |a: i64, b: i64| {
         vec![
-            format!("1 td_event ref={a} seq=6"),
+            format!("1 td_view ref={a} gen=1"),
             "2 hook_end ref=1".to_owned(),
-            format!("3 td_event ref={b} seq=6"),
+            format!("3 td_event ref={a} seq=6"),
             "4 hook_end ref=3".to_owned(),
+            format!("5 td_view ref={b} gen=1"),
+            "6 hook_end ref=5".to_owned(),
+            format!("7 td_event ref={b} seq=6"),
+            "8 hook_end ref=7".to_owned(),
         ]
     };
     assert!(
-        lines[..4] == released(7, 8) || lines[..4] == released(8, 7),
+        lines[..8] == released(7, 8) || lines[..8] == released(8, 7),
         "{lines:?}"
     );
     assert_eq!(
-        lines[4..],
-        ["5 td_event ref=7 seq=8", "6 hook_end ref=5", "7 end"]
+        lines[8..],
+        ["9 td_event ref=7 seq=8", "10 hook_end ref=9", "11 end"]
     );
-    // The body is the message as published. recv is when the reader took
-    // it; t is when the hook started.
-    for pair in frames[..6].chunks(2) {
+    // The body is the message as it came. recv is when the reader took it;
+    // t is when the hook started.
+    for pair in frames[..10].chunks(2) {
         let (input, end) = (&pair[0], &pair[1]);
-        let seq = td::AccountEvent::decode(input.body.as_slice())
-            .expect("td event")
-            .seq;
-        let published = match input.r#ref {
-            7 => order_event(seq, INCARNATION),
-            _ => position_event(seq, INCARNATION),
-        };
-        assert_eq!(input.body, published.encode_to_vec());
+        if input.kind == Kind::TD_VIEW {
+            let mut published = 1u64.to_le_bytes().to_vec();
+            view_reply(input.r#ref as i64)
+                .encode(&mut published)
+                .expect("encode");
+            assert_eq!(input.body, published);
+        } else {
+            let seq = td::AccountEvent::decode(input.body.as_slice())
+                .expect("td event")
+                .seq;
+            let published = match input.r#ref {
+                7 => order_event(seq, INCARNATION),
+                _ => position_event(seq, INCARNATION),
+            };
+            assert_eq!(input.body, published.encode_to_vec());
+        }
         assert!(0 < input.recv_ns && input.recv_ns <= input.t_ns);
         assert!(input.t_ns <= end.t_ns);
         assert_eq!((end.recv_ns, end.body.len()), (0, 0));
     }
+}
+
+#[test]
+fn each_order_call_has_its_publish_and_reply_and_ids_follow_call_order() {
+    let log = Scratch::open();
+    let rig = rig_with(Duration::from_millis(500), None, Some(log.recorder()));
+    rig.peer.serve_view(View::Reply);
+    rig.peer.serve_orders(Orders::Accept);
+    rig.reconciled();
+    let a = rig.td.submit(buy(7, 1)).expect("submit a");
+    let b = rig.td.submit(buy(7, 1)).expect("submit b");
+    let c = rig.td.submit(buy(8, 1)).expect("submit c");
+    rig.td.cancel(7, &a).expect("cancel a");
+    // Account 7 batches two cancels: one round for a and b. Account 8's
+    // batch of 1 makes each order a Cancel.
+    rig.td.batch_cancel(7, 1, &[]).expect("batch 7");
+    rig.td.batch_cancel(8, 1, &[]).expect("batch 8");
+    rig.td.request_recon(7).expect("recon 7");
+    // Two first recons, six order rounds, and the RequestRecon's reply.
+    wait_until("every round fed", || rig.td.fed() == 9);
+    rig.settle();
+    let requests = rig.peer.requests();
+    let frames = log.close();
+
+    let mut ab = [a.clone(), b.clone()];
+    ab.sort();
+    let calls: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.kind == Kind::ORDER_CALL)
+        .collect();
+    let want: [(u16, i64, u64, Vec<String>); 7] = [
+        (OP_SUBMIT, 7, 1, vec![a.clone()]),
+        (OP_SUBMIT, 7, 1, vec![b.clone()]),
+        (OP_SUBMIT, 8, 1, vec![c.clone()]),
+        (OP_CANCEL, 7, 0, vec![a.clone()]),
+        (OP_BATCH_CANCEL | FROM_BATCH, 7, 0, ab.to_vec()),
+        (OP_CANCEL | FROM_BATCH, 8, 0, vec![c.clone()]),
+        (OP_RECON, 7, 0, Vec::new()),
+    ];
+    assert_eq!(calls.len(), want.len());
+    for (n, (frame, (flags, api_id, generation, ids))) in calls.iter().zip(want).enumerate() {
+        assert_eq!(frame.r#ref, n as u64 + 1, "call ids count from 1");
+        assert_eq!(frame.flags, flags, "call {}", frame.r#ref);
+        assert_eq!(call_of(frame), (api_id, generation, ids));
+        assert!(frame.t_ns > 0 && frame.recv_ns == 0);
+    }
+    // A Submit's clock is the one its client order id was made from.
+    for (frame, id) in calls.iter().zip([&a, &b, &c]) {
+        let made = cloid::decode(id).expect("id").ts_ms;
+        assert_eq!(frame.t_ns.div_euclid(1_000_000), made);
+    }
+
+    // Every request but the recon's is published once, in call order, as
+    // the peer got it, after its call.
+    let published: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.kind == Kind::ORDER_PUBLISH)
+        .collect();
+    assert_eq!(
+        published
+            .iter()
+            .map(|frame| frame.r#ref)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5, 6]
+    );
+    for (frame, request) in published.iter().zip(&requests) {
+        assert_eq!(frame.body, request.encode_to_vec());
+        let call = calls[frame.r#ref as usize - 1];
+        assert!(call.seq < frame.seq && call.t_ns <= frame.t_ns);
+    }
+
+    // Every round's reply is an input of its own: accepted runs no hook.
+    let mut replied = Vec::new();
+    for (n, frame) in frames.iter().enumerate() {
+        if frame.kind != Kind::ORDER_REPLY {
+            continue;
+        }
+        let reply = td::OrderReply::decode(frame.body.as_slice()).expect("reply");
+        assert!(reply.accepted);
+        assert_eq!(frame.flags, outcome::OK);
+        assert!(0 < frame.recv_ns && frame.recv_ns <= frame.t_ns);
+        let publish = published[frame.r#ref as usize - 1];
+        assert!(publish.seq < frame.seq);
+        assert_eq!(
+            describe(&frames[n + 1]),
+            format!("{} hook_end ref={}", frame.seq + 1, frame.seq)
+        );
+        replied.push(frame.r#ref);
+    }
+    replied.sort_unstable();
+    assert_eq!(replied, [1, 2, 3, 4, 5, 6]);
+
+    // The RequestRecon's reply is account 7's second generation.
+    let views: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.kind == Kind::TD_VIEW)
+        .collect();
+    assert_eq!(views.len(), 3);
+    let asked = views[2];
+    assert_eq!((asked.r#ref, view_of(asked).0), (7, 2));
+    assert!(calls[6].seq < asked.seq);
+    assert_eq!(frames.last().map(|frame| frame.kind), Some(Kind::END));
+}
+
+#[test]
+fn a_round_without_a_reply_writes_how_it_ended() {
+    let log = Scratch::open();
+    let rig = rig_with(Duration::from_millis(300), None, Some(log.recorder()));
+    rig.peer.serve_view(View::Reply);
+    rig.reconciled();
+    // Nobody serves td.order: a 101 local reject in OnOrder.
+    rig.td.submit(buy(7, 1)).expect("submit");
+    wait_until("the reject", || order_hooks(&rig.seen()).len() == 1);
+    // A silent responder: Submit becomes UNKNOWN, a cancel changes nothing.
+    rig.peer.serve_orders(Orders::Silent);
+    let id = rig.td.submit(buy(7, 1)).expect("submit");
+    wait_until("the timeout", || order_hooks(&rig.seen()).len() == 2);
+    rig.td.cancel(7, &id).expect("cancel");
+    wait_until("the cancel's round", || rig.td.fed() == 5);
+    rig.settle();
+    let frames = log.close();
+
+    let lines: Vec<String> = frames.iter().map(describe).collect();
+    // The first four are both accounts' recons.
+    assert_eq!(
+        lines[4..],
+        [
+            "5 order_call ref=1 flags=1",
+            "6 order_publish ref=1",
+            r#"7 order_reply ref=1 flags=1 "nats: no responders available for request""#,
+            "8 hook_end ref=7",
+            "9 order_call ref=2 flags=1",
+            "10 order_publish ref=2",
+            r#"11 order_reply ref=2 flags=2 "context deadline exceeded""#,
+            "12 hook_end ref=11",
+            "13 order_call ref=3 flags=2",
+            "14 order_publish ref=3",
+            r#"15 order_reply ref=3 flags=2 "context deadline exceeded""#,
+            "16 hook_end ref=15",
+            "17 end",
+        ],
+        "{lines:?}"
+    );
 }
 
 #[test]

@@ -110,6 +110,12 @@ fn propose(old: u64, now_off: i64) -> Result<Proposal, NextError> {
     })
 }
 
+/// The process counter as it stands: the next id it would issue, packed as
+/// above. The event log's `init` frame carries it.
+pub fn slot() -> u64 {
+    NEXT_SLOT.load(Ordering::SeqCst)
+}
+
 /// Take the next `(ts_ms, seq)`.
 ///
 /// `now_ms` before the counter, including a clock before the epoch, keeps
@@ -149,11 +155,6 @@ fn window_err(ts_off: i64) -> NextError {
 #[cfg(test)]
 fn test_set_slot(slot: u64) {
     NEXT_SLOT.store(slot, Ordering::SeqCst);
-}
-
-#[cfg(test)]
-fn test_slot() -> u64 {
-    NEXT_SLOT.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -274,7 +275,7 @@ mod tests {
         }
         let empty = account(&[]);
         assert!(next(&empty, 1, now).unwrap_err().is_algo_not_declared());
-        assert_eq!(test_slot(), 0);
+        assert_eq!(slot(), 0);
         let id = take(&acct, 1, now);
         assert_eq!((id.ts_ms, id.seq), (now, 0));
     }
@@ -289,7 +290,7 @@ mod tests {
         assert_eq!(err, NextError::Encode(want));
         let err = next(&account(&[cloid::ALGO_MAX + 1]), cloid::ALGO_MAX + 1, now).unwrap_err();
         assert!(!err.is_algo_not_declared());
-        assert_eq!(test_slot(), 0);
+        assert_eq!(slot(), 0);
         let id = take(&account(&[1]), 1, now);
         assert_eq!((id.ts_ms, id.seq), (now, 0));
     }
@@ -304,7 +305,7 @@ mod tests {
         assert_eq!(err, NextError::Encode(want));
         let err = next(&acct, 1, i64::MAX).unwrap_err();
         assert!(!err.is_algo_not_declared());
-        assert_eq!(test_slot(), 0);
+        assert_eq!(slot(), 0);
         let id = take(&acct, 1, cloid::EPOCH_MS);
         assert_eq!((id.ts_ms, id.seq), (cloid::EPOCH_MS, 0));
     }
@@ -313,16 +314,16 @@ mod tests {
     fn last_millisecond_of_the_window_does_not_borrow_past_it() {
         let _lock = hold();
         let last = cloid::TS_SPAN - 1;
-        let slot = ((last as u64) << cloid::SEQ_BITS) | u64::from(cloid::SEQ_MAX);
-        test_set_slot(slot);
+        let packed = ((last as u64) << cloid::SEQ_BITS) | u64::from(cloid::SEQ_MAX);
+        test_set_slot(packed);
         let acct = account(&[1]);
         let id = take(&acct, 1, cloid::EPOCH_MS);
         assert_eq!(id.ts_ms, cloid::EPOCH_MS + last);
         assert_eq!(id.seq, cloid::SEQ_MAX);
-        let stuck = test_slot();
+        let stuck = slot();
         assert!(next(&acct, 1, cloid::EPOCH_MS).is_err());
         assert!(next(&acct, 1, cloid::EPOCH_MS + last).is_err());
-        assert_eq!(test_slot(), stuck);
+        assert_eq!(slot(), stuck);
     }
 
     #[test]

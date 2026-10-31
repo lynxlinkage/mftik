@@ -20,7 +20,10 @@
 //!   driven from one thread, as Go's callbacks all run on the dispatcher.
 //! - Reads: Tape, BookSnapshot, FetchKlines, and FetchOpenInterest send one
 //!   NATS request each, waiting `recv_window`; the reply, a timeout, or a
-//!   missing responder goes on the TD buffer (E08-D048).
+//!   missing responder goes on the TD buffer (E08-D048). With the event log
+//!   on, each request, the book's own snapshots too, is a `read_call`
+//!   numbered from 1 when it is sent, and how it ended is the `read_reply`
+//!   input of that TD entry, with the same read id (§12.4, §12.5, E07-D011).
 //! - Instruments: [`Rows`] keeps, per UID, the ticker and venue the reads
 //!   need and the `price_tick` bookpath needs. The SYM path (E03-08) calls
 //!   [`Rows::stored`] for every `symclient::Effect::Stored`; this path never
@@ -30,6 +33,7 @@ use std::cell::Ref;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -38,8 +42,12 @@ use futures_util::StreamExt;
 use mftik_core::book::{Level, OrderBook};
 use mftik_core::bookpath::{self, Snapshot, SnapshotReply, TimerToken};
 use mftik_core::dispatch::{Dispatcher, Input};
-use mftik_core::eventlog::Kind;
-use mftik_core::mdpath::{self, Apply, Delivery, Reply, Request, RequestError, SubId, TapeQuery};
+use mftik_core::eventlog::{
+    Kind, READ_BOOK_SNAPSHOT, READ_KLINES, READ_OPEN_INTEREST, READ_TAPE, outcome, put_str,
+};
+use mftik_core::mdpath::{
+    self, Apply, Delivery, ReadKind, Reply, Request, RequestError, SubId, TapeQuery,
+};
 use mftik_core::symbol::Info;
 use mftik_proto::wire::mftiko::common::v1::Version;
 use mftik_proto::wire::mftiko::md::v1 as md;
@@ -51,6 +59,7 @@ use crate::context::Error;
 use crate::dcell::DispatcherCell;
 use crate::io::Io;
 use crate::nats;
+use crate::sym::{DEADLINE_EXCEEDED, NO_RESPONDERS};
 use crate::timers::{TimerKey, Timers};
 use crate::wiring::Deliver;
 
@@ -182,6 +191,8 @@ pub(crate) struct Md {
     /// callback, the TD entries of snapshot replies and timers, and a hook's
     /// Context (E03-D064, E03-D067).
     books: DispatcherCell<bookpath::Path>,
+    /// The last read id. Counted with the event log on only, as Go's.
+    reads: AtomicU64,
     me: Weak<Md>,
 }
 
@@ -222,6 +233,7 @@ impl Md {
             applying: Mutex::new(()),
             subs: Mutex::default(),
             books: DispatcherCell::new(books),
+            reads: AtomicU64::new(0),
             me: me.clone(),
         }))
     }
@@ -512,6 +524,7 @@ impl Md {
     /// how it ended (E08-D048). A full or closed TD buffer drops it with Go's
     /// `md reply dropped` line.
     fn send(&self, request: Request, done: impl FnOnce(&Md, Delivery) + Send + 'static) {
+        let read = self.record_read(&request);
         let me = self.me.clone();
         let client = self.nats.clone();
         self.io.spawn(async move {
@@ -526,6 +539,10 @@ impl Md {
             let Some(md) = me.upgrade() else {
                 return;
             };
+            let logged = md
+                .disp
+                .record_now()
+                .map(|recv_ns| reply_input(read, recv_ns, &result));
             let delivery = lock(&md.path).on_reply(
                 ticket,
                 result.as_ref().map(|b| b.as_ref()).map_err(Clone::clone),
@@ -534,15 +551,72 @@ impl Md {
                 return;
             };
             md.fresh_now();
-            let pushed = md.disp.push_td(move || {
+            let hook = move || {
                 if let Some(md) = me.upgrade() {
                     done(&md, delivery);
                 }
-            });
+            };
+            let pushed = match logged {
+                Some(input) => md.disp.push_in(input, hook),
+                None => md.disp.push_td(hook),
+            };
             if let Err(err) = pushed {
                 (md.log)(&format!("md reply dropped: {err}"));
             }
         });
+    }
+
+    /// Writes the `read_call` of one request and returns its read id, which
+    /// the reply's `read_reply` carries. 0 with the event log off (Go
+    /// `readCall`).
+    fn record_read(&self, request: &Request) -> u64 {
+        let Some(rec) = self.disp.recorder() else {
+            return 0;
+        };
+        let flags = match request.kind {
+            ReadKind::Tape => READ_TAPE,
+            ReadKind::BookSnapshot => READ_BOOK_SNAPSHOT,
+            ReadKind::Klines => READ_KLINES,
+            ReadKind::OpenInterest => READ_OPEN_INTEREST,
+        };
+        let mut subject = Vec::new();
+        put_str(&mut subject, request.subject.as_bytes());
+        let read = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+        rec.append(
+            Kind::READ_CALL,
+            flags,
+            0,
+            rec.now_ns(),
+            read,
+            &subject,
+            &request.body,
+        );
+        read
+    }
+}
+
+/// A read's `read_reply` input: the reply as it came, or how the request
+/// failed, with Go's texts (Go `replyIn`).
+fn reply_input(read: u64, recv_ns: i64, result: &Result<Bytes, RequestError>) -> Input {
+    let (flags, body) = match result {
+        Ok(reply) => (outcome::OK, reply.clone()),
+        Err(RequestError::Timeout) => (
+            outcome::TIMEOUT,
+            Bytes::from_static(DEADLINE_EXCEEDED.as_bytes()),
+        ),
+        Err(RequestError::NoResponder) => (
+            outcome::NO_RESPONDERS,
+            Bytes::from_static(NO_RESPONDERS.as_bytes()),
+        ),
+        Err(RequestError::Other(text)) => (outcome::FAILED, Bytes::from(text.clone())),
+    };
+    Input {
+        kind: Kind::READ_REPLY,
+        flags,
+        recv_ns,
+        r#ref: read,
+        body,
+        ..Input::default()
     }
 }
 
