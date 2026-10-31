@@ -15,6 +15,8 @@ use super::{
     order_subject, view_subject,
 };
 use crate::cloid::{self, EPOCH_MS};
+use crate::dispatch::Input;
+use crate::eventlog::Kind;
 
 const NOW_MS: i64 = EPOCH_MS + 1_000;
 const WINDOW: Duration = Duration::from_millis(500);
@@ -2207,4 +2209,106 @@ fn hold_full_keeps_what_was_applied_and_drops_what_follows() {
     assert!(path.order(7, &late).is_none());
     assert!(path.order(8, &trigger).is_none());
     assert_eq!(path.held(), HOLD_CAP);
+}
+
+/// A `td_event` input, told apart by its receive time.
+fn logged(recv_ns: i64) -> Input {
+    Input {
+        kind: Kind::TD_EVENT,
+        recv_ns,
+        r#ref: 7,
+        ..Input::default()
+    }
+}
+
+fn accepted(inc: u32, seq: u64, id: &str) -> td::AccountEvent {
+    order_event(
+        inc,
+        seq,
+        row(id, td::OrderStatus::Accepted, 1001, 1.0),
+        td::OrderCause::Accepted,
+        0,
+        "",
+    )
+}
+
+#[test]
+fn a_live_event_input_comes_back_only_with_its_hook() {
+    let mut path = open(vec![decl(7, &[1])]);
+    listen(&mut path);
+    baseline(&mut path, 7, 3, 5, 1);
+    let own = id_of(1, 1);
+    let foreign = id_of(2, 1);
+
+    let effects = path.on_account_event_in(7, accepted(3, 6, &own), Some(logged(6)));
+    assert_eq!(names(&effects), ["order"]);
+    assert_eq!(path.take_input(), Some(logged(6)));
+    assert_eq!(path.take_input(), None);
+    assert!(path.end_hook().is_none());
+
+    // A foreign algo's event moves the cursor but runs no hook; a seq at or
+    // below the cursor is dropped. Neither hands its input back.
+    let effects = path.on_account_event_in(7, accepted(3, 7, &foreign), Some(logged(7)));
+    assert!(effects.is_empty());
+    assert_eq!(path.take_input(), None);
+    let effects = path.on_account_event_in(7, accepted(3, 7, &own), Some(logged(70)));
+    assert!(effects.is_empty());
+    assert_eq!(path.take_input(), None);
+
+    let effects = path.on_account_event_in(7, accepted(3, 8, &own), None);
+    assert_eq!(names(&effects), ["order"]);
+    assert_eq!(path.take_input(), None);
+    assert!(path.end_hook().is_none());
+
+    // An input nobody took is gone once the hook has ended.
+    let effects = path.on_account_event_in(7, accepted(3, 9, &own), Some(logged(9)));
+    assert_eq!(names(&effects), ["order"]);
+    assert!(path.end_hook().is_none());
+    assert_eq!(path.take_input(), None);
+}
+
+#[test]
+fn a_held_event_input_comes_back_when_its_hook_is_released() {
+    let mut path = open(vec![decl(7, &[1])]);
+    listen(&mut path);
+    let id = id_of(1, 1);
+    let generation = ask(&mut path, 7);
+    for (inc, seq) in [(3, 4), (3, 6), (1, 9), (3, 8)] {
+        let input = logged(i64::try_from(seq).unwrap());
+        assert!(
+            path.on_account_event_in(7, accepted(inc, seq, &id), Some(input))
+                .is_empty()
+        );
+        assert_eq!(path.take_input(), None);
+    }
+
+    let mut released = Vec::new();
+    let effects = path.on_recon_round(7, generation, ReconOutcome::Reply(bare_view(3, 5, 1)));
+    let effects = drive(&mut path, effects, |path, hook| {
+        let input = path.take_input();
+        match hook {
+            Hook::Recon(_) => assert_eq!(input, None),
+            Hook::Order(event) => released.push((event.td.seq, input)),
+            other => panic!("{other:?}"),
+        }
+    });
+    assert_eq!(names(&effects), ["recon", "order", "recon_send"]);
+    assert_eq!(released, vec![(6, Some(logged(6)))]);
+
+    let Effect::SendRecon { generation, .. } = effects[2] else {
+        panic!("{effects:?}");
+    };
+    released.clear();
+    let effects = path.on_recon_round(7, generation, ReconOutcome::Reply(bare_view(3, 7, 1)));
+    let effects = drive(&mut path, effects, |path, hook| {
+        let input = path.take_input();
+        match hook {
+            Hook::Recon(_) => assert_eq!(input, None),
+            Hook::Order(event) => released.push((event.td.seq, input)),
+            other => panic!("{other:?}"),
+        }
+    });
+    assert_eq!(names(&effects), ["recon", "order"]);
+    assert_eq!(released, vec![(8, Some(logged(8)))]);
+    assert_eq!(path.held(), 0);
 }
