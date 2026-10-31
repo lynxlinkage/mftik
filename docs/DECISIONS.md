@@ -487,13 +487,13 @@ E07-D012：dispatcher 在結束交出任何東西之前寫 `stop`：`recv_ns` �
 
 ## 決定（2026-10-31，E08-D001–E08-D005）
 
-Yi Te 於 #478 核可 E08-D001–E08-D004。純 Rust 策略：用 `mftik-rt` 的 `Strategy` trait 寫，用 mftiko 的 `mftiko-pack -bin` 打包部署，不經 Python/PyO3。E08-D005 是 #479 實作時多出來的，需要 Yi Te 確認。本票沒有改 PROTOCOL，也沒有改 mftiko。
+Yi Te 於 #478 核可 E08-D001–E08-D004。純 Rust 策略：用 `mftik-rt` 的 `Strategy` trait 寫，用 mftiko 的 `mftiko-pack -bin` 打包部署，不經 Python/PyO3。E08-D005 是 #479 實作時多出來的，Yi Te 於 #478 確認。本票沒有改 PROTOCOL，也沒有改 mftiko。
 
 - E08-D001 打包：`mftik-rt` 自動把 `mftiko.contracts=` 標記嵌進 binary，沿用 `mftiko-pack -bin`，不另寫 Rust 打包工具。
 - E08-D002 目標平台：`x86_64-unknown-linux-gnu`，glibc 2.35（Ubuntu 22.04+），與 Python wheel 一致；不做 musl 靜態版。
 - E08-D003 範例與文件：`examples/rust/md_watch`（對應 Python 同名範例）；`docs/rust/`（入門、hook、Context、打包部署）；文件片段以 doctest 編譯檢查。
 - E08-D004 發佈：先不上 crates.io，用 git tag 依賴；API 穩定後再議。
-- E08-D005 Go build info（需要 Yi Te 確認）：只有 E08-D001 的標記還打不了包。釘住的 `mftiko-pack -bin` 讀到標記之後，以 Go `debug/buildinfo` 找 binary 連結的 `github.com/BullionBear/mftiko`，取它的版本（有 replace 時取 replace 的版本）當 `sdk.version`（PROTOCOL §8.2），找不到就拒絕：`artifact: no sdk version in buildinfo: not a Go executable`。所以 `mftik-rt` 在 Linux 的 binary 裡另嵌一份 Go 格式的 build info，寫 `github.com/BullionBear/mftiko` 由 `github.com/lynxlinkage/mftik` 取代，版本是 `v` 加上 mftik 的版本；`sdk.version` 因此是 `v1.2.0`（Python 的打包寫 `1.2.0`）。manifest 的 `runtime`、`sdk.lang` 由 mftiko-pack 寫成 `go`；PROTOCOL §8.2 的 `runtime` 只用於顯示與統計，mftiko 也不讀這兩欄。要寫成 `rust`，得改 mftiko-pack，或照 mftiko E09-D002 由 mftik 自己產生 manifest（與 E08-D001 不合），本票都不做。
+- E08-D005 Go build info（已確認 (Yi Te, 2026-11-01)）：只有 E08-D001 的標記還打不了包。釘住的 `mftiko-pack -bin` 讀到標記之後，以 Go `debug/buildinfo` 找 binary 連結的 `github.com/BullionBear/mftiko`，取它的版本（有 replace 時取 replace 的版本）當 `sdk.version`（PROTOCOL §8.2），找不到就拒絕：`artifact: no sdk version in buildinfo: not a Go executable`。所以 `mftik-rt` 在 Linux 的 binary 裡另嵌一份 Go 格式的 build info，寫 `github.com/BullionBear/mftiko` 由 `github.com/lynxlinkage/mftik` 取代，版本是 `v` 加上 mftik 的版本；`sdk.version` 因此是 `v1.2.0`（Python 的打包寫 `1.2.0`）。manifest 的 `runtime`、`sdk.lang` 由 mftiko-pack 寫成 `go`；PROTOCOL §8.2 的 `runtime` 只用於顯示與統計，mftiko 也不讀這兩欄。要寫成 `rust`，得改 mftiko-pack，或照 mftiko E09-D002 由 mftik 自己產生 manifest（與 E08-D001 不合），本票都不做。
 
 #479（E08-01）在 `mftik-rt` 加 `pack` 模組，兩份都在編譯時組出。標記與 Go `sdk/contracts.go` 同格式：`mftiko.contracts=worker.v1,stsctl.v1,md.v1,td.v1` 加換行，由 `Hello.contracts` 用的 `SESSION_CONTRACTS` 組成，兩邊不會不同（mftiko E09-D035）。build info 是 Go 1.18 起的 inline 格式：32 bytes 的檔頭（`\xff Go buildinf:`、指標大小、flags 2）之後，依序是 uvarint 長度加版本字串 `mftik-rt v1.2.0`，與 uvarint 長度加模組資訊；模組資訊前後是 cmd/go 的 16 bytes `infoStart`、`infoEnd`，中間照 `BuildInfo.String` 寫一個被取代的 `dep`。它放在 `debug/buildinfo` 先找的 `.go.buildinfo` section，16 bytes 對齊，長度補到 16 的倍數，同 Go linker。Mach-O 的 section 名要寫成 `segment,section`，所以 build info 只在 Linux 嵌，macOS 的 wheel 照舊；標記各平台都有。兩份都是 `#[used]` static，`run` 一開始以 `black_box` 讀它們：`#[used]` 只擋編譯器，linker 仍可丟掉沒人參照的 section；Go 也是 `init` 讀標記、linker 參照 build info。本機以 debug、release、fat LTO 加 strip（`codegen-units = 1`、`panic = "abort"`）建的 `conform`，釘住的 `mftiko-pack -bin` 都能打包。Python extension 的 `_run` 也呼叫 `run`，所以 `.so` 裡也有這兩份；Python 的打包不讀它們。
 
