@@ -6,10 +6,12 @@
 //! The MD path is [`mdpath`].
 //! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
 //! [`volume`]. The worker end of C4 is [`c4`]. Instrument rows are
-//! [`symbol`], and the session SYM client is [`symclient`].
+//! [`symbol`], and the session SYM client is [`symclient`]. The frames the
+//! dispatcher writes to the strategy event log are [`eventlog`].
 
 pub mod c4;
 pub mod dispatch;
+pub mod eventlog;
 pub mod mdpath;
 pub mod tdpath;
 
