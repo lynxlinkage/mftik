@@ -465,6 +465,26 @@ E07-D009：關閉時每個收錄點是一次 `Option` 檢查。`push_md` 不讀�
 
 測試：`mftik-core` 的 `src/dispatch/tests.rs` 測順序、panic、`HUNG`、編號與關閉時的狀態，`src/tdpath/tests.rs` 測即時與保留事件的輸入；mftik-rt 的 `src/md/tests.rs`、`src/td/tests.rs` 以 nats-server 測 MD 訊息、book 計時器與 `td.evt` 的框，`tests/eventlog_session.rs` 以假的 shim 跑整個 session，含 panic 與 `HUNG`；mftik-py 的 `tests/session.rs` 以安裝的 wheel 測 Python 例外（python CI job）。
 
+## 決定（2026-10-31，E07-D010–E07-D012）
+
+Yi Te 於 #472 核可。E07-04 收錄其餘的 kinds（1–4、8–10、13、14、16–19）與關閉路徑，照 PROTOCOL §12.4、§12.5 與 Go `sdk/record.go`。本票沒有改 PROTOCOL。
+
+- E07-D010 init 去除憑證：init frame 去除的 NATS 憑證欄位與 Go 用同一份清單；加測試確認 dump 內容找不到任何憑證字串。
+- E07-D011 call id / read id：由 Rust 端在每個 session 內依序遞增產生，與 Go 一致；下單與讀取在 PyO3 回到 Rust 的邊界收錄，不在 Python 層。
+- E07-D012 關閉路徑：StopDeliver、StopHung 照 Go 順序先寫停止 frame 再寫 `end`；on_init/on_start panic 時在 process 結束前同步 flush，flush 設等待上限，不卡住關閉。
+
+另外確認：沒有觸發 strategy hook 的 TD 事件維持不寫（E07-03 的做法不變）。Python 的 `ctx.now()`、`ctx.rand()` 與 replay 不在本票。
+
+#472（E07-04）由 plane 寫 dispatcher 以外的框，對應 Go `outside`、`recordBindings`、`recordResolve`。OnInit、OnStart，以及 Start 失敗後、Run 之前的 OnStop，各是一個輸入（`init`、`start`、`onstop`）：hook 之前寫出，`recv_ns` 是收到的時間，`t_ns` 是 hook 開始；返回後寫 `hook_end`，回傳錯誤時 flags 2、body 是錯誤文字。`init` 的 body 是 Init 當時的 client order id 計數（8 bytes），接著是去掉欄位 9 `nats` 的 InitPayload（E07-D010）：`mftik_core::eventlog::without_field` 照 Go `withoutField` 逐欄複製收到的 bytes，只略過那個欄位，與 Go 去掉的是同一份。`init` 的 `ref` 是 session 的 seed，即 Go `Context.Rand` 用的 seed；本票只產生並記下，`ctx.rand()`（E07-D004）不在本票。`start` 的 body 是收到的 StartPayload。`bindings` 記每一個套用了的 snapshot，不比較新、當作沒事套用的也記：Live 的 body 是 payload；Command 的是它的 `bindings` 欄位原樣的 bytes（Go `fieldBytes`），flags `FROM_COMMAND`。`recv_ns` 是它到 worker 的時間（Command 是 Relay 收到時，不是 command 執行緒取出時），`t_ns` 是套用完的時間。`resolve` 記每一次 `Context::resolve`，不在 OnInit、OnStart 而被拒的也記：flags 是 Go `resolveOutcome` 的分類，body 是 ticker，接著成功時是 `SymbolInfo`（`symclient::info_to_proto`，同 Go `InfoToProto`），失敗時是策略拿到的錯誤文字；`t_ns` 是呼叫，`recv_ns` 是答覆回來的時間。
+
+E07-D011：order 與 read 收在 mftik-rt 的 TD、MD path。Python 的 `ctx.submit`、`ctx.tape` 等經 PyO3 呼叫同一組 `Context` 方法，所以 Python 層沒有收錄的程式。call id 與 read id 各自在 session 內從 1 起編，只在 log 開啟時計數，關閉時都是 0，與 Go 相同。Submit、Cancel、BatchCancel 的每一輪與 RequestRecon 各寫一個 `order_call`：flags 是操作（BatchCancel 的輪加 `FROM_BATCH`），`ref` 是 call id，body 是 `api_id`、Submit 記下的 td.view generation 與涵蓋的 client order id。請求送上連線後寫 `order_publish`，body 是送出的 OrderRequest。每一輪怎麼結束是餵它的 TD 項目的 `order_reply` 輸入，flags 是 Go `evlog.Outcome` 的分類；那一輪不跑 hook（例如被接受的 Submit）時是一個只有輸入的項目，與 Go 寫每一輪的回覆相同。tdpath 套用的 Recon 回覆是套用它的 TD 項目的 `td_view` 輸入，策略有沒有 OnRecon 都寫，`ref` 是 `api_id`，body 是 generation 與 ViewReply；沒有套用的（generation 已過時、path 已失敗）不寫，與不跑 hook 的 `td.evt` 相同。每個 `md.view`、`md.fetch` 請求送出時寫 `read_call`，flags 是讀取的種類，`ref` 是 read id，book 同步時自己讀的 snapshot 也算；怎麼結束是送回它的 TD 項目的 `read_reply` 輸入，帶同一個 read id 與 Go `replyIn` 的結果。
+
+E07-D012：dispatcher 在結束交出任何東西之前寫 `stop`：`recv_ns` 是 loop 停下 MD 的時間，`t_ns` 是 C4 要 OnStop 的時間，DONE 與 FAILED 交出 TD buffer，帶 `STOP_DELIVER`；OnStop 是 `onstop` 輸入，有自己的 `hook_end`。watchdog 判 `HUNG` 時在 Run 返回之前寫 `stop`（`STOP_HUNG`），之後不寫 `onstop`。`end` 照 E07-03 由 `exit_with` 關 log 時寫，所以兩條路徑的順序都與 Go 相同。`outside` 的 hook panic 時，寫完帶 panic 的 `hook_end` 就以 `Log::flush_within` 同步等 writer 把它寫進檔案，最多 5 秒（與 close 的上限相同），逾時記一行照樣往下；C4 在那之後才收到失敗，所以 Done 送出時檔案裡已經有它們。回傳錯誤不 flush（Python 的 `on_init`、`on_start` 例外是回傳錯誤），與 Go 相同，由結束時關 log 寫出。
+
+與 Go 不同的地方。Go 的 `outside` 不 recover panic：寫 `hook_end`、關 log（寫 `end`）後讓 process 帶著 panic 結束。mftik-rt 照舊把 OnInit、OnStart 的 panic 當成失敗（`hook panic: ...`），以 `INIT_FAILED` 結束，所以 panic 時只 flush、不關 log：OnStart 失敗後 C4 還會跑 OnStop，`onstop` 與它的 `hook_end` 接在 panic 之後，最後才是 `end`。OnInit panic 的檔案與 Go 相同（`init`、`hook_end`、`end`）。
+
+測試：`mftik-core` 的 `src/eventlog.rs` 測各 body、`without_field` 與 `field_bytes`，`src/dispatch/tests.rs` 測 `stop`、`onstop` 與 `STOP_HUNG`；mftik-rt 的 `src/td/tests.rs`、`src/md/tests.rs` 以 nats-server 測 order 與 read 的框與編號，`src/plane.rs` 測 `init`、`start`、`bindings`、`resolve`、Run 之前的 `onstop` 與 panic 時的 flush，`src/eventlog/tests.rs` 測有上限的 flush 不會等過頭。`tests/eventlog_session.rs` 以假的 shim 跑整個 session：OnInit、OnStart panic 的框在 Done 送到 shim 時已在檔案裡（拿掉 flush，這兩個測試就失敗），`HUNG` 的 `stop` 以 `mftiko-eventlog dump` 讀出是 `"hung":true`。驗收是 `tests/eventlog_kinds.rs`：測試當平台，另一條 NATS 連線當 SYM、MD、TD；策略在 OnInit resolve、OnStart 讀取、OnRecon 下兩張被拒的單，等每個 callback 都跑過才結束。Go `mftiko-eventlog dump` 讀出 19 種 kind 都在、每個輸入有一個 `hook_end`、每個 call id 有一個 `order_publish` 與一個 `order_reply`、每個 read id 有一個 `read_reply`，dump 輸出與 log 檔的 bytes 都找不到 NATS 憑證（`user_jwt`、`seed`、`inbox_prefix`，E07-D010）。mftik-py 的 `tests/session.rs` 改為預期 `init`、`start` 在前。
+
 ## 決定（2026-10-31，E08-D001–E08-D005）
 
 Yi Te 於 #478 核可 E08-D001–E08-D004。純 Rust 策略：用 `mftik-rt` 的 `Strategy` trait 寫，用 mftiko 的 `mftiko-pack -bin` 打包部署，不經 Python/PyO3。E08-D005 是 #479 實作時多出來的，需要 Yi Te 確認。本票沒有改 PROTOCOL，也沒有改 mftiko。

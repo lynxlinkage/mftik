@@ -12,7 +12,7 @@ use prost::Message;
 use super::{
     CHECK_INTERVAL, Client, Config, Effect, Error, Fault, OpenError, Outcome, REFRESH_TRIES,
     REQUEST_TIMEOUT, ResolveId, Resolving, SUBJECT, Ticket, TimerToken, changed_subject, decode,
-    info_from_proto,
+    info_from_proto, info_to_proto,
 };
 use crate::bookpath;
 use crate::symbol::{Category, PRICE_TICK, Status};
@@ -1351,7 +1351,12 @@ fn symbol_info_maps_every_field() {
     msg.filters
         .insert("min_qty".to_owned(), sym::Bound { value: None });
     msg.updated_at_ns = 99;
-    let info = info_from_proto(msg).expect("valid");
+    let info = info_from_proto(msg.clone()).expect("valid");
+    assert_eq!(
+        info_to_proto(&info),
+        msg,
+        "the event log's copy is the same row"
+    );
     assert_eq!(info.uid, BTC);
     assert_eq!(info.ticker.category, Category::Option);
     assert_eq!(info.ticker.symbol, "BTCUSD-261225-6D4-C");
@@ -1373,6 +1378,7 @@ fn symbol_info_maps_every_field() {
     assert_eq!(spot.contract_size, 0.0);
     assert_eq!(spot.strike, 0.0);
     assert!(spot.settle.is_empty());
+    assert_eq!(info_to_proto(&spot), listing(ETH, ETH_T, 0.2));
 
     let mut bad = listing(BTC, BTC_T, 0.1);
     bad.filters

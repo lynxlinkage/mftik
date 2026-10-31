@@ -312,6 +312,18 @@ impl Rig {
         })
         .0
     }
+
+    /// Waits for an entry queued now to run: the entries before it, and the
+    /// frames they write, are done.
+    fn settle(&self) {
+        let (tx, rx) = mpsc::channel();
+        self.disp
+            .push_td(move || {
+                let _ = tx.send(());
+            })
+            .expect("push");
+        rx.recv_timeout(FUSE).expect("the TD buffer ran");
+    }
 }
 
 type Script = Arc<Mutex<VecDeque<Option<Vec<u8>>>>>;
@@ -719,8 +731,9 @@ fn the_book_waits_for_a_stored_row_and_a_failed_view_backs_off() {
 
 // ---------- the event log ----------
 
-/// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, and the
-/// envelope seq of an MD message.
+/// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, the
+/// envelope seq of an MD message, and the text of a `read_reply` that is not
+/// a reply.
 fn describe(record: &Record) -> String {
     let mut line = format!("{} {}", record.seq, record.kind.name().unwrap_or("?"));
     if record.r#ref != 0 {
@@ -729,11 +742,44 @@ fn describe(record: &Record) -> String {
     if record.flags != 0 {
         line += &format!(" flags={}", record.flags);
     }
-    if matches!(record.kind, Kind::MD_FEED | Kind::MD_BOOK) {
-        let seq = u64::from_le_bytes(record.body[24..32].try_into().expect("envelope"));
-        line += &format!(" seq={seq}");
+    match record.kind {
+        Kind::MD_FEED | Kind::MD_BOOK => {
+            let seq = u64::from_le_bytes(record.body[24..32].try_into().expect("envelope"));
+            line += &format!(" seq={seq}");
+        }
+        Kind::READ_REPLY if record.flags != outcome::OK => {
+            line += &format!(" {:?}", String::from_utf8_lossy(&record.body));
+        }
+        _ => {}
     }
     line
+}
+
+/// A `read_call` body: the subject, then the request as sent.
+fn read_of(record: &Record) -> (String, Vec<u8>) {
+    let len = usize::from(u16::from_le_bytes(
+        record.body[..2].try_into().expect("subject length"),
+    ));
+    let subject = String::from_utf8(record.body[2..2 + len].to_vec()).expect("subject");
+    (subject, record.body[2 + len..].to_vec())
+}
+
+/// Each input frame's `hook_end` follows it, and recv <= start <= end.
+fn check_inputs(frames: &[Record]) {
+    for input in frames {
+        if matches!(input.kind, Kind::READ_CALL | Kind::HOOK_END | Kind::END) {
+            continue;
+        }
+        let end = frames
+            .iter()
+            .find(|end| end.kind == Kind::HOOK_END && end.r#ref == input.seq)
+            .expect("the input's hook_end");
+        assert!(
+            0 < input.recv_ns && input.recv_ns <= input.t_ns,
+            "{input:?}"
+        );
+        assert!(input.t_ns <= end.t_ns);
+    }
 }
 
 #[test]
@@ -744,11 +790,9 @@ fn md_messages_and_book_timers_are_written_before_their_hooks() {
         ..Opts::default()
     });
     rig.rows.stored(&info(UID, "BTCUSDT", 0.5));
-    let answers = script([
-        view_error("not_synced"),
-        book_reply(UID, 10, &[(100.0, 1.0)], &[(101.0, 2.0)]),
-    ]);
-    rig.respond(BOOK_VIEW, answers);
+    let not_synced = view_error("not_synced");
+    let synced = book_reply(UID, 10, &[(100.0, 1.0)], &[(101.0, 2.0)]);
+    rig.respond(BOOK_VIEW, script([not_synced.clone(), synced.clone()]));
     rig.bind(
         1,
         &[
@@ -771,35 +815,159 @@ fn md_messages_and_book_timers_are_written_before_their_hooks() {
     let traded = trade(1, wall_ns(), "t1");
     rig.publish(TRADE_SUBJECT, traded.clone());
     assert_eq!(rig.until(md_seq).0, 1);
+    rig.settle();
 
-    // The md.view replies are reads: not written here.
+    // The book's md.view requests are reads: each is a read_call in the hook
+    // that asks, and its reply is the input of the entry that applies it.
     let frames = log.close();
     assert_eq!(
         frames.iter().map(describe).collect::<Vec<_>>(),
         [
             "1 md_book seq=11",
-            "2 hook_end ref=1",
-            "3 timer ref=2",
-            "4 hook_end ref=3",
-            "5 md_book seq=12",
-            "6 hook_end ref=5",
-            "7 md_feed seq=1",
-            "8 hook_end ref=7",
-            "9 end",
+            "2 read_call ref=1 flags=2",
+            "3 hook_end ref=1",
+            "4 read_reply ref=1",
+            "5 hook_end ref=4",
+            "6 timer ref=2",
+            "7 read_call ref=2 flags=2",
+            "8 hook_end ref=6",
+            "9 read_reply ref=2",
+            "10 hook_end ref=9",
+            "11 md_book seq=12",
+            "12 hook_end ref=11",
+            "13 md_feed seq=1",
+            "14 hook_end ref=13",
+            "15 end",
         ]
     );
     assert_eq!(frames[0].body, buffered);
-    assert!(frames[2].body.is_empty());
-    assert_eq!(frames[4].body, hooked);
-    assert_eq!(frames[6].body, traded);
-    // recv is when the message reached the ring or the timer fired; t is
-    // when the hook started.
-    for pair in frames[..8].chunks(2) {
-        let (input, end) = (&pair[0], &pair[1]);
-        assert!(0 < input.recv_ns && input.recv_ns <= input.t_ns);
-        assert!(input.t_ns <= end.t_ns);
+    let asked = (
+        BOOK_VIEW.to_owned(),
+        md::ViewRequest::default().encode_to_vec(),
+    );
+    assert_eq!(read_of(&frames[1]), asked);
+    assert_eq!(read_of(&frames[6]), asked);
+    assert_eq!(Some(frames[3].body.clone()), not_synced);
+    assert_eq!(Some(frames[8].body.clone()), synced);
+    assert!(frames[5].body.is_empty());
+    assert_eq!(frames[10].body, hooked);
+    assert_eq!(frames[12].body, traded);
+    // recv is when the message reached the ring, the reply came, or the
+    // timer fired; t is when the hook started.
+    check_inputs(&frames);
+    assert!(frames[5].t_ns - frames[0].t_ns >= 900_000_000);
+}
+
+#[test]
+fn each_read_is_a_read_call_and_its_reply_carries_the_read_id() {
+    let log = Scratch::open();
+    let rig = Rig::new(Opts {
+        recv_window: Duration::from_millis(300),
+        rec: Some(log.recorder()),
+        ..Opts::default()
+    });
+    rig.rows.stored(&info(UID, "BTCUSDT", 0.5));
+    rig.bind(
+        1,
+        &[
+            ("trade.Bybit_Perp_BTCUSDT", TRADE_SUBJECT),
+            ("orderbook_delta.Bybit_Perp_BTCUSDT", BOOK_SUBJECT),
+        ],
+    )
+    .expect("bind");
+    // Each callback's hook_end is written before the next read is asked.
+    let read = || {
+        let (text, _) = rig.read();
+        rig.settle();
+        text
+    };
+
+    // No responder on md.fetch, then one on md.view that does not answer.
+    rig.md
+        .fetch_klines(UID, "1m", 10, rig.reader())
+        .expect("klines");
+    assert!(read().starts_with("err"));
+    let book = rig.respond(BOOK_VIEW, script([None]));
+    rig.md.book_snapshot(UID, rig.reader()).expect("book");
+    assert!(read().starts_with("err"));
+    let page = md::ViewReply {
+        result: Some(view_reply::Result::Tape(md::TapePage::default())),
+        ..Default::default()
     }
-    assert!(frames[2].t_ns - frames[0].t_ns >= 900_000_000);
+    .encode_to_vec();
+    let tape = rig.respond(TRADE_VIEW, script([Some(page.clone())]));
+    let query = TapeQuery {
+        limit: 5,
+        before: None,
+        since_ns: 77,
+    };
+    rig.md
+        .tape(UID, "trade", query, rig.reader())
+        .expect("tape");
+    assert!(read().starts_with("ok"));
+    let oi = md::FetchReply {
+        uid: UID,
+        result: Some(fetch_reply::Result::OpenInterest(md::OpenInterest {
+            open_interest: 12.5,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let fetch = rig.respond(FETCH, script([Some(oi.clone())]));
+    rig.md
+        .fetch_open_interest(UID, rig.reader())
+        .expect("open interest");
+    assert!(read().starts_with("ok"));
+
+    let frames = log.close();
+    assert_eq!(
+        frames.iter().map(describe).collect::<Vec<_>>(),
+        [
+            "1 read_call ref=1 flags=3",
+            "2 read_reply ref=1 flags=1 \"nats: no responders available for request\"",
+            "3 hook_end ref=2",
+            "4 read_call ref=2 flags=2",
+            "5 read_reply ref=2 flags=2 \"context deadline exceeded\"",
+            "6 hook_end ref=5",
+            "7 read_call ref=3 flags=1",
+            "8 read_reply ref=3",
+            "9 hook_end ref=8",
+            "10 read_call ref=4 flags=4",
+            "11 read_reply ref=4",
+            "12 hook_end ref=11",
+            "13 end",
+        ]
+    );
+    let klines = md::FetchRequest {
+        req: Some(md::fetch_request::Req::Klines(md::FetchKlines {
+            interval: "1m".into(),
+            limit: 10,
+            uid: UID,
+        })),
+    }
+    .encode_to_vec();
+    assert_eq!(read_of(&frames[0]), (FETCH.to_owned(), klines));
+    assert_eq!(
+        read_of(&frames[3]),
+        (BOOK_VIEW.to_owned(), lock(&book)[0].clone())
+    );
+    assert_eq!(
+        read_of(&frames[6]),
+        (TRADE_VIEW.to_owned(), lock(&tape)[0].clone())
+    );
+    assert_eq!(
+        read_of(&frames[9]),
+        (FETCH.to_owned(), lock(&fetch)[0].clone())
+    );
+    assert_eq!(frames[7].body, page);
+    assert_eq!(frames[10].body, oi);
+    assert!(
+        frames
+            .iter()
+            .all(|f| f.kind != Kind::READ_CALL || f.t_ns > 0)
+    );
+    check_inputs(&frames);
 }
 
 // ---------- reads ----------

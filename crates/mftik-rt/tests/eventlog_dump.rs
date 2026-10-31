@@ -5,54 +5,14 @@
 //! `scripts/install-mftiko-eventlog` installs it from the mftiko commit in
 //! contract/proto/SOURCE, as CI does. These tests fail when it is missing.
 
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
 use mftik_proto::wire::mftiko::md::v1::ViewRequest;
 use mftik_proto::wire::mftiko::stsctl::v1::InitPayload;
 use mftik_rt::eventlog::{Config, Header, Kind, Log};
-use mftik_testkit::TempDir;
+use mftik_testkit::{TempDir, eventlog_dump as dump};
 use prost::Message;
-
-const EVENTLOG_ENV: &str = "MFTIK_EVENTLOG";
-
-fn eventlog_bin() -> PathBuf {
-    if let Some(path) = env::var_os(EVENTLOG_ENV) {
-        return PathBuf::from(path);
-    }
-    env::var_os("PATH")
-        .and_then(|paths| {
-            env::split_paths(&paths)
-                .map(|dir| dir.join("mftiko-eventlog"))
-                .find(|bin| bin.is_file())
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "mftiko-eventlog not found: set {EVENTLOG_ENV} or put it on PATH \
-                 (scripts/install-mftiko-eventlog)"
-            )
-        })
-}
-
-/// Runs `mftiko-eventlog dump ARGS...`; the exit status and stdout.
-fn dump(args: &[&str]) -> (bool, String) {
-    let out = Command::new(eventlog_bin())
-        .arg("dump")
-        .args(args)
-        .output()
-        .expect("run mftiko-eventlog");
-    assert!(
-        out.stderr.is_empty(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (
-        out.status.success(),
-        String::from_utf8(out.stdout).expect("utf-8"),
-    )
-}
 
 fn fixed_ns() -> i64 {
     1_000
