@@ -5,12 +5,16 @@
 //! The python CI job installs the wheel into a venv, points `MFTIK_PYTHON` at
 //! that interpreter, and runs this file with `--ignored`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use mftik_core::eventlog::END_PANIC;
 use mftik_proto::wire::mftiko::common::v1::Outcome;
+use mftik_proto::wire::mftiko::session::v1::EventLog;
+use mftik_proto::wire::mftiko::stsctl::v1::InitPayload;
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
+use mftik_rt::eventlog::{self, Kind, Reader, Record};
 use mftik_testkit::{
     Ended, Nats, Shim, WorkerSpawn, expect_applied, expect_done, expect_ending, expect_hello, init,
     init_payload, start, start_nats,
@@ -58,8 +62,12 @@ fn spawn(worker: WorkerSpawn, nats: &Nats) -> Shim {
 }
 
 fn running(shim: &mut Shim, nats: &Nats, scenario: &str, release: &str) {
+    running_with(shim, init_payload(&nats.creds, scenario), release);
+}
+
+fn running_with(shim: &mut Shim, payload: InitPayload, release: &str) {
     expect_hello(shim, release);
-    init(shim, init_payload(&nats.creds, scenario), 5000);
+    init(shim, payload, 5000);
     expect_applied(shim, "live-1");
     expect_done(shim, Verb::Init, true, "");
     start(shim);
@@ -206,6 +214,54 @@ fn an_after_callback_exception_is_crashed_and_on_stop_runs() {
     assert_eq!(ended.code, Some(20), "{}", ended.stderr);
     assert!(ended.stdout.contains("TAIL-after"), "{}", ended.stdout);
     assert_traceback(&ended, "RuntimeError");
+}
+
+/// Every frame in the volume's event log directory, oldest first.
+fn event_log(volume: &Path) -> Vec<Record> {
+    let mut records = Vec::new();
+    for file in eventlog::files(&volume.join(eventlog::DIR)).expect("log files") {
+        let mut reader = Reader::open(&file.path).expect("log file");
+        records.extend(reader.read_all().expect("frames"));
+    }
+    records
+}
+
+/// E07-D008: the exception is the `hook_end`'s text, flagged as a panic.
+#[test]
+#[ignore = "python CI job: MFTIK_PYTHON is the venv whose wheel is installed"]
+fn an_after_callback_exception_still_gets_its_hook_end() {
+    let nats = start_nats();
+    let mut shim = spawn(python_module("cases:AfterBoom"), &nats);
+    let mut payload = init_payload(&nats.creds, "");
+    payload.event_log = Some(EventLog {
+        enabled: true,
+        keep_mb: 1,
+    });
+    running_with(&mut shim, payload, &package_version());
+    expect_ending(
+        &mut shim,
+        Outcome::Crashed,
+        "hook panic: RuntimeError: after broke",
+        Some(true),
+    );
+    let ended = shim.end();
+    assert_eq!(ended.code, Some(20), "{}", ended.stderr);
+
+    let records = event_log(&ended.volume.0);
+    let frames: Vec<_> = records
+        .iter()
+        .map(|r| (r.seq, r.kind, r.r#ref, r.flags))
+        .collect();
+    assert_eq!(
+        frames,
+        [
+            (1, Kind::TIMER, 1, 0),
+            (2, Kind::HOOK_END, 1, END_PANIC),
+            (3, Kind::END, 0, 0),
+        ]
+    );
+    assert_eq!(records[1].body, b"RuntimeError: after broke");
+    assert!(records[0].t_ns <= records[1].t_ns);
 }
 
 #[test]
