@@ -66,6 +66,7 @@ type Out = Arc<FrameWriter<CtlFd>>;
 /// reports the main module's (E03-D057). `None` or an empty string reports
 /// this runtime's [`RELEASE`].
 pub fn run<S: Strategy>(strategy: S, release: Option<&str>) -> ! {
+    crate::pack::keep();
     let release = match release {
         Some(r) if !r.is_empty() => r.to_owned(),
         _ => RELEASE.to_owned(),

@@ -23,6 +23,9 @@
 //!   (§9.1.4).
 //! - [`eventlog`]: the strategy event log's file format, its writer
 //!   thread and ring, and a reader (PROTOCOL §12, E07-D001–E07-D003).
+//! - `pack`: the `mftiko.contracts=` marker and the Go build info record
+//!   that `mftiko-pack -bin` reads out of a strategy binary (E08-D001,
+//!   E08-D005).
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the
 //!   Beat thread (E03-D031–E03-D033). `report` sends `stsctl.Report` while
 //!   Run runs (E03-09).
@@ -44,6 +47,7 @@ pub mod io;
 pub mod log;
 mod md;
 pub mod nats;
+mod pack;
 mod plane;
 pub mod reader;
 mod report;
