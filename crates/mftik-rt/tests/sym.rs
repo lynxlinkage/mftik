@@ -19,8 +19,7 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,12 +39,12 @@ use mftik_rt::io::Io;
 use mftik_rt::sym::Sym;
 use mftik_rt::timers::Timers;
 use mftik_rt::{Context, HookError, Strategy};
+use mftik_testkit::NatsServer;
 use nkeys::KeyPair;
 use prost::Message;
 
 const FUSE: Duration = Duration::from_secs(20);
 const WORKER_ENV: &str = "MFTIK_RT_SYM_TEST_WORKER";
-const NATS_SERVER_ENV: &str = "MFTIK_NATS_SERVER";
 
 const BTC: u32 = 1001;
 const ETH: u32 = 1002;
@@ -56,63 +55,9 @@ const SPOT_SUB: &str = "sym.v1.changed.Bybit.Spot";
 
 // ---------- nats-server ----------
 
-struct Server {
-    child: Child,
-    port: u16,
-}
-
-impl Server {
-    fn start() -> Server {
-        let port = free_port();
-        let child = Command::new(nats_server_bin())
-            .args(["-a", "127.0.0.1", "-p", &port.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start nats-server");
-        wait_listening(port);
-        Server { child, port }
-    }
-
-    fn url(&self) -> String {
-        format!("nats://127.0.0.1:{}", self.port)
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn nats_server_bin() -> PathBuf {
-    if let Some(path) = env::var_os(NATS_SERVER_ENV) {
-        return PathBuf::from(path);
-    }
-    env::var_os("PATH")
-        .and_then(|paths| {
-            env::split_paths(&paths)
-                .map(|dir| dir.join("nats-server"))
-                .find(|bin| bin.is_file())
-        })
-        .unwrap_or_else(|| panic!("nats-server not found: set {NATS_SERVER_ENV} or put it on PATH"))
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
-
-fn wait_listening(port: u16) {
-    let start = Instant::now();
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(start.elapsed() < FUSE, "nats-server did not listen");
-        thread::sleep(Duration::from_millis(20));
-    }
+/// nats-server without auth, on a client port it picks.
+fn start_server() -> NatsServer {
+    NatsServer::start(["-a", "127.0.0.1", "-p", "-1"])
 }
 
 /// The session's credentials. The server has no auth, so any JWT will do;
@@ -432,9 +377,9 @@ fn within(after: Duration) -> CallCtx {
 
 #[test]
 fn a_changed_notification_refetches_the_table_and_reports_the_rows() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let session = Session::open(&server.url(), Config::default());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let session = Session::open(server.url(), Config::default());
 
     let info = session
         .sym
@@ -470,12 +415,12 @@ fn a_changed_notification_refetches_the_table_and_reports_the_rows() {
 
 #[test]
 fn the_revision_check_finds_a_table_that_fell_behind() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
     let config = Config {
         check_interval: Duration::from_millis(200),
     };
-    let session = Session::open(&server.url(), config);
+    let session = Session::open(server.url(), config);
     session
         .sym
         .resolve(&CallCtx::background(), BTC_T)
@@ -492,9 +437,9 @@ fn the_revision_check_finds_a_table_that_fell_behind() {
 
 #[test]
 fn a_reconnect_compares_revisions_at_once() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let relay = Relay::start(server.port);
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let relay = Relay::start(server.port());
     // The default check interval is five minutes: only the reconnect can
     // find this in time.
     let session = Session::open(&relay.url(), Config::default());
@@ -520,9 +465,9 @@ fn a_reconnect_compares_revisions_at_once() {
 
 #[test]
 fn a_row_moved_to_the_terminal_table_keeps_its_last_copy() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let session = Session::open(&server.url(), Config::default());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let session = Session::open(server.url(), Config::default());
     session
         .sym
         .resolve(&CallCtx::background(), BTC_T)
@@ -560,9 +505,9 @@ fn a_row_moved_to_the_terminal_table_keeps_its_last_copy() {
 
 #[test]
 fn a_resolve_waits_until_the_hook_deadline_past_five_seconds() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let session = Session::open(&server.url(), Config::default());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let session = Session::open(server.url(), Config::default());
     fake.state().get_delay = Duration::from_millis(5_600);
     let started = Instant::now();
     let info = session
@@ -575,9 +520,9 @@ fn a_resolve_waits_until_the_hook_deadline_past_five_seconds() {
 
 #[test]
 fn without_a_deadline_a_resolve_waits_five_seconds() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let session = Session::open(&server.url(), Config::default());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let session = Session::open(server.url(), Config::default());
     fake.state().get_delay = Duration::from_secs(8);
     let started = Instant::now();
     let got = session.sym.resolve(&CallCtx::background(), BTC_T);
@@ -596,9 +541,9 @@ fn without_a_deadline_a_resolve_waits_five_seconds() {
 
 #[test]
 fn the_hook_deadline_or_a_cancel_ends_a_resolve() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let session = Session::open(&server.url(), Config::default());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let session = Session::open(server.url(), Config::default());
     fake.state().get_delay = Duration::from_secs(3);
 
     let started = Instant::now();
@@ -635,9 +580,9 @@ fn the_hook_deadline_or_a_cancel_ends_a_resolve() {
 
 #[test]
 fn a_resolve_that_meets_a_refetch_finishes_with_it() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
-    let session = Session::open(&server.url(), Config::default());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
+    let session = Session::open(server.url(), Config::default());
     session
         .sym
         .resolve(&CallCtx::background(), BTC_T)
@@ -835,8 +780,8 @@ fn done_error(ran: &Ran, verb: worker::Verb) -> Option<String> {
 
 #[test]
 fn resolve_blocks_in_on_init_and_on_start_and_fails_in_other_hooks() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
     // Past the request's 5 s, inside Init's deadline_ms: the plane passes the
     // hook's context to the resolve.
     {
@@ -844,7 +789,7 @@ fn resolve_blocks_in_on_init_and_on_start_and_fails_in_other_hooks() {
         state.get_delay = Duration::from_millis(5_400);
         state.first_get_only = true;
     }
-    let ran = run_worker(&server.url(), "", 9_000);
+    let ran = run_worker(server.url(), "", 9_000);
     assert_eq!(ran.code, Some(0), "{}", ran.stderr);
     assert_eq!(done_error(&ran, worker::Verb::Init).as_deref(), Some(""));
     assert_eq!(done_error(&ran, worker::Verb::Start).as_deref(), Some(""));
@@ -873,9 +818,9 @@ fn resolve_blocks_in_on_init_and_on_start_and_fails_in_other_hooks() {
 
 #[test]
 fn an_unknown_ticker_from_on_init_is_init_failed() {
-    let server = Server::start();
-    let _fake = FakeSym::start(&server.url());
-    let ran = run_worker(&server.url(), "missing", 5_000);
+    let server = start_server();
+    let _fake = FakeSym::start(server.url());
+    let ran = run_worker(server.url(), "missing", 5_000);
     assert_eq!(ran.code, Some(10), "{}", ran.stderr);
     assert_eq!(
         done_error(&ran, worker::Verb::Init).as_deref(),
@@ -886,11 +831,11 @@ fn an_unknown_ticker_from_on_init_is_init_failed() {
 
 #[test]
 fn the_init_deadline_ends_a_resolve_in_on_init() {
-    let server = Server::start();
-    let fake = FakeSym::start(&server.url());
+    let server = start_server();
+    let fake = FakeSym::start(server.url());
     fake.state().get_delay = Duration::from_secs(10);
     let started = Instant::now();
-    let ran = run_worker(&server.url(), "", 1_500);
+    let ran = run_worker(server.url(), "", 1_500);
     assert_eq!(ran.code, Some(10), "{}", ran.stderr);
     assert_eq!(
         done_error(&ran, worker::Verb::Init).as_deref(),

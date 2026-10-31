@@ -7,9 +7,6 @@
 //! `tests/session.rs`. A test that cannot find it fails.
 
 use std::collections::HashMap;
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +17,7 @@ use mftik_core::cloid;
 use mftik_core::dispatch::{self, RunEnd, StopRequest};
 use mftik_core::tdpath::{Origin, RejectedRequest, Td};
 use mftik_proto::wire::mftiko::common::v1 as common;
+use mftik_testkit::NatsServer;
 
 use super::*;
 
@@ -28,52 +26,9 @@ const SESSION: &str = "c0ffee";
 
 // ---------- nats-server, no auth ----------
 
-struct Server {
-    child: Child,
-    url: String,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn nats_server_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("MFTIK_NATS_SERVER") {
-        return PathBuf::from(path);
-    }
-    std::env::var_os("PATH")
-        .and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join("nats-server"))
-                .find(|bin| bin.is_file())
-        })
-        .expect("nats-server not found: set MFTIK_NATS_SERVER or put it on PATH")
-}
-
-fn start_server() -> Server {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port();
-    let child = Command::new(nats_server_bin())
-        .args(["-a", "127.0.0.1", "-p", &port.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start nats-server");
-    let start = StdInstant::now();
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(start.elapsed() < FUSE, "nats-server did not listen");
-        thread::sleep(Duration::from_millis(20));
-    }
-    Server {
-        child,
-        url: format!("nats://127.0.0.1:{port}"),
-    }
+/// On a client port nats-server picks.
+fn start_server() -> NatsServer {
+    NatsServer::start(["-a", "127.0.0.1", "-p", "-1"])
 }
 
 fn connect(io: &Io, url: &str) -> Client {
@@ -447,7 +402,7 @@ struct Rig {
     logs: Arc<Mutex<Vec<String>>>,
     /// Runs inside the next delivered hook, once.
     during: During,
-    _server: Server,
+    _server: NatsServer,
 }
 
 fn rig(recv_window: Duration) -> Rig {
@@ -456,11 +411,11 @@ fn rig(recv_window: Duration) -> Rig {
 
 fn rig_with(recv_window: Duration, on_stop: Option<StopWatch>) -> Rig {
     let server = start_server();
-    let peer = Peer::connect(&server.url);
+    let peer = Peer::connect(server.url());
     let io = Io::start().expect("io");
     let clock = Clock::new();
     let timers = Timers::new(io.clone(), clock);
-    let nats = connect(&io, &server.url);
+    let nats = connect(&io, server.url());
     let path: Arc<OnceLock<TdPath>> = Arc::default();
     let logs: Arc<Mutex<Vec<String>>> = Arc::default();
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();

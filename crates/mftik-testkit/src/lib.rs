@@ -8,13 +8,13 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
-use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
@@ -92,18 +92,99 @@ impl Drop for TempDir {
 }
 
 pub struct Nats {
-    pub child: Child,
+    pub server: NatsServer,
     pub url: String,
     /// What the session's `InitPayload.nats` carries.
     pub creds: NatsCredentials,
     pub _dir: TempDir,
 }
 
-impl Drop for Nats {
+/// A nats-server that chose its own client port.
+///
+/// The port is not picked by binding port 0 and closing it before
+/// nats-server starts. A child that another test thread forks in between
+/// holds a copy of that socket until it execs, so the closed port can
+/// accept a readiness probe before nats-server listens, and the client
+/// that connects next is refused (#451). nats-server is given port -1
+/// instead, and its log line for the port is printed after it listens.
+pub struct NatsServer {
+    child: Child,
+    port: u16,
+    url: String,
+}
+
+impl NatsServer {
+    /// Starts nats-server with `args`, which have to give it the client
+    /// port -1, and returns once it listens.
+    pub fn start<I, S>(args: I) -> NatsServer
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut child = Command::new(nats_server_bin())
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start nats-server");
+        let stderr = child.stderr.take().expect("nats-server stderr");
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut lines = BufReader::new(stderr).lines().map_while(Result::ok);
+            let mut before = String::new();
+            for line in lines.by_ref() {
+                if let Some(addr) = client_addr(&line) {
+                    let _ = tx.send(Ok(addr.to_owned()));
+                    // nats-server would block on a full pipe.
+                    lines.for_each(drop);
+                    return;
+                }
+                before.push_str(&line);
+                before.push('\n');
+            }
+            let _ = tx.send(Err(before));
+        });
+        let failed = match rx.recv_timeout(FUSE) {
+            Ok(Ok(addr)) => {
+                let port = addr
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse().ok())
+                    .unwrap_or_else(|| panic!("nats-server listens on {addr}"));
+                return NatsServer {
+                    child,
+                    port,
+                    url: format!("nats://{addr}"),
+                };
+            }
+            Ok(Err(log)) => format!("nats-server exited before it listened:\n{log}"),
+            Err(_) => "nats-server did not listen".to_owned(),
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("{failed}");
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+impl Drop for NatsServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// `127.0.0.1:4222` in `[INF] Listening for client connections on 127.0.0.1:4222`.
+fn client_addr(line: &str) -> Option<&str> {
+    let (_, addr) = line.split_once("Listening for client connections on ")?;
+    Some(addr.trim_end())
 }
 
 pub fn nats_server_bin() -> PathBuf {
@@ -123,14 +204,6 @@ pub fn nats_server_bin() -> PathBuf {
     })
 }
 
-pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
-}
-
 /// Operator mode with a memory resolver: one operator, a system account, and
 /// the session's account, whose user is the session (E09-D006).
 pub fn start_nats() -> Nats {
@@ -148,11 +221,10 @@ pub fn start_nats() -> Nats {
     let sys_jwt = jwt(&operator, &system.public_key(), "SYS", ACCOUNT);
     let acc_jwt = jwt(&operator, &account.public_key(), "MFTIKO", ACCOUNT);
     let user_jwt = jwt(&account, &user.public_key(), "session-c0ffee", USER);
-    let port = free_port();
     let op_path = dir.0.join("operator.jwt");
     fs::write(&op_path, &op_jwt).expect("operator jwt");
     let conf = format!(
-        "listen: 127.0.0.1:{port}\n\
+        "listen: 127.0.0.1:-1\n\
          operator: {op:?}\n\
          system_account: {sys}\n\
          resolver: MEMORY\n\
@@ -164,21 +236,10 @@ pub fn start_nats() -> Nats {
     );
     let conf_path = dir.0.join("nats-server.conf");
     fs::write(&conf_path, conf).expect("server config");
-    let child = Command::new(nats_server_bin())
-        .arg("-c")
-        .arg(&conf_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start nats-server");
-    let start = Instant::now();
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(start.elapsed() < FUSE, "nats-server did not listen");
-        thread::sleep(Duration::from_millis(20));
-    }
+    let server = NatsServer::start([OsStr::new("-c"), conf_path.as_os_str()]);
     Nats {
-        child,
-        url: format!("nats://127.0.0.1:{port}"),
+        url: server.url().to_owned(),
+        server,
         creds: NatsCredentials {
             user_jwt,
             seed: user.seed().expect("user seed"),
