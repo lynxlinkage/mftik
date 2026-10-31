@@ -271,6 +271,8 @@ pub struct Ended {
     /// The worker's stdout, unfiltered.
     pub stdout: String,
     pub stderr: String,
+    /// The worker's `MFTIKO_VOLUME_DIR`, removed when this is dropped.
+    pub volume: TempDir,
 }
 
 /// A worker process the fake shim starts. [`Shim::spawn`] builds the one that
@@ -506,6 +508,7 @@ impl Shim {
             lines,
             stdout,
             stderr,
+            volume: self.volume,
         }
     }
 }
