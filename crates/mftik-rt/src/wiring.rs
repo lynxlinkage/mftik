@@ -149,9 +149,10 @@ impl Wiring {
     }
 
     /// `call` is the hook's context: the resolve waits until its deadline
-    /// when it has one (E03-D041 on #411).
-    pub(crate) fn resolve(&self, call: &CallCtx, ticker: &str) -> Result<Info, Error> {
-        self.sym.resolve(call, ticker).map_err(sym_error)
+    /// when it has one (E03-D041 on #411). The error is SYM's own, which the
+    /// event log classifies; the plane maps it with [`sym_error`].
+    pub(crate) fn resolve(&self, call: &CallCtx, ticker: &str) -> Result<Info, symclient::Error> {
+        self.sym.resolve(call, ticker)
     }
 
     pub(crate) fn info(&self, uid: u32) -> Result<Info, Error> {
@@ -261,7 +262,7 @@ impl Wiring {
 /// Go's `asSDK` for symclient errors. `Closed` (no connection yet, or the
 /// client closed) is `Stopping`, as Go's `p.sym == nil` (E03-D085). Other
 /// errors keep their text.
-fn sym_error(err: symclient::Error) -> Error {
+pub(crate) fn sym_error(err: symclient::Error) -> Error {
     match err {
         symclient::Error::NotInInit => Error::NotInInit,
         symclient::Error::UnknownUid => Error::UnknownUid,

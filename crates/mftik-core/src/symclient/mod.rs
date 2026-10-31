@@ -1153,6 +1153,50 @@ fn info_from_proto(msg: sym::SymbolInfo) -> Result<Info, String> {
     })
 }
 
+/// [`Info`] back to `SymbolInfo`, as Go's `InfoToProto`: the event log's
+/// `resolve` frame carries it. A zero or empty optional field is unset, and
+/// a NaN bound is a bound without a value.
+pub fn info_to_proto(info: &Info) -> sym::SymbolInfo {
+    let present = |value: f64| (value != 0.0).then_some(value);
+    sym::SymbolInfo {
+        uid: info.uid,
+        universal_ticker: info.ticker.to_string(),
+        exch_ticker: info.exch_ticker.clone(),
+        base: info.base.clone(),
+        quote: info.quote.clone(),
+        contract_size: present(info.contract_size),
+        contract_value_ccy: info.contract_value_ccy.clone(),
+        price_ccy: info.price_ccy.clone(),
+        settle: (!info.settle.is_empty()).then(|| info.settle.clone()),
+        expiry_ns: info.expiry_ns,
+        strike: present(info.strike),
+        option_type: info.option_type.clone(),
+        status: i32::from(status_to_proto(info.status)),
+        filters: info
+            .filters
+            .iter()
+            .map(|(name, &value)| {
+                let value = (!value.is_nan()).then_some(value);
+                (name.clone(), sym::Bound { value })
+            })
+            .collect(),
+        updated_at_ns: info.updated_at_ns,
+    }
+}
+
+fn status_to_proto(status: Status) -> sym::SymbolStatus {
+    match status {
+        Status::Unspecified => sym::SymbolStatus::Unspecified,
+        Status::Prelisting => sym::SymbolStatus::Prelisting,
+        Status::Tradable => sym::SymbolStatus::Tradable,
+        Status::Halted => sym::SymbolStatus::Halted,
+        Status::Settling => sym::SymbolStatus::Settling,
+        Status::Expired => sym::SymbolStatus::Expired,
+        Status::Delisted => sym::SymbolStatus::Delisted,
+        Status::Unknown => sym::SymbolStatus::Unknown,
+    }
+}
+
 fn status_from_proto(value: i32) -> Result<Status, String> {
     let status = match sym::SymbolStatus::try_from(value) {
         Ok(sym::SymbolStatus::Prelisting) => Status::Prelisting,

@@ -155,9 +155,11 @@ pub struct NewOrder {
 }
 
 /// `client_order_id` is already in the OMS when this is returned.
+/// `submit_gen` is the td.view generation the Submit recorded (E08-D054).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Submitted {
     pub client_order_id: String,
+    pub submit_gen: u64,
     pub effects: Vec<Effect>,
 }
 
@@ -711,7 +713,7 @@ impl Path {
                 recv_window_ms: order.recv_window_ms,
             })),
         };
-        {
+        let generation = {
             let account = self
                 .accounts
                 .get_mut(&order.api_id)
@@ -719,7 +721,8 @@ impl Path {
             let generation = account.sent_gen;
             account.orders.insert(id.clone(), row);
             account.submit_gen.insert(id.clone(), generation);
-        }
+            generation
+        };
         let effect = self.start_round(
             order.api_id,
             OrderKind::Submit,
@@ -729,6 +732,7 @@ impl Path {
         );
         Ok(Submitted {
             client_order_id: id,
+            submit_gen: generation,
             effects: vec![effect],
         })
     }

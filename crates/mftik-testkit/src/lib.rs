@@ -204,6 +204,48 @@ pub fn nats_server_bin() -> PathBuf {
     })
 }
 
+pub const EVENTLOG_ENV: &str = "MFTIK_EVENTLOG";
+
+/// Go `mftiko-eventlog` (E07-D002): `MFTIK_EVENTLOG`, else on PATH.
+/// `scripts/install-mftiko-eventlog` installs it from the mftiko commit in
+/// contract/proto/SOURCE, as CI does; a test that cannot find it fails.
+pub fn eventlog_bin() -> PathBuf {
+    if let Some(path) = env::var_os(EVENTLOG_ENV) {
+        return PathBuf::from(path);
+    }
+    let found = env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|dir| dir.join("mftiko-eventlog"))
+            .find(|bin| bin.is_file())
+    });
+    found.unwrap_or_else(|| {
+        panic!(
+            "mftiko-eventlog not found: set {EVENTLOG_ENV} or put it on PATH \
+             (scripts/install-mftiko-eventlog)"
+        )
+    })
+}
+
+/// Runs `mftiko-eventlog dump ARGS...`: whether it succeeded, and its
+/// stdout. It must print nothing on stderr.
+#[track_caller]
+pub fn eventlog_dump<S: AsRef<OsStr>>(args: &[S]) -> (bool, String) {
+    let out = Command::new(eventlog_bin())
+        .arg("dump")
+        .args(args)
+        .output()
+        .expect("run mftiko-eventlog");
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).expect("utf-8"),
+    )
+}
+
 /// Operator mode with a memory resolver: one operator, a system account, and
 /// the session's account, whose user is the session (E09-D006).
 pub fn start_nats() -> Nats {

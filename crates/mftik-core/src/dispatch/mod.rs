@@ -27,7 +27,10 @@
 //! names from inside with [`Dispatcher::record_input`]. After the hook
 //! returns it writes a `hook_end` that refers to that frame, with the panic
 //! text when the hook panicked (E07-D008). A hook the watchdog found `HUNG`
-//! gets none. Without the log each recording point is one `Option` check:
+//! gets none; the watchdog writes a `stop` with [`STOP_HUNG`] instead. The
+//! ending writes a `stop` before it delivers anything, and the strategy's
+//! OnStop is an `onstop` input (E07-D012). Without the log each recording
+//! point is one `Option` check:
 //! no clock is read, nothing is allocated, and no receive time or input is
 //! kept (E07-D009). The frame times are the recorder's clock, not the
 //! injected one.
@@ -46,7 +49,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use ring::Ring;
 
-use crate::eventlog::{END_PANIC, Kind, Recorder};
+use crate::eventlog::{END_ERROR, END_PANIC, Kind, Recorder, STOP_DELIVER, STOP_HUNG};
 
 /// TD buffer capacity (E08-D015). Not a session-spec field. A full buffer ends the session `FAILED`.
 pub const TD_CAP: usize = 65536;
@@ -355,7 +358,7 @@ struct Shared {
 }
 
 /// The event log, and the input of the hook that is running. Only the
-/// dispatcher thread writes `start_ns`, `seq`, and `open`.
+/// dispatcher thread writes `start_ns`, `seq`, `open`, and `stop_at`.
 struct Rec {
     log: Arc<dyn Recorder>,
     /// The running hook's start on the log's clock: its input's `t_ns`.
@@ -364,6 +367,15 @@ struct Rec {
     seq: AtomicU64,
     /// A hook is running, so [`Dispatcher::record_input`] has one to bind to.
     open: AtomicBool,
+    /// When the loop stopped MD: the `stop` frame's `recv_ns`.
+    stop_at: AtomicI64,
+}
+
+/// How a hook ended, for its `hook_end` (E07-D008).
+enum Ending<'a> {
+    Returned,
+    Panicked(&'a (dyn Any + Send)),
+    Failed(&'a str),
 }
 
 struct State {
@@ -577,6 +589,13 @@ impl Dispatcher {
     /// log, and then no clock is read (E07-D009).
     pub fn record_now(&self) -> Option<i64> {
         self.shared.rec.as_ref().map(|rec| rec.log.now_ns())
+    }
+
+    /// The event log, for the frames the host writes outside a hook's input
+    /// and `hook_end`: an order or a read as the strategy made it. `None`
+    /// without the log.
+    pub fn recorder(&self) -> Option<&Arc<dyn Recorder>> {
+        self.shared.rec.as_ref().map(|rec| &rec.log)
     }
 
     /// The next event log timer id, for a timer the host runs itself and
@@ -815,6 +834,9 @@ impl Shared {
             if hook_exceeded(&state) {
                 state.hung = true;
                 drop(state);
+                if let Some(rec) = &self.rec {
+                    rec.hung();
+                }
                 self.finish(RunEnd::Hung);
                 state = lock(&self.mu);
                 continue;
@@ -885,6 +907,9 @@ impl Shared {
     }
 
     fn phase1(&self) {
+        if let Some(rec) = &self.rec {
+            rec.stop_at.store(rec.log.now_ns(), Ordering::Relaxed);
+        }
         let end = {
             let mut state = lock(&self.mu);
             state.md_closed = true;
@@ -906,12 +931,21 @@ impl Shared {
         self.cv.notify_all();
     }
 
+    /// The event log gets a `stop` frame first: `recv_ns` is when the loop
+    /// stopped MD, `t_ns` is when C4 asked for OnStop, and [`STOP_DELIVER`]
+    /// says whether the TD buffer is delivered.
     fn phase2(&self, request: &StopRequest, deliver: bool) -> Result<(), StopError> {
         {
             let mut state = lock(&self.mu);
             state.in_stop = true;
         }
-        match catch_unwind(AssertUnwindSafe(|| self.phase2_inner(request, deliver))) {
+        let asked_ns = match &self.rec {
+            Some(rec) => rec.stop(deliver && !self.stop_expired(request)),
+            None => 0,
+        };
+        match catch_unwind(AssertUnwindSafe(|| {
+            self.phase2_inner(request, deliver, asked_ns)
+        })) {
             Ok(result) => result,
             Err(payload) => Err(StopError::StopPanic(format!(
                 "dispatch: stop: {}",
@@ -920,7 +954,12 @@ impl Shared {
         }
     }
 
-    fn phase2_inner(&self, request: &StopRequest, deliver: bool) -> Result<(), StopError> {
+    fn phase2_inner(
+        &self,
+        request: &StopRequest,
+        deliver: bool,
+        asked_ns: i64,
+    ) -> Result<(), StopError> {
         if self.stop_expired(request) {
             self.close_td();
             return Err(self.stop_reason(request));
@@ -942,7 +981,7 @@ impl Shared {
                 deadline_ns: request.deadline_ns(),
                 now_ns,
             };
-            self.run_on_stop(&info)?;
+            self.run_on_stop(&info, asked_ns)?;
         }
         delivered
     }
@@ -966,12 +1005,33 @@ impl Shared {
         }
     }
 
-    fn run_on_stop(&self, info: &StopInfo) -> Result<(), StopError> {
+    /// The strategy's OnStop. With the log on it is an `onstop` input whose
+    /// `recv_ns` is when C4 asked, and a `hook_end` with the panic or the
+    /// error's text as the hook gave it.
+    fn run_on_stop(&self, info: &StopInfo, asked_ns: i64) -> Result<(), StopError> {
         self.begin_hook_at(info.now_ns);
+        if let Some(rec) = &self.rec {
+            rec.begin(Some(Frame {
+                kind: Kind::ONSTOP,
+                flags: 0,
+                recv_ns: asked_ns,
+                r#ref: 0,
+                head: &[],
+                body: &[],
+            }));
+        }
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.on_stop.with_mut(|callback| callback(info))
         }));
-        self.finish_hook(info.now_ns);
+        let hung = self.finish_hook(info.now_ns);
+        if let Some(rec) = &self.rec {
+            let ending = match &result {
+                Ok(Some(Err(message))) => Ending::Failed(message),
+                Err(payload) => Ending::Panicked(&**payload),
+                Ok(_) => Ending::Returned,
+            };
+            rec.end(ending, hung);
+        }
         match result {
             Ok(Some(Ok(()))) | Ok(None) => Ok(()),
             Ok(Some(Err(message))) => Err(StopError::OnStop(message)),
@@ -1096,7 +1156,11 @@ impl Shared {
                 rec.begin(input);
                 let result = catch_unwind(AssertUnwindSafe(hook));
                 let hung = self.finish_hook(start);
-                rec.end(result.as_ref().err().map(|payload| &**payload), hung);
+                let ending = match &result {
+                    Ok(()) => Ending::Returned,
+                    Err(payload) => Ending::Panicked(&**payload),
+                };
+                rec.end(ending, hung);
                 result
             }
         };
@@ -1404,7 +1468,26 @@ impl Rec {
             start_ns: AtomicI64::new(0),
             seq: AtomicU64::new(0),
             open: AtomicBool::new(false),
+            stop_at: AtomicI64::new(0),
         }
+    }
+
+    /// C4 asked for OnStop: the `stop` frame, before the ending delivers
+    /// anything. `deliver` is [`STOP_DELIVER`]. Returns when C4 asked, the
+    /// frame's `t_ns`.
+    fn stop(&self, deliver: bool) -> i64 {
+        let asked_ns = self.log.now_ns();
+        let flags = if deliver { STOP_DELIVER } else { 0 };
+        let stop_at = self.stop_at.load(Ordering::Relaxed);
+        self.log
+            .append(Kind::STOP, flags, stop_at, asked_ns, 0, &[], &[]);
+        asked_ns
+    }
+
+    /// The watchdog found a hook `HUNG`. That hook gets no `hook_end`.
+    fn hung(&self) {
+        let at = self.log.now_ns();
+        self.log.append(Kind::STOP, STOP_HUNG, at, at, 0, &[], &[]);
     }
 
     /// A hook starts. Its input, if it has one now, is written before it runs.
@@ -1438,31 +1521,23 @@ impl Rec {
         self.seq.store(seq, Ordering::Relaxed);
     }
 
-    /// The hook returned, or panicked with `panic` (E07-D008). A hook with an
-    /// input gets a `hook_end` that refers to it, unless it was `HUNG`.
-    fn end(&self, panic: Option<&(dyn Any + Send)>, hung: bool) {
+    /// The hook ended (E07-D008). A hook with an input gets a `hook_end`
+    /// that refers to it, unless it was `HUNG`.
+    fn end(&self, ending: Ending<'_>, hung: bool) {
         self.open.store(false, Ordering::Relaxed);
         let seq = self.seq.swap(0, Ordering::Relaxed);
         if seq == 0 || hung {
             return;
         }
         let end_ns = self.log.now_ns();
-        match panic {
-            None => {
-                self.log.append(Kind::HOOK_END, 0, 0, end_ns, seq, &[], &[]);
-            }
-            Some(payload) => {
-                let text = panic_message(payload);
-                self.log.append(
-                    Kind::HOOK_END,
-                    END_PANIC,
-                    0,
-                    end_ns,
-                    seq,
-                    text.as_bytes(),
-                    &[],
-                );
-            }
+        let end = |flags, text: &[u8]| {
+            self.log
+                .append(Kind::HOOK_END, flags, 0, end_ns, seq, text, &[]);
+        };
+        match ending {
+            Ending::Returned => end(0, &[]),
+            Ending::Panicked(payload) => end(END_PANIC, panic_message(payload).as_bytes()),
+            Ending::Failed(text) => end(END_ERROR, text.as_bytes()),
         }
     }
 }

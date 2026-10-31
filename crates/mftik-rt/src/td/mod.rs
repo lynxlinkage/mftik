@@ -30,18 +30,28 @@
 //!   the event's hook, held or live, and the buffer entry that runs that hook
 //!   writes it first with `record_input` (§12.4, E07-D007). An event that is
 //!   dropped, or runs no strategy hook, is not written.
+//! - With the event log on, Submit, Cancel, each round of a BatchCancel, and
+//!   RequestRecon write an `order_call` numbered from 1 in call order. A
+//!   request's `order_publish` and `order_reply` carry its call id: the
+//!   publish once the bytes are on the connection, the reply as the input of
+//!   the buffer entry that feeds it, which is an entry of its own when the
+//!   round runs no hook. A Recon reply from `td.view` is the `td_view` input
+//!   of its OnRecon (§12.4, §12.5, E07-D011).
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use async_nats::{Client, StatusCode, Subscriber};
+use bytes::Bytes;
 use futures_util::StreamExt;
 use mftik_core::cloidgen;
 use mftik_core::dispatch::{self, Dispatcher, PushError};
-use mftik_core::eventlog::Kind;
+use mftik_core::eventlog::{
+    self, FROM_BATCH, Kind, OP_BATCH_CANCEL, OP_CANCEL, OP_RECON, OP_SUBMIT, outcome,
+};
 use mftik_core::tdpath::{
     self, Bound, ClientOrderIdError, ClientOrderIds, Effect, Hook, ReconOutcome, RoundOutcome,
     RoundTicket,
@@ -56,6 +66,7 @@ use crate::clock::Clock;
 use crate::context::Error;
 use crate::io::Io;
 use crate::strategy::Order;
+use crate::sym::{DEADLINE_EXCEEDED, NO_RESPONDERS};
 use crate::timers::{TimerKey, Timers};
 
 #[cfg(test)]
@@ -67,6 +78,10 @@ pub(crate) const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Logged once a `td.view` recon reply is on the TD buffer. Conformance's
 /// buffer priority check waits for these words (Go `tdpath.ask`).
 pub(crate) const QUEUED_LINE: &str = "td.view: queued";
+
+/// Go's text when the connection closes under a request
+/// (`nats.ErrConnectionClosed`): a reply inbox that ends without a message.
+const CONNECTION_CLOSED: &str = "nats: connection closed";
 
 /// Runs one tdpath hook as a strategy hook (the plane's `deliver_td`).
 pub(crate) type DeliverTd = Arc<dyn Fn(Hook) + Send + Sync>;
@@ -119,6 +134,8 @@ struct Inner {
     closing: AtomicBool,
     /// tdpath failed the session, or the TD buffer was full.
     failed: AtomicBool,
+    /// The last order call id. Counted with the event log on only, as Go's.
+    calls: AtomicU64,
 }
 
 struct State {
@@ -126,7 +143,9 @@ struct State {
     /// Inputs not fed yet, in arrival order.
     deferred: VecDeque<Input>,
     /// Hooks tdpath returned that have not run, with their event log inputs.
-    chain: VecDeque<(Hook, Option<dispatch::Input>)>,
+    /// No hook is an `order_reply` whose round ran none: its entry writes
+    /// only the input, as Go writes every round's reply.
+    chain: VecDeque<(Option<Hook>, Option<dispatch::Input>)>,
     /// A `resume` entry is on the TD buffer.
     queued: bool,
     #[cfg(test)]
@@ -143,11 +162,15 @@ enum Input {
     Order {
         ticket: RoundTicket,
         outcome: RoundOutcome,
+        /// The `order_reply` input, with the event log on.
+        logged: Option<dispatch::Input>,
     },
     Recon {
         api_id: i64,
         generation: u64,
         outcome: ReconOutcome,
+        /// The `td_view` input of a Recon reply, with the event log on.
+        logged: Option<dispatch::Input>,
     },
     Backoff {
         api_id: i64,
@@ -156,10 +179,36 @@ enum Input {
 
 struct Outgoing {
     ticket: RoundTicket,
+    /// The request's order call id; 0 with the event log off.
+    call: u64,
     subject: String,
-    body: Vec<u8>,
+    body: Bytes,
     /// `recv_window` from when tdpath returned the send (Go's round context).
     deadline: Instant,
+}
+
+/// The order call whose `td.order` requests [`Inner::perform`] sends, as
+/// its `order_call` frames write it. Only made with the event log on.
+#[derive(Clone, Copy)]
+struct Call {
+    /// The call's clock. A Submit's is the one its client order id is made
+    /// from (Go `callTime`).
+    at_ns: i64,
+    /// The td.view generation a Submit recorded; 0 for the cancels.
+    submit_gen: u64,
+    /// Each round of a BatchCancel.
+    from_batch: bool,
+}
+
+/// How one `td.order` round ended.
+enum Answer {
+    /// A message came on the inbox, with its status.
+    Reply(Option<StatusCode>, Bytes),
+    NoResponders,
+    /// The round's `recv_window` ran out.
+    Timeout,
+    /// Not sent, or the inbox ended; the text says why.
+    Failed(String),
 }
 
 impl TdPath {
@@ -203,6 +252,7 @@ impl TdPath {
             readers: watch::Sender::new(false),
             closing: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            calls: AtomicU64::new(0),
         });
         inner.io.spawn(send_orders(
             Arc::downgrade(&inner),
@@ -270,12 +320,25 @@ impl TdPath {
     }
 
     /// The first recon of every account, after OnStart (Go `tdpath.Recon`).
+    /// Not an order call.
     pub(crate) fn recon(&self) -> Result<(), Error> {
-        self.inner.call(|path| path.recon_all())
+        self.inner.call(false, |path| path.recon_all())
     }
 
+    /// An order call with no `td.order` request: its reply is a `td_view`
+    /// (Go `RequestRecon`).
     pub(crate) fn request_recon(&self, api_id: i64) -> Result<(), Error> {
-        self.inner.call(|path| path.request_recon(api_id))
+        let inner = &self.inner;
+        if inner.closing() {
+            return Err(Error::Stopping);
+        }
+        let mut state = inner.lock();
+        let effects = state.path.request_recon(api_id).map_err(sdk_error)?;
+        if let Some(at_ns) = inner.disp.record_now() {
+            inner.record_call(OP_RECON, at_ns, api_id, 0, &[]);
+        }
+        inner.perform(&mut state, effects, None);
+        Ok(())
     }
 
     pub(crate) fn submit(&self, order: Order) -> Result<String, Error> {
@@ -283,21 +346,27 @@ impl TdPath {
         if inner.closing() {
             return Err(Error::Stopping);
         }
-        let now_ms = inner.clock.now_ns().div_euclid(1_000_000);
+        let now_ns = inner.clock.now_ns();
         let mut ids = ProcessIds {
             api_id: order.api_id,
         };
         let mut state = inner.lock();
         let submitted = state
             .path
-            .submit(order, now_ms, &mut ids)
+            .submit(order, now_ns.div_euclid(1_000_000), &mut ids)
             .map_err(sdk_error)?;
-        inner.perform(&mut state, submitted.effects);
+        let call = inner.disp.recorder().map(|_| Call {
+            at_ns: now_ns,
+            submit_gen: submitted.submit_gen,
+            from_batch: false,
+        });
+        inner.perform(&mut state, submitted.effects, call);
         Ok(submitted.client_order_id)
     }
 
     pub(crate) fn cancel(&self, api_id: i64, client_order_id: &str) -> Result<(), Error> {
-        self.inner.call(|path| path.cancel(api_id, client_order_id))
+        self.inner
+            .call(false, |path| path.cancel(api_id, client_order_id))
     }
 
     /// Split by the account's `cancel_batch`; 1 sends one Cancel per order
@@ -309,7 +378,7 @@ impl TdPath {
         uids: &[u32],
     ) -> Result<(), Error> {
         self.inner
-            .call(|path| path.batch_cancel(api_id, algo_id, uids))
+            .call(true, |path| path.batch_cancel(api_id, algo_id, uids))
     }
 
     pub(crate) fn order(&self, api_id: i64, client_order_id: &str) -> Option<td::Order> {
@@ -361,9 +430,12 @@ impl Inner {
         self.closing.load(Ordering::SeqCst)
     }
 
-    /// A tdpath call a hook makes. Its effects are sends, never hooks.
+    /// A tdpath call a hook makes. Its effects are sends, never hooks. With
+    /// the event log on, its `td.order` requests are order calls at the
+    /// call's clock; `from_batch` marks a BatchCancel's rounds.
     fn call(
         self: &Arc<Self>,
+        from_batch: bool,
         f: impl FnOnce(&mut tdpath::Path) -> Result<Vec<Effect>, tdpath::Error>,
     ) -> Result<(), Error> {
         if self.closing() {
@@ -371,8 +443,55 @@ impl Inner {
         }
         let mut state = self.lock();
         let effects = f(&mut state.path).map_err(sdk_error)?;
-        self.perform(&mut state, effects);
+        let call = self.disp.record_now().map(|at_ns| Call {
+            at_ns,
+            submit_gen: 0,
+            from_batch,
+        });
+        self.perform(&mut state, effects, call);
         Ok(())
+    }
+
+    /// Writes one `order_call` and returns its call id, which the request's
+    /// `order_publish` and `order_reply` carry. Under the state lock, so ids
+    /// follow call order. 0 with the event log off (Go `Path.record`).
+    fn record_call(
+        &self,
+        flags: u16,
+        at_ns: i64,
+        api_id: i64,
+        submit_gen: u64,
+        cloids: &[&str],
+    ) -> u64 {
+        let Some(rec) = self.disp.recorder() else {
+            return 0;
+        };
+        let mut body = Vec::new();
+        eventlog::order_call(&mut body, api_id, submit_gen, cloids);
+        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        rec.append(Kind::ORDER_CALL, flags, 0, at_ns, call, &body, &[]);
+        call
+    }
+
+    /// The `order_call` of one `td.order` request: the operation and the
+    /// client order ids come from the request.
+    fn record_order(&self, call: Call, api_id: i64, request: &td::OrderRequest) -> u64 {
+        use td::order_request::Req;
+        let (op, cloids) = match &request.req {
+            Some(Req::Submit(submit)) => (OP_SUBMIT, vec![submit.client_order_id.as_str()]),
+            Some(Req::Cancel(cancel)) => (OP_CANCEL, vec![cancel.client_order_id.as_str()]),
+            Some(Req::BatchCancel(batch)) => (
+                OP_BATCH_CANCEL,
+                batch
+                    .orders
+                    .iter()
+                    .map(|order| order.client_order_id.as_str())
+                    .collect(),
+            ),
+            None => (0, Vec::new()),
+        };
+        let flags = if call.from_batch { op | FROM_BATCH } else { op };
+        self.record_call(flags, call.at_ns, api_id, call.submit_gen, &cloids)
     }
 
     /// Moves the dispatcher's clock before queueing (E03-D052).
@@ -422,32 +541,37 @@ impl Inner {
     /// buffer entry, so each gets its own budget and TD keeps its priority
     /// over MD between them.
     fn step(self: &Arc<Self>) {
-        let hook = {
+        let next = {
             let mut state = self.lock();
             loop {
-                if let Some(hook) = state.chain.pop_front() {
-                    break Some(hook);
+                if let Some(next) = state.chain.pop_front() {
+                    break Some(next);
                 }
                 let Some(input) = state.deferred.pop_front() else {
                     break None;
                 };
-                let effects = state.feed(input);
-                self.perform(&mut state, effects);
+                let (effects, logged) = state.feed(input);
+                self.perform(&mut state, effects, None);
+                if let Some(logged) = logged {
+                    state.attach(logged);
+                }
             }
         };
-        if let Some((hook, logged)) = hook {
+        if let Some((hook, logged)) = next {
             if let Some(logged) = &logged {
                 self.disp.record_input(logged);
             }
-            (self.deliver)(hook);
-            let mut state = self.lock();
-            let next = state.path.end_hook();
-            // After unsubscribe Go's release stops at the next held event
-            // (`releaseStep` sees the path failed); so does this one.
-            if let Some(effect) = next
-                && !self.closing()
-            {
-                self.perform(&mut state, vec![effect]);
+            if let Some(hook) = hook {
+                (self.deliver)(hook);
+                let mut state = self.lock();
+                let next = state.path.end_hook();
+                // After unsubscribe Go's release stops at the next held event
+                // (`releaseStep` sees the path failed); so does this one.
+                if let Some(effect) = next
+                    && !self.closing()
+                {
+                    self.perform(&mut state, vec![effect], None);
+                }
             }
         }
         let more = {
@@ -467,27 +591,30 @@ impl Inner {
         }
     }
 
-    /// Does what tdpath asked. Hooks wait in the chain for `step`.
-    fn perform(self: &Arc<Self>, state: &mut State, effects: Vec<Effect>) {
+    /// Does what tdpath asked. Hooks wait in the chain for `step`. Each
+    /// `td.order` request is an order call of `call`'s, with the event log on.
+    fn perform(self: &Arc<Self>, state: &mut State, effects: Vec<Effect>, call: Option<Call>) {
         for effect in effects {
             match effect {
                 Effect::Hook(hook) => {
                     let logged = state.path.take_input();
-                    state.chain.push_back((*hook, logged));
+                    state.chain.push_back((Some(*hook), logged));
                 }
                 // Go cancels the path's context in Close: no new sends.
                 _ if self.closing() => {}
                 Effect::SendOrder {
                     ticket,
+                    api_id,
                     subject,
                     request,
                     wait,
-                    ..
                 } => {
+                    let call = call.map_or(0, |call| self.record_order(call, api_id, &request));
                     let _ = self.orders.send(Outgoing {
                         ticket,
+                        call,
                         subject,
-                        body: request.encode_to_vec(),
+                        body: request.encode_to_vec().into(),
                         deadline: Instant::now() + wait,
                     });
                 }
@@ -538,31 +665,64 @@ impl Inner {
             let request = async_nats::Request::new()
                 .payload(body.into())
                 .timeout(Some(wait));
-            let outcome = match nats.send_request(subject, request).await {
-                Ok(msg) => match td::ViewReply::decode(msg.payload.as_ref()) {
-                    Ok(reply) => ReconOutcome::Reply(reply),
-                    Err(_) => ReconOutcome::Failed,
-                },
-                Err(_) => ReconOutcome::Failed,
-            };
-            let recon = matches!(
-                &outcome,
-                ReconOutcome::Reply(td::ViewReply {
-                    reply: Some(td::view_reply::Reply::Recon(_)),
-                    ..
-                })
-            );
+            let reply = nats.send_request(subject, request).await;
             let Some(this) = weak.upgrade() else {
                 return;
             };
+            let (outcome, logged) = match reply {
+                Ok(msg) => match td::ViewReply::decode(msg.payload.as_ref()) {
+                    Ok(reply) if is_recon(&reply) => {
+                        let logged = this.view_input(api_id, generation, msg.payload);
+                        (ReconOutcome::Reply(reply), logged)
+                    }
+                    Ok(reply) => (ReconOutcome::Reply(reply), None),
+                    Err(_) => (ReconOutcome::Failed, None),
+                },
+                Err(_) => (ReconOutcome::Failed, None),
+            };
+            let recon = matches!(&outcome, ReconOutcome::Reply(reply) if is_recon(reply));
             let queued = this.push(Input::Recon {
                 api_id,
                 generation,
                 outcome,
+                logged,
             });
             if queued && recon && !this.failed.load(Ordering::SeqCst) {
                 (this.log)(QUEUED_LINE);
             }
+        });
+    }
+
+    /// A Recon reply's `td_view` input: the request's generation, then the
+    /// reply as it came (Go `ask`). `None` with the event log off.
+    fn view_input(&self, api_id: i64, generation: u64, reply: Bytes) -> Option<dispatch::Input> {
+        let recv_ns = self.disp.record_now()?;
+        Some(dispatch::Input {
+            kind: Kind::TD_VIEW,
+            recv_ns,
+            r#ref: api_id as u64,
+            head: Bytes::copy_from_slice(&eventlog::td_view_head(generation)),
+            body: reply,
+            ..dispatch::Input::default()
+        })
+    }
+
+    /// Queues how a `td.order` round ended, with its `order_reply` input
+    /// when the event log is on (Go `replyIn`). Once `unsubscribe` ran
+    /// nothing is queued or written.
+    fn answer(self: &Arc<Self>, ticket: RoundTicket, call: u64, answer: Answer) {
+        let logged = self.disp.record_now().map(|recv_ns| dispatch::Input {
+            kind: Kind::ORDER_REPLY,
+            flags: answer.flags(),
+            recv_ns,
+            r#ref: call,
+            body: answer.body(),
+            ..dispatch::Input::default()
+        });
+        self.push(Input::Order {
+            ticket,
+            outcome: answer.outcome(),
+            logged,
         });
     }
 
@@ -602,7 +762,9 @@ impl Inner {
 }
 
 impl State {
-    fn feed(&mut self, input: Input) -> Vec<Effect> {
+    /// Feeds one input to tdpath. The second value is its `order_reply` or
+    /// `td_view`, for [`State::attach`] once the effects are performed.
+    fn feed(&mut self, input: Input) -> (Vec<Effect>, Option<dispatch::Input>) {
         #[cfg(test)]
         {
             self.fed += 1;
@@ -612,21 +774,44 @@ impl State {
                 api_id,
                 event,
                 logged,
-            } => self.path.on_account_event_in(api_id, event, logged),
-            Input::Order { ticket, outcome } => self.path.on_order_round(ticket, outcome),
+            } => (self.path.on_account_event_in(api_id, event, logged), None),
+            Input::Order {
+                ticket,
+                outcome,
+                logged,
+            } => (self.path.on_order_round(ticket, outcome), logged),
             Input::Recon {
                 api_id,
                 generation,
                 outcome,
-            } => self.path.on_recon_round(api_id, generation, outcome),
-            Input::Backoff { api_id } => self.path.on_backoff(api_id),
+                logged,
+            } => (
+                self.path.on_recon_round(api_id, generation, outcome),
+                logged,
+            ),
+            Input::Backoff { api_id } => (self.path.on_backoff(api_id), None),
+        }
+    }
+
+    /// Gives a round's input to the hook feeding it returned, which leads
+    /// the chain: `step` feeds only once the chain is empty. A round that
+    /// returned no hook still writes its `order_reply`, as an entry of its
+    /// own; its `td_view` is not written, as a `td.evt` that runs no hook.
+    fn attach(&mut self, logged: dispatch::Input) {
+        if let Some((Some(_), slot)) = self.chain.front_mut()
+            && slot.is_none()
+        {
+            *slot = Some(logged);
+        } else if logged.kind == Kind::ORDER_REPLY {
+            self.chain.push_front((None, Some(logged)));
         }
     }
 }
 
 /// Publishes each `td.order` request after the previous one is on the
 /// connection, then waits for its reply in its own task (Go
-/// `requestInOrder`).
+/// `requestInOrder`). With the event log on, the request is its call's
+/// `order_publish` once it is on the connection.
 async fn send_orders(
     inner: Weak<Inner>,
     nats: Client,
@@ -639,25 +824,29 @@ async fn send_orders(
         if this.closing() {
             continue;
         }
-        let ticket = out.ticket;
-        let deadline = out.deadline;
-        match tokio::time::timeout_at(deadline, publish(&nats, out)).await {
-            Ok(Some(sub)) => {
+        let Outgoing {
+            ticket,
+            call,
+            subject,
+            body,
+            deadline,
+        } = out;
+        let logged = this.disp.recorder().map(|_| body.clone());
+        match tokio::time::timeout_at(deadline, publish(&nats, subject, body)).await {
+            Ok(Ok(sub)) => {
+                if let (Some(rec), Some(body)) = (this.disp.recorder(), logged) {
+                    rec.append(Kind::ORDER_PUBLISH, 0, 0, rec.now_ns(), call, &body, &[]);
+                }
                 let weak = Weak::clone(&inner);
                 tokio::spawn(async move {
-                    let outcome = reply(sub, deadline).await;
+                    let answer = reply(sub, deadline).await;
                     if let Some(this) = weak.upgrade() {
-                        this.push(Input::Order { ticket, outcome });
+                        this.answer(ticket, call, answer);
                     }
                 });
             }
-            // Not sent, or not before the round's deadline: no answer.
-            Ok(None) | Err(_) => {
-                this.push(Input::Order {
-                    ticket,
-                    outcome: RoundOutcome::NoAnswer,
-                });
-            }
+            Ok(Err(text)) => this.answer(ticket, call, Answer::Failed(text)),
+            Err(_) => this.answer(ticket, call, Answer::Timeout),
         }
     }
 }
@@ -665,27 +854,67 @@ async fn send_orders(
 /// Subscribes a reply inbox, then publishes. Both go through the
 /// connection's one command queue, so the subscription is in place before
 /// the request.
-async fn publish(nats: &Client, out: Outgoing) -> Option<Subscriber> {
+async fn publish(nats: &Client, subject: String, body: Bytes) -> Result<Subscriber, String> {
     let inbox = nats.new_inbox();
-    let sub = nats.subscribe(inbox.clone()).await.ok()?;
-    nats.publish_with_reply(out.subject, inbox, out.body.into())
+    let sub = nats
+        .subscribe(inbox.clone())
         .await
-        .ok()?;
-    Some(sub)
+        .map_err(|err| err.to_string())?;
+    nats.publish_with_reply(subject, inbox, body)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(sub)
 }
 
-async fn reply(mut sub: Subscriber, deadline: Instant) -> RoundOutcome {
-    let Ok(Some(msg)) = tokio::time::timeout_at(deadline, sub.next()).await else {
-        return RoundOutcome::NoAnswer;
-    };
-    match msg.status {
-        Some(StatusCode::NO_RESPONDERS) => RoundOutcome::NoResponder,
-        None | Some(StatusCode::OK) => match td::OrderReply::decode(msg.payload.as_ref()) {
-            Ok(reply) => RoundOutcome::Reply(reply),
-            Err(_) => RoundOutcome::NoAnswer,
-        },
-        Some(_) => RoundOutcome::NoAnswer,
+async fn reply(mut sub: Subscriber, deadline: Instant) -> Answer {
+    match tokio::time::timeout_at(deadline, sub.next()).await {
+        Ok(Some(msg)) if msg.status == Some(StatusCode::NO_RESPONDERS) => Answer::NoResponders,
+        Ok(Some(msg)) => Answer::Reply(msg.status, msg.payload),
+        Ok(None) => Answer::Failed(CONNECTION_CLOSED.to_owned()),
+        Err(_) => Answer::Timeout,
     }
+}
+
+impl Answer {
+    /// A 503 status is no responder (a 101 local reject); a timeout, a
+    /// failure, or a body that is not an `OrderReply` is no answer.
+    fn outcome(self) -> RoundOutcome {
+        match self {
+            Answer::Reply(None | Some(StatusCode::OK), body) => {
+                match td::OrderReply::decode(body.as_ref()) {
+                    Ok(reply) => RoundOutcome::Reply(reply),
+                    Err(_) => RoundOutcome::NoAnswer,
+                }
+            }
+            Answer::NoResponders => RoundOutcome::NoResponder,
+            Answer::Reply(..) | Answer::Timeout | Answer::Failed(_) => RoundOutcome::NoAnswer,
+        }
+    }
+
+    /// The `order_reply` flags, as Go's `evlog.Outcome` classifies the
+    /// request's error. A message is OK whatever it holds.
+    fn flags(&self) -> u16 {
+        match self {
+            Answer::Reply(..) => outcome::OK,
+            Answer::NoResponders => outcome::NO_RESPONDERS,
+            Answer::Timeout => outcome::TIMEOUT,
+            Answer::Failed(_) => outcome::FAILED,
+        }
+    }
+
+    /// The `order_reply` body: the message's bytes, or the error's text.
+    fn body(&self) -> Bytes {
+        match self {
+            Answer::Reply(_, body) => body.clone(),
+            Answer::NoResponders => Bytes::from_static(NO_RESPONDERS.as_bytes()),
+            Answer::Timeout => Bytes::from_static(DEADLINE_EXCEEDED.as_bytes()),
+            Answer::Failed(text) => Bytes::from(text.clone()),
+        }
+    }
+}
+
+fn is_recon(reply: &td::ViewReply) -> bool {
+    matches!(reply.reply, Some(td::view_reply::Reply::Recon(_)))
 }
 
 /// `cloidgen::next`: one counter for the process, every algo and account

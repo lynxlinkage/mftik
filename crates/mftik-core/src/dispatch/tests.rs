@@ -1744,6 +1744,7 @@ fn inputs_are_written_in_delivery_order_each_followed_by_its_hook_end() {
             "8 hook_end ref=7 t=5ms",
             r#"9 md_book recv=0s t=5ms "book-1""#,
             "10 hook_end ref=9 t=6ms",
+            "11 stop flags=1 recv=6ms t=6ms",
         ]
     );
 }
@@ -1804,6 +1805,7 @@ fn a_hook_that_panics_gets_a_hook_end_with_the_panic_text() {
         [
             r#"1 td_event ref=3 recv=0s t=0s "ev-3""#,
             r#"2 hook_end ref=1 flags=1 t=1ms "boom""#,
+            "3 stop recv=1ms t=1ms",
         ]
     );
 }
@@ -1826,11 +1828,13 @@ fn the_stop_drain_writes_its_inputs_and_a_formatted_panic() {
         stop(&dispatcher),
         Err(StopError::HookPanic("hook panic: ValueError: boom".into()))
     );
+    // The stop frame comes before the delivery.
     assert_eq!(
         log.lines(),
         [
-            "1 post ref=1 recv=0s t=0s",
-            r#"2 hook_end ref=1 flags=1 t=0s "ValueError: boom""#,
+            "1 stop flags=1 recv=0s t=0s",
+            "2 post ref=1 recv=0s t=0s",
+            r#"3 hook_end ref=2 flags=1 t=0s "ValueError: boom""#,
         ]
     );
 }
@@ -1849,15 +1853,123 @@ fn a_hung_hook_has_its_input_and_never_a_hook_end() {
     let rx = start(&dispatcher);
     gate.wait_entered();
     assert_eq!(log.lines(), ["1 timer ref=1 recv=0s t=0s"]);
+    log.tick();
     dispatcher.set_now_ns(T0 + 1000);
     assert_eq!(recv_end(&rx), RunEnd::Hung);
+    // The watchdog's stop is in the log before Run returns HUNG.
+    let hung = [
+        "1 timer ref=1 recv=0s t=0s",
+        "2 stop flags=2 recv=1ms t=1ms",
+    ];
+    assert_eq!(log.lines(), hung);
     let stopping = dispatcher.clone();
     let stopped = thread::spawn(move || stopping.on_stop(&StopRequest::new(None)));
-    // The hook returns after the watchdog's HUNG: still no hook_end.
+    // The hook returns after the watchdog's HUNG: still no hook_end, and the
+    // ending writes no second stop.
     gate.open();
     assert_eq!(stopped.join().expect("on_stop thread"), Ok(()));
     wait_exited(&dispatcher);
-    assert_eq!(log.lines(), ["1 timer ref=1 recv=0s t=0s"]);
+    assert_eq!(log.lines(), hung);
+}
+
+#[test]
+fn the_ending_writes_stop_then_the_strategy_on_stop_as_its_own_input() {
+    type OnStop = fn(&StopInfo) -> Result<(), String>;
+    let cases: [(OnStop, &str); 3] = [
+        (|_| Ok(()), "5 hook_end ref=4 t=3ms"),
+        (
+            |_| Err("no venue".into()),
+            r#"5 hook_end ref=4 flags=2 t=3ms "no venue""#,
+        ),
+        // The panic's own text, not the StopError's.
+        (
+            |_| panic!("boom"),
+            r#"5 hook_end ref=4 flags=1 t=3ms "boom""#,
+        ),
+    ];
+    for (on_stop, ended) in cases {
+        let log = Memory::new();
+        let log_stop = Arc::clone(&log);
+        let dispatcher = build(|config| {
+            recorded(&log)(config);
+            config.on_stop = Some(Box::new(move |info| {
+                log_stop.tick();
+                on_stop(info)
+            }));
+        });
+        let (exiting, log_hook) = (dispatcher.clone(), Arc::clone(&log));
+        dispatcher
+            .post(move || {
+                exiting.exit();
+                log_hook.tick();
+            })
+            .expect("exit");
+        let rx = start(&dispatcher);
+        assert_eq!(recv_end(&rx), RunEnd::Done);
+        log.tick();
+        let _ = stop(&dispatcher);
+        // recv_ns of the stop is when the loop stopped MD; its t_ns, and the
+        // onstop's recv_ns, when C4 asked.
+        assert_eq!(
+            log.lines(),
+            [
+                "1 post ref=1 recv=0s t=0s",
+                "2 hook_end ref=1 t=1ms",
+                "3 stop flags=1 recv=1ms t=2ms",
+                "4 onstop recv=2ms t=2ms",
+                ended,
+            ]
+        );
+    }
+}
+
+#[test]
+fn an_ending_that_delivers_nothing_has_a_stop_without_deliver() {
+    // CRASHED does not deliver; OnStop still runs.
+    let log = Memory::new();
+    let dispatcher = build(|config| {
+        recorded(&log)(config);
+        config.on_stop = Some(Box::new(|_| Ok(())));
+    });
+    dispatcher.push_td(|| panic!("boom")).expect("panics");
+    let rx = start(&dispatcher);
+    assert!(matches!(recv_end(&rx), RunEnd::Crashed { .. }));
+    assert_eq!(stop(&dispatcher), Ok(()));
+    assert_eq!(
+        log.lines(),
+        [
+            "1 stop recv=0s t=0s",
+            "2 onstop recv=0s t=0s",
+            "3 hook_end ref=2 t=0s"
+        ]
+    );
+
+    // A DONE whose stop deadline has passed delivers nothing and runs no
+    // OnStop.
+    let log = Memory::new();
+    let dispatcher = build(|config| {
+        recorded(&log)(config);
+        config.on_stop = Some(Box::new(|_| Ok(())));
+    });
+    let exiting = dispatcher.clone();
+    dispatcher.push_td(move || exiting.exit()).expect("exit");
+    dispatcher.post(|| {}).expect("never delivered");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    let result = dispatcher.on_stop(&StopRequest::new(Some(T0)));
+    wait_exited(&dispatcher);
+    assert_eq!(result, Err(StopError::Deadline));
+    assert_eq!(log.lines(), ["1 stop recv=0s t=0s"]);
+}
+
+#[test]
+fn the_recorder_is_the_log_and_none_without_it() {
+    let log = Memory::new();
+    let dispatcher = build(recorded(&log));
+    let rec = dispatcher.recorder().expect("recorder");
+    assert_eq!(rec.append(FrameKind::ORDER_CALL, 1, 0, 0, 1, b"x", b""), 1);
+    assert_eq!(log.lines(), [r#"1 order_call ref=1 flags=1 "x""#]);
+    assert!(build(|_| {}).recorder().is_none());
 }
 
 #[test]
@@ -1942,6 +2054,7 @@ fn posts_and_timers_are_numbered_in_call_order() {
             "8 hook_end ref=7 t=0s",
             "9 post ref=2 recv=0s t=0s",
             "10 hook_end ref=9 t=0s",
+            "11 stop flags=1 recv=0s t=0s",
         ]
     );
 }
