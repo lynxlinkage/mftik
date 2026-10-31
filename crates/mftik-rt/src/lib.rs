@@ -21,6 +21,8 @@
 //! - [`sym`]: the SYM path, `symclient` over NATS (E03-08).
 //! - [`volume`]: the strategy's atomic volume writes and read order
 //!   (§9.1.4).
+//! - [`eventlog`]: the strategy event log's file format, its writer
+//!   thread and ring, and a reader (PROTOCOL §12, E07-D001–E07-D003).
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the
 //!   Beat thread (E03-D031–E03-D033). `report` sends `stsctl.Report` while
 //!   Run runs (E03-09).
@@ -35,6 +37,7 @@ pub mod clock;
 mod context;
 pub mod ctl;
 mod dcell;
+pub mod eventlog;
 pub mod exit;
 pub mod frame;
 pub mod io;

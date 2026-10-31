@@ -28,6 +28,12 @@ jobs:
         run: |
           GOBIN="$RUNNER_TEMP/nats-bin" go install github.com/nats-io/nats-server/v2@v2.15.0
           echo "MFTIK_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
+      # E07-D002: mftik-rt's eventlog_dump tests read the Rust writer's files
+      # with mftiko-eventlog from the pinned commit; they fail when it is missing.
+      - name: Install mftiko-eventlog from the pinned mftiko commit
+        run: |
+          GOBIN="$RUNNER_TEMP/eventlog-bin" bash scripts/install-mftiko-eventlog
+          echo "MFTIK_EVENTLOG=$RUNNER_TEMP/eventlog-bin/mftiko-eventlog" >> "$GITHUB_ENV"
       - name: Proto matches the pinned mftiko commit
         run: bash scripts/sync-proto --check
       - name: Format
