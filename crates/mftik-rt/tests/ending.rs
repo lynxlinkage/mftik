@@ -27,7 +27,10 @@ use std::time::{Duration, Instant};
 
 use mftik_core::dispatch::TD_CAP;
 use mftik_proto::wire::mftiko::common::v1::{Outcome, Version};
-use mftik_proto::wire::mftiko::stsctl::v1::{Command as StsCommand, Fail, Report, command};
+use mftik_proto::wire::mftiko::session::v1::EventLog;
+use mftik_proto::wire::mftiko::stsctl::v1::{
+    Command as StsCommand, EventLogStat, Fail, InitPayload, Report, command,
+};
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
 use mftik_rt::{Context, HookError, Strategy};
 use mftik_testkit::*;
@@ -135,9 +138,13 @@ fn worker_entry() {
 /// Hello, Init with this hook budget, Start with bindings 1.1, and
 /// Stage(running).
 fn running(shim: &mut Shim, nats: &Nats, scenario: &str, hook_timeout_s: u32) {
-    hello(shim);
     let mut payload = init_payload(&nats.creds, scenario);
     payload.hook_timeout_s = hook_timeout_s;
+    running_with(shim, payload);
+}
+
+fn running_with(shim: &mut Shim, payload: InitPayload) {
+    hello(shim);
     init(shim, payload, 5000);
     expect_applied(shim, "live-1");
     expect_done(shim, Verb::Init, true, "");
@@ -236,6 +243,49 @@ fn reports_carry_the_queues_the_bindings_and_the_hook_counters() {
     let ended = shim.end();
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
     assert_eq!(hooks(&ended), ["OnInit", "gate", "OnStart", "OnStop"]);
+}
+
+#[test]
+fn reports_carry_event_log_only_while_it_is_on() {
+    let nats = start_nats();
+    let cases = [
+        ("absent", None, None),
+        (
+            "off",
+            Some(EventLog {
+                enabled: false,
+                keep_mb: 1,
+            }),
+            None,
+        ),
+        (
+            "on",
+            Some(EventLog {
+                enabled: true,
+                keep_mb: 1,
+            }),
+            Some(EventLogStat::default()),
+        ),
+    ];
+    for (name, event_log, want) in cases {
+        let mut shim = Shim::spawn(&nats.url);
+        let mut payload = init_payload(&nats.creds, "");
+        payload.event_log = event_log;
+        running_with(&mut shim, payload);
+        let report = shim.wait_report(|_| true);
+        assert_eq!(report.event_log, want, "{name}");
+        shim.send(worker_down::Msg::Stop(worker::Stop {
+            grace_ms: 5000,
+            reason: "operator".into(),
+        }));
+        expect_ending(&mut shim, Outcome::Done, "operator", Some(true));
+        assert!(
+            shim.reports.iter().all(|(_, r)| r.event_log == want),
+            "{name}"
+        );
+        let ended = shim.end();
+        assert_eq!(ended.code, Some(0), "{name}: {}", ended.stderr);
+    }
 }
 
 // ---------- endings ----------

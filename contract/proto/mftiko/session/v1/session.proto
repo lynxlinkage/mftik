@@ -30,6 +30,14 @@ message SessionSpec {
   uint32 recv_window_ms = 14;
   // Stop 的 grace（E09-D018、E09-D062）。0 = STS 部署設定的預設，10 秒。
   uint32 grace_ms = 16;
+  EventLog event_log = 17; // 策略事件紀錄（E20-D007）；省略就是關閉
+}
+
+// 策略事件紀錄：SDK 把交給策略的輸入與策略的輸出寫進 session volume 的 eventlog/（E20-D006、PROTOCOL §12）。
+// 檔案算在 limits.volume_mb 裡；keep_mb 要比 volume_mb 小，留空間給策略自己的檔案。
+message EventLog {
+  bool enabled = 1; // 預設關閉。關閉時 SDK 不配置、不寫檔
+  uint32 keep_mb = 2; // 保留上限，超過就刪最舊的檔；0 = SDK 的預設，256 MiB
 }
 
 // 唯讀注入的資料 artifact，解到 $MFTIKO_INPUT_DIR/<name>/（§8.4）。

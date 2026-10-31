@@ -6,9 +6,9 @@
 use prost::Message;
 
 use crate::wire::mftiko::common::v1::{Outcome, Version, WorkerRef};
-use crate::wire::mftiko::session::v1::{AccountDecl, FeedDecl, StrategyRef};
+use crate::wire::mftiko::session::v1::{AccountDecl, EventLog, FeedDecl, StrategyRef};
 use crate::wire::mftiko::stsctl::v1::{
-    AccountBinding, BindingState, Bindings, Command, Fail, FeedBinding, InitPayload,
+    AccountBinding, BindingState, Bindings, Command, EventLogStat, Fail, FeedBinding, InitPayload,
     NatsCredentials, QueueStat, Report, SelectorBinding, StartPayload, Universe, command,
 };
 use crate::wire::mftiko::worker::v1::{
@@ -243,6 +243,10 @@ fn stsctl_init_payload_round_trip() {
         }),
         recv_window_ms: 5,
         hook_timeout_s: 6,
+        event_log: Some(EventLog {
+            enabled: true,
+            keep_mb: 7,
+        }),
     });
 }
 
@@ -288,6 +292,10 @@ fn stsctl_report_round_trip() {
                 max_age_ms: 3,
             },
         ],
+        event_log: Some(EventLogStat {
+            records: 8,
+            dropped: 9,
+        }),
     });
 }
 

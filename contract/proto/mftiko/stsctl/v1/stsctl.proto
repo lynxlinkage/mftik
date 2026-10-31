@@ -24,6 +24,7 @@ message InitPayload {
   // 所以這裡不會是 0。SDK 不知道預設值；收到 0 是 agent 的錯，以 INIT_FAILED 結束。
   uint32 recv_window_ms = 10; // MD 事件的最長壽命，prehook 用（SessionSpec.recv_window_ms）
   uint32 hook_timeout_s = 11; // 單一 hook 的硬上限，watchdog 用（SessionSpec.limits.hook_timeout_s）
+  mftiko.session.v1.EventLog event_log = 12; // SessionSpec.event_log 原樣；沒有就是關閉（E20-D007）
 }
 
 // STS agent 為這個 session 簽的 user JWT。權限見 PROTOCOL §7。
@@ -76,6 +77,13 @@ message Report {
   uint64 hook_blocked_ms = 3;
   uint64 hook_slow = 4;
   repeated QueueStat queues = 5;
+  EventLogStat event_log = 6; // 只在事件紀錄開啟時有（E20-D007）
+}
+
+// 策略事件紀錄的累計筆數，從 worker 起算（E20-D007）。
+message EventLogStat {
+  uint64 records = 1; // 已寫進檔案的
+  uint64 dropped = 2; // 沒寫進檔案的：ring 滿、寫檔失敗
 }
 
 // name 是 td 或 md（E08-D003）。

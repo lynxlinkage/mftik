@@ -11,6 +11,9 @@
 //! previous Report: [`Stats`] clears it on every read, so the polls between
 //! two Reports keep the largest (E03-D092).
 //!
+//! `event_log` is set only while the strategy event log is on (E20-D007, Go
+//! `eventLogStat`); with it off the Report is what it was before.
+//!
 //! [`Reporter::close`] comes before `Exiting` goes out: it waits for a Report
 //! being written and lets none start after it, so no Report follows
 //! `Exiting` (§5.3, E03-D093).
@@ -27,7 +30,7 @@ use std::time::{Duration, Instant};
 use mftik_core::c4::CONTRACT_STS;
 use mftik_core::dispatch::Stats;
 use mftik_proto::wire::mftiko::common::v1::Version;
-use mftik_proto::wire::mftiko::stsctl::v1::{QueueStat, Report};
+use mftik_proto::wire::mftiko::stsctl::v1::{EventLogStat, QueueStat, Report};
 use mftik_proto::wire::mftiko::worker::v1 as worker;
 use mftik_proto::wire::mftiko::worker::v1::{WorkerUp, worker_up};
 use prost::Message;
@@ -48,6 +51,7 @@ pub const QUEUE_MD: &str = "md";
 pub(crate) struct Source {
     pub(crate) stats: Box<dyn FnMut() -> Stats + Send>,
     pub(crate) bindings_applied: Box<dyn FnMut() -> Option<Version> + Send>,
+    pub(crate) event_log: Box<dyn FnMut() -> Option<EventLogStat> + Send>,
 }
 
 /// The Report thread. See the module docs.
@@ -111,7 +115,8 @@ fn run<W: Write>(
         }
         let stats = (source.stats)();
         let applied = (source.bindings_applied)();
-        if let Some(report) = sampler.sample(stats, applied, Instant::now())
+        let event_log = (source.event_log)();
+        if let Some(report) = sampler.sample(stats, applied, event_log, Instant::now())
             && out.send(&frame(&report)).is_err()
         {
             // Sealed or the shim is gone; PROTOCOL §9.7 takes over.
@@ -141,6 +146,7 @@ impl Sampler {
         &mut self,
         stats: Stats,
         bindings_applied: Option<Version>,
+        event_log: Option<EventLogStat>,
         now: Instant,
     ) -> Option<Report> {
         self.td_age_ms = self.td_age_ms.max(stats.td.max_age_ms);
@@ -155,6 +161,7 @@ impl Sampler {
                 queue(QUEUE_TD, stats.td.depth, stats.td.dropped, self.td_age_ms),
                 queue(QUEUE_MD, stats.md.depth, stats.md.dropped, self.md_age_ms),
             ],
+            event_log,
         };
         if let Some((last, at)) = &self.last
             && *last == report

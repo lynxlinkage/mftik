@@ -23,9 +23,9 @@ use mftik_core::c4::CallError;
 use mftik_core::dispatch::{self, Dispatcher, Timer};
 use mftik_core::mdpath::{self, Data};
 use mftik_core::tdpath;
-use mftik_proto::wire::mftiko::session::v1::AccountDecl;
+use mftik_proto::wire::mftiko::session::v1::{AccountDecl, EventLog};
 use mftik_proto::wire::mftiko::stsctl::v1::{
-    Bindings, Command, InitPayload, StartPayload, command,
+    Bindings, Command, EventLogStat, InitPayload, StartPayload, command,
 };
 use prost::Message;
 
@@ -68,6 +68,8 @@ pub(crate) struct Session {
     pub(crate) params: Vec<u8>,
     pub(crate) volume_dir: String,
     pub(crate) input_dir: String,
+    /// `InitPayload.event_log` when it is enabled; `None` is off (E20-D007).
+    pub(crate) event_log: Option<EventLog>,
 }
 
 pub(crate) struct Plane<S> {
@@ -143,6 +145,15 @@ impl<S: Strategy> Plane<S> {
 
     pub(crate) fn session(&self) -> Option<&Session> {
         self.session.get()
+    }
+
+    /// `Report.event_log`: present only while the event log is on (Go
+    /// `eventLogStat`). Nothing is recorded yet, so the counts are zero.
+    pub(crate) fn event_log_stat(&self) -> Option<EventLogStat> {
+        self.session()?
+            .event_log
+            .as_ref()
+            .map(|_| EventLogStat::default())
     }
 
     pub(crate) fn dispatcher(&self) -> Option<&Dispatcher> {
@@ -240,6 +251,7 @@ impl<S: Strategy> Plane<S> {
             params: init.params,
             volume_dir: env(VOLUME_DIR_ENV),
             input_dir: env(INPUT_DIR_ENV),
+            event_log: init.event_log.filter(|log| log.enabled),
         });
 
         let connecting = call.clone();
