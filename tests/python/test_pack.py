@@ -35,6 +35,7 @@ from mftik.pack.cli import execute
 from mftik.pack.error import PackError
 from mftik.pack.fetch import (
     ensure_blob,
+    mftik_download_command,
     pip_download_command,
     require_wheels,
     requirements_are_empty,
@@ -335,7 +336,7 @@ class FetchTests(unittest.TestCase):
     def test_pip_command_and_sdist_rejection(self):
         cmd = pip_download_command("3.12", Path("/tmp/pack-dest"), Path("/tmp/pack-req.txt"))
         self.assertIn("--only-binary=:all:", cmd)
-        self.assertIn("--platform", cmd)
+        self.assertEqual(cmd.count("--platform"), 1)
         self.assertEqual(cmd[cmd.index("--platform") + 1], "manylinux_2_28_x86_64")
         self.assertEqual(cmd[cmd.index("--python-version") + 1], "3.12")
         self.assertEqual(cmd.count("--abi"), 3)
@@ -347,6 +348,13 @@ class FetchTests(unittest.TestCase):
             with self.assertRaises(PackError) as caught:
                 require_wheels([sdist])
         self.assertIn("sdist-only", str(caught.exception))
+
+    def test_sdk_download_takes_either_linux_tag(self):
+        cmd = mftik_download_command("1.1.0", "3.12", Path("/tmp/pack-dest"))
+        platforms = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--platform"]
+        self.assertEqual(platforms, ["manylinux_2_35_x86_64", "manylinux_2_28_x86_64"])
+        self.assertEqual(cmd[cmd.index("--python-version") + 1], "3.12")
+        self.assertEqual(cmd[-2:], ["--no-deps", "mftik==1.1.0"])
 
     def test_checksum_mismatch_is_not_cached(self):
         body = b"not-the-bytes"

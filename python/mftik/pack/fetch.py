@@ -21,6 +21,9 @@ from pathlib import Path
 from mftik.pack.error import PackError
 
 PLATFORM = "manylinux_2_28_x86_64"
+# pip matches a PEP 600 --platform exactly. The SDK wheel is manylinux_2_35
+# (E06-D018); releases up to 1.1.0 are manylinux_2_28.
+SDK_PLATFORMS = ("manylinux_2_35_x86_64", "manylinux_2_28_x86_64")
 
 
 def cache_dir() -> Path:
@@ -58,7 +61,12 @@ def ensure_blob(url: str, sha256: str, *, cache: Path | None = None) -> bytes:
 
 def pip_download_command(python: str, dest: Path, requirements: Path) -> list[str]:
     """``pip download`` for manylinux wheels of CPython ``python`` (``3.12``)."""
-    return _pip_command(python, dest) + ["-r", str(requirements)]
+    return _pip_command(python, dest, (PLATFORM,)) + ["-r", str(requirements)]
+
+
+def mftik_download_command(version: str, python: str, dest: Path) -> list[str]:
+    """``pip download`` for the ``mftik==version`` linux wheel, without dependencies."""
+    return _pip_command(python, dest, SDK_PLATFORMS) + ["--no-deps", f"mftik=={version}"]
 
 
 def requirements_are_empty(text: str) -> bool:
@@ -89,7 +97,7 @@ def dependency_wheels(
         return []
     directory = cache if cache is not None else cache_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    key = _request_key(python, text, _local_files(requirements, text))
+    key = _request_key(python, (PLATFORM,), text, _local_files(requirements, text))
     index = directory / f"idx-{key}"
     cached = _read_index(directory, index)
     if cached is not None:
@@ -109,8 +117,7 @@ def fetch_mftik_wheel(version: str, python: str, *, cache: Path | None = None) -
     """The ``mftik==version`` wheel from PyPI, without its dependencies."""
     directory = cache if cache is not None else cache_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    spec = f"mftik=={version}"
-    key = _request_key(python, spec, [])
+    key = _request_key(python, SDK_PLATFORMS, f"mftik=={version}", [])
     index = directory / f"idx-{key}"
     cached = _read_index(directory, index)
     if cached is not None:
@@ -121,7 +128,7 @@ def fetch_mftik_wheel(version: str, python: str, *, cache: Path | None = None) -
 
     with tempfile.TemporaryDirectory(prefix="mftik-pack-pip-") as tmp:
         dest = Path(tmp)
-        _run(_pip_command(python, dest) + ["--no-deps", spec])
+        _run(mftik_download_command(version, python, dest))
         wheels = require_wheels([path for path in dest.iterdir() if path.is_file()])
         if len(wheels) != 1:
             raise PackError("pip download produced more than one mftik wheel")
@@ -131,7 +138,7 @@ def fetch_mftik_wheel(version: str, python: str, *, cache: Path | None = None) -
     return name, _read_cached(directory, digest)
 
 
-def _pip_command(python: str, dest: Path) -> list[str]:
+def _pip_command(python: str, dest: Path, platforms: tuple[str, ...]) -> list[str]:
     abi = "cp" + python.replace(".", "")
     return [
         sys.executable,
@@ -142,8 +149,7 @@ def _pip_command(python: str, dest: Path) -> list[str]:
         "--no-input",
         "--no-cache-dir",
         "--only-binary=:all:",
-        "--platform",
-        PLATFORM,
+        *(arg for platform in platforms for arg in ("--platform", platform)),
         "--python-version",
         python,
         "--implementation",
@@ -173,9 +179,11 @@ def _run(cmd: list[str]) -> None:
     raise PackError(f"pip download failed: {tail}" if tail else "pip download failed")
 
 
-def _request_key(python: str, text: str, files: list[tuple[str, str]]) -> str:
+def _request_key(
+    python: str, platforms: tuple[str, ...], text: str, files: list[tuple[str, str]]
+) -> str:
     payload = json.dumps(
-        {"python": python, "platform": PLATFORM, "requirements": text, "files": files},
+        {"python": python, "platform": ",".join(platforms), "requirements": text, "files": files},
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
