@@ -255,16 +255,20 @@ fn an_after_callback_exception_still_gets_its_hook_end() {
     assert_eq!(
         frames,
         [
-            (1, Kind::TIMER, 1, 0),
-            (2, Kind::HOOK_END, 1, END_PANIC),
-            (3, Kind::STOP, 0, 0),
-            (4, Kind::ONSTOP, 0, 0),
-            (5, Kind::HOOK_END, 4, 0),
-            (6, Kind::END, 0, 0),
+            (1, Kind::INIT, records[0].r#ref, 0),
+            (2, Kind::HOOK_END, 1, 0),
+            (3, Kind::START, 0, 0),
+            (4, Kind::HOOK_END, 3, 0),
+            (5, Kind::TIMER, 1, 0),
+            (6, Kind::HOOK_END, 5, END_PANIC),
+            (7, Kind::STOP, 0, 0),
+            (8, Kind::ONSTOP, 0, 0),
+            (9, Kind::HOOK_END, 8, 0),
+            (10, Kind::END, 0, 0),
         ]
     );
-    assert_eq!(records[1].body, b"RuntimeError: after broke");
-    assert!(records[0].t_ns <= records[1].t_ns);
+    assert_eq!(records[5].body, b"RuntimeError: after broke");
+    assert!(records[4].t_ns <= records[5].t_ns);
 }
 
 #[test]
