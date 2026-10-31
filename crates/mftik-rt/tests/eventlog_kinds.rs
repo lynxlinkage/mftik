@@ -696,7 +696,8 @@ fn a_whole_session_has_every_kind_and_each_call_and_read_pairs_up() {
         let replied = only(&frames, "order_reply", "call", call);
         assert!(at < published && published < replied, "call {call}");
         let frame = &frames[at as usize - 1];
-        assert_eq!((&frame["op"], num(frame, "api_id")), (&"submit".into(), API as u64));
+        assert_eq!(frame["op"], "submit", "{frame}");
+        assert_eq!(num(frame, "api_id"), API as u64, "{frame}");
         let reply = &frames[replied as usize - 1];
         assert_eq!(reply["outcome"], "ok", "{reply}");
         assert_eq!(reply["reply"]["reason"], "invalid", "{reply}");
@@ -782,9 +783,7 @@ fn a_whole_session_has_every_kind_and_each_call_and_read_pairs_up() {
     for secret in [&creds.user_jwt, &creds.seed, &creds.inbox_prefix] {
         assert!(!text.contains(secret.as_str()), "the dump has {secret}");
         assert!(
-            !bytes
-                .windows(secret.len())
-                .any(|w| w == secret.as_bytes()),
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
             "a log file has {secret}"
         );
     }
