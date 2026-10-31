@@ -68,6 +68,13 @@ cargo build --release -p mftik-conform
 bin/mftiko-conformance -json report.json -- target/release/conform
 ```
 
+The Rust writer of the strategy event log (PROTOCOL §12) is checked against mftiko's own reader: [`scripts/install-mftiko-eventlog`](scripts/install-mftiko-eventlog) is the `go install` of `mftiko-eventlog` from the same pinned commit, and the rust job points `MFTIK_EVENTLOG` at it for `crates/mftik-rt/tests/eventlog_dump.rs`. Those tests fail when the tool is missing. Locally:
+
+```bash
+GOBIN="$PWD/bin" scripts/install-mftiko-eventlog
+MFTIK_EVENTLOG="$PWD/bin/mftiko-eventlog" cargo test -p mftik-rt --test eventlog_dump
+```
+
 The Python standard strategy is [`examples/python/conform`](examples/python/conform), started with `python -m mftik.run conform:Conform`. `python-conform-wheel` builds one abi3 wheel. `mftiko-conformance-python` installs that wheel into a clean venv and runs the same suite on Python 3.11, 3.12, and 3.13 in parallel. Each report is an artifact. The pinned harness replaces the worker environment and does not forward `PYTHONPATH`, so the venv's `mftik-conform.pth` adds `examples/python` to `sys.path`. Locally, with the wheel installed in `.venv`:
 
 ```bash

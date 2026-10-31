@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# E07-D002: install mftiko-eventlog from the pinned mftiko commit, the same
+# way scripts/install-mftiko-conformance installs the conformance suite.
+# The commit is the one recorded by scripts/sync-proto in contract/proto/SOURCE.
+# Requires Go 1.26 or newer (the pinned module's go directive).
+# mftik-rt's tests/eventlog_dump.rs runs it on files the Rust writer wrote.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source_file="${root}/contract/proto/SOURCE"
+commit="$(sed -n 's/^commit=//p' "$source_file")"
+if [[ -z "$commit" ]]; then
+  echo "commit missing from ${source_file}" >&2
+  exit 1
+fi
+
+go install "github.com/BullionBear/mftiko/cmd/mftiko-eventlog@${commit}"
