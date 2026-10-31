@@ -31,5 +31,9 @@ tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros", "test-
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 
 [[bench]]
+name = "hook"
+harness = false
+
+[[bench]]
 name = "log"
 harness = false
