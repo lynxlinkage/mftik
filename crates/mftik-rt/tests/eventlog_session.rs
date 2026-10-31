@@ -156,11 +156,14 @@ fn each_input_is_followed_by_its_hook_end_and_the_exit_writes_end() {
             "4 hook_end ref=3",
             "5 post ref=2",
             "6 hook_end ref=5",
-            "7 end",
+            "7 stop flags=1",
+            "8 onstop",
+            "9 hook_end ref=8",
+            "10 end",
         ]
     );
     assert_times(&records);
-    assert_eq!(records[6].body, 0u64.to_le_bytes());
+    assert_eq!(records[9].body, 0u64.to_le_bytes());
 }
 
 #[test]
@@ -182,7 +185,10 @@ fn a_hook_that_panics_still_gets_its_hook_end() {
             "4 hook_end ref=3",
             "5 post ref=2",
             r#"6 hook_end ref=5 flags=1 "boom""#,
-            "7 end",
+            "7 stop",
+            "8 onstop",
+            "9 hook_end ref=8",
+            "10 end",
         ]
     );
     assert_times(&records);
@@ -206,7 +212,8 @@ fn a_hung_hook_has_no_hook_end_and_the_exit_still_writes_end() {
             "3 timer ref=1",
             "4 hook_end ref=3",
             "5 post ref=2",
-            "6 end",
+            "6 stop flags=2",
+            "7 end",
         ]
     );
     assert_times(&records);

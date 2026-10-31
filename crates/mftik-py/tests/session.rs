@@ -257,7 +257,10 @@ fn an_after_callback_exception_still_gets_its_hook_end() {
         [
             (1, Kind::TIMER, 1, 0),
             (2, Kind::HOOK_END, 1, END_PANIC),
-            (3, Kind::END, 0, 0),
+            (3, Kind::STOP, 0, 0),
+            (4, Kind::ONSTOP, 0, 0),
+            (5, Kind::HOOK_END, 4, 0),
+            (6, Kind::END, 0, 0),
         ]
     );
     assert_eq!(records[1].body, b"RuntimeError: after broke");
