@@ -32,6 +32,7 @@ use mftik_core::eventlog::{Recorder, put_str};
 pub use reader::{ReadError, Reader};
 #[cfg(test)]
 pub(crate) use scratch::Scratch;
+pub(crate) use writer::CLOSE_WAIT;
 pub use writer::{Config, Log, Sink};
 
 use crate::clock::Clock;

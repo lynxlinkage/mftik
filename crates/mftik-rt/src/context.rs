@@ -28,7 +28,6 @@ use mftik_core::symbol::Info;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::td::v1 as td;
 
-use crate::call::CallCtx;
 use crate::md::BookView;
 use crate::plane::Plane;
 use crate::strategy::{Order, Strategy};
@@ -104,14 +103,7 @@ impl<S: Strategy> Context<S> {
     /// one. A ticker SYM does not know is one the platform does not support;
     /// returning that error ends the session `INIT_FAILED`.
     pub fn resolve(&self, ticker: &str) -> Result<Info, Error> {
-        if !self.plane.resolve_allowed() {
-            return Err(Error::NotInInit);
-        }
-        let call = self
-            .plane
-            .current_call()
-            .unwrap_or_else(CallCtx::background);
-        self.plane.wiring.resolve(&call, ticker)
+        self.plane.resolve(ticker)
     }
 
     /// The instrument's current row, from memory (E08-D025). A UID this

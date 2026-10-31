@@ -8,9 +8,18 @@
 //! Command, OnStop goes through the dispatcher once Run has started and
 //! straight to the strategy before that. Every strategy hook runs on the
 //! thread that called [`crate::run`] (E03-D003).
+//!
+//! With the event log on, the plane writes the frames that do not pass the
+//! dispatcher (§12.4, Go `sdk/record.go`): `init`, without the NATS
+//! credentials (E07-D010), and `start`, each with its `hook_end`; a
+//! `bindings` for each Live or Command snapshot that was applied; a
+//! `resolve` for each [`Context::resolve`]; and an OnStop before Run as
+//! `onstop`. A panic in one of those hooks is flushed to the file at once
+//! (E07-D012).
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -20,11 +29,18 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use bytes::Bytes;
 use mftik_core::bookpath;
 use mftik_core::c4::CallError;
-use mftik_core::dispatch::{self, Dispatcher, Timer};
-use mftik_core::eventlog::Recorder;
+use mftik_core::cloidgen;
+use mftik_core::dispatch::{self, Dispatcher, Input, Timer};
+use mftik_core::eventlog::{
+    END_ERROR, END_PANIC, FROM_COMMAND, Kind, Recorder, field_bytes, init_head, outcome, put_str,
+    without_field,
+};
 use mftik_core::mdpath::{self, Data};
+use mftik_core::symbol::Info;
+use mftik_core::symclient;
 use mftik_core::tdpath;
 use mftik_proto::wire::mftiko::session::v1::{AccountDecl, EventLog};
 use mftik_proto::wire::mftiko::stsctl::v1::{
@@ -40,9 +56,10 @@ use crate::io::Io;
 use crate::md;
 use crate::nats;
 use crate::strategy::{BookUpdate, Feed, Handlers, HookError, Strategy};
+use crate::sym;
 use crate::td;
 use crate::timers::{TimerKey, Timers};
-use crate::wiring::Wiring;
+use crate::wiring::{Wiring, sym_error};
 
 /// Volume directory, written by the strategy only (PROTOCOL §5.4, E09-D004).
 pub const VOLUME_DIR_ENV: &str = "MFTIKO_VOLUME_DIR";
@@ -60,6 +77,12 @@ pub const GATE_LINE: &str = "{\"hook\":\"gate\"}\n";
 /// watchdog sees the budget run out.
 pub const CLOCK_TICK: Duration = Duration::from_millis(10);
 
+/// `InitPayload.nats`, the session's NATS credentials: the `init` frame
+/// leaves the field out (E07-D010).
+const NATS_FIELD: u32 = 9;
+/// `Command.bindings`, which a `bindings` frame from a Command carries.
+const BINDINGS_FIELD: u32 = 1;
+
 /// One stderr line, as the Go SDK's `note` (E06-D010).
 pub(crate) fn note(line: &str) {
     crate::log::note(line);
@@ -74,6 +97,16 @@ pub(crate) struct Session {
     pub(crate) input_dir: String,
     /// `InitPayload.event_log` when it is enabled; `None` is off (E20-D007).
     pub(crate) event_log: Option<EventLog>,
+    /// `Context.Rand`'s seed, drawn once per worker. The `init` frame
+    /// records it (§12.4).
+    pub(crate) seed: u64,
+}
+
+/// One Command waiting for the command thread, and when it reached the
+/// worker while the event log is on (Go `relayed`).
+struct Relayed {
+    at: Option<i64>,
+    payload: Vec<u8>,
 }
 
 pub(crate) struct Plane<S> {
@@ -96,7 +129,7 @@ pub(crate) struct Plane<S> {
     /// C4 started Run: OnStop goes through the dispatcher.
     loop_started: AtomicBool,
     dispatch_timers: Arc<Mutex<HashMap<u64, Timer>>>,
-    commands: Mutex<mpsc::Sender<Vec<u8>>>,
+    commands: Mutex<mpsc::Sender<Relayed>>,
 }
 
 impl<S: Strategy> Plane<S> {
@@ -110,7 +143,7 @@ impl<S: Strategy> Plane<S> {
     ) -> io::Result<Arc<Self>> {
         let mut handlers = Handlers::default();
         strategy.handlers(&mut handlers);
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::channel::<Relayed>();
         let plane = Arc::new(Plane {
             strategy: Mutex::new(strategy),
             handlers,
@@ -133,9 +166,9 @@ impl<S: Strategy> Plane<S> {
         thread::Builder::new()
             .name("mftik-cmd".into())
             .spawn(move || {
-                for payload in rx {
+                for relayed in rx {
                     match weak.upgrade() {
-                        Some(plane) => plane.handle_command(&payload),
+                        Some(plane) => plane.handle_command(&relayed),
                         None => return,
                     }
                 }
@@ -163,6 +196,17 @@ impl<S: Strategy> Plane<S> {
 
     pub(crate) fn dispatcher(&self) -> Option<&Dispatcher> {
         self.disp.get()
+    }
+
+    /// The event log, once Init made the dispatcher with it on.
+    fn recorder(&self) -> Option<&Arc<dyn Recorder>> {
+        self.disp.get().and_then(Dispatcher::recorder)
+    }
+
+    /// The event log's clock. `None` while the log is off, and then the
+    /// clock is not read (E07-D009).
+    fn record_now(&self) -> Option<i64> {
+        self.disp.get().and_then(Dispatcher::record_now)
     }
 
     /// The session's NATS connection, once Init has it.
@@ -218,6 +262,7 @@ impl<S: Strategy> Plane<S> {
         payload: &[u8],
         call: &CallCtx,
     ) -> Result<Duration, CallError> {
+        let recv_ns = self.clock.now_ns();
         if call.is_done() {
             return Err(CallError::Cancelled);
         }
@@ -257,6 +302,7 @@ impl<S: Strategy> Plane<S> {
             volume_dir: env(VOLUME_DIR_ENV),
             input_dir: env(INPUT_DIR_ENV),
             event_log: init.event_log.filter(|log| log.enabled),
+            seed: random_seed(),
         });
 
         let connecting = call.clone();
@@ -287,11 +333,75 @@ impl<S: Strategy> Plane<S> {
         if call.is_done() {
             return Err(CallError::Cancelled);
         }
+        // The payload without the NATS credentials, after the client order id
+        // counter as Init found it (E07-D010).
+        let input = self.recorder().map(|_| Input {
+            kind: Kind::INIT,
+            recv_ns,
+            r#ref: self.session.get().map_or(0, |s| s.seed),
+            head: Bytes::copy_from_slice(&init_head(cloidgen::slot())),
+            body: without_field(payload, NATS_FIELD).into(),
+            ..Input::default()
+        });
         self.resolve_allowed.store(true, Ordering::SeqCst);
-        let result = catch_unwind(AssertUnwindSafe(|| self.in_hook(|s, ctx| s.on_init(ctx))));
+        let result = self.outside(input, |s, ctx| s.on_init(ctx));
         self.resolve_allowed.store(false, Ordering::SeqCst);
-        hook_result(result)?;
+        result?;
         Ok(hook_timeout)
+    }
+
+    /// Runs a hook the dispatcher does not run: OnInit, OnStart, and an
+    /// OnStop before Run (Go `outside`). With the event log on, `input` is
+    /// written first, stamped with the hook's start, and a `hook_end` after.
+    /// A panic's frames are flushed to the file at once, waiting at most
+    /// five seconds: the process may end before its exit closes the log
+    /// (E07-D012).
+    fn outside(
+        self: &Arc<Self>,
+        input: Option<Input>,
+        hook: impl FnOnce(&mut S, &Context<S>) -> Result<(), HookError>,
+    ) -> Result<(), CallError> {
+        let rec = self.recorder();
+        let seq = rec.zip(input).map(|(rec, input)| {
+            rec.append(
+                input.kind,
+                input.flags,
+                input.recv_ns,
+                rec.now_ns(),
+                input.r#ref,
+                &input.head,
+                &input.body,
+            )
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| self.in_hook(hook)));
+        if let (Some(rec), Some(seq)) = (rec, seq) {
+            let (flags, text) = match &result {
+                Ok(Ok(())) => (0, String::new()),
+                Ok(Err(err)) => (END_ERROR, err.to_string()),
+                Err(payload) => (END_PANIC, panic_message(payload.as_ref())),
+            };
+            rec.append(
+                Kind::HOOK_END,
+                flags,
+                0,
+                rec.now_ns(),
+                seq,
+                text.as_bytes(),
+                &[],
+            );
+            if result.is_err() {
+                self.flush_event_log();
+            }
+        }
+        hook_result(result)
+    }
+
+    fn flush_event_log(&self) {
+        if let Some(log) = self.event_log.get()
+            && !log.flush_within(eventlog::CLOSE_WAIT)
+        {
+            note("event log: flush did not finish writing");
+        }
     }
 
     /// Starts the event log writer when the session has the log on (Go
@@ -365,6 +475,7 @@ impl<S: Strategy> Plane<S> {
         payload: &[u8],
         call: &CallCtx,
     ) -> Result<(), CallError> {
+        let recv_ns = self.record_now();
         if call.is_done() {
             return Err(CallError::Cancelled);
         }
@@ -385,10 +496,16 @@ impl<S: Strategy> Plane<S> {
         }
         self.wiring.listen_td().map_err(CallError::Failed)?;
         emit_gate();
+        let input = recv_ns.map(|recv_ns| Input {
+            kind: Kind::START,
+            recv_ns,
+            body: Bytes::copy_from_slice(payload),
+            ..Input::default()
+        });
         self.resolve_allowed.store(true, Ordering::SeqCst);
-        let result = catch_unwind(AssertUnwindSafe(|| self.in_hook(|s, ctx| s.on_start(ctx))));
+        let result = self.outside(input, |s, ctx| s.on_start(ctx));
         self.resolve_allowed.store(false, Ordering::SeqCst);
-        hook_result(result)?;
+        result?;
         if self.asked.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -412,29 +529,40 @@ impl<S: Strategy> Plane<S> {
     /// OnStop before Run started: Start failed, so the dispatcher loop is
     /// not there to take it (Go `plane.OnStop`).
     pub(crate) fn on_stop_direct(self: &Arc<Self>) -> Result<(), CallError> {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            self.in_hook(|s, ctx| s.on_stop(ctx));
+        let input = self.record_now().map(|recv_ns| Input {
+            kind: Kind::ONSTOP,
+            recv_ns,
+            ..Input::default()
+        });
+        self.outside(input, |s, ctx| {
+            s.on_stop(ctx);
             Ok(())
-        }));
-        hook_result(result)
+        })
     }
 
-    /// The plane's Live: one bindings snapshot (E01-D011, E08-D046).
+    /// The plane's Live: one bindings snapshot (E01-D011, E08-D046). One
+    /// that is not newer is applied too, as nothing.
     pub(crate) fn live(&self, payload: &[u8]) -> Result<(), CallError> {
+        let at = self.record_now();
         let bindings = Bindings::decode(payload).map_err(|_| failed("bindings"))?;
         self.wiring
             .apply_bindings(&bindings)
-            .map_err(CallError::Failed)
+            .map_err(CallError::Failed)?;
+        if let Some(at) = at {
+            self.record_bindings(at, 0, payload);
+        }
+        Ok(())
     }
 
     /// The plane's Relay: queue one Command (PROTOCOL §9.3.5). C4 has sent
     /// the echo.
     pub(crate) fn relay(&self, payload: Vec<u8>) {
-        let _ = lock(&self.commands).send(payload);
+        let at = self.record_now();
+        let _ = lock(&self.commands).send(Relayed { at, payload });
     }
 
-    fn handle_command(&self, payload: &[u8]) {
-        let Ok(cmd) = Command::decode(payload) else {
+    fn handle_command(&self, relayed: &Relayed) {
+        let Ok(cmd) = Command::decode(relayed.payload.as_slice()) else {
             note("command");
             return;
         };
@@ -442,6 +570,10 @@ impl<S: Strategy> Plane<S> {
             Some(command::Cmd::Bindings(bindings)) => {
                 if let Err(err) = self.wiring.apply_bindings(&bindings) {
                     note(&format!("command bindings: {err}"));
+                } else if let Some(at) = relayed.at
+                    && let Some(raw) = field_bytes(&relayed.payload, BINDINGS_FIELD)
+                {
+                    self.record_bindings(at, FROM_COMMAND, raw);
                 }
             }
             Some(command::Cmd::Fail(fail)) => {
@@ -452,6 +584,49 @@ impl<S: Strategy> Plane<S> {
             }
             None => {}
         }
+    }
+
+    /// A `bindings` frame for a snapshot that was applied: `at` is when it
+    /// reached the worker, `raw` the Bindings as received (Go
+    /// `recordBindings`).
+    fn record_bindings(&self, at: i64, flags: u16, raw: &[u8]) {
+        if let Some(rec) = self.recorder() {
+            rec.append(Kind::BINDINGS, flags, at, rec.now_ns(), 0, raw, &[]);
+        }
+    }
+
+    /// [`Context::resolve`] (Go `plane.resolve`). With the event log on,
+    /// each call is a `resolve` frame, a refused one too: the ticker, then
+    /// the SymbolInfo or the error the strategy got.
+    pub(crate) fn resolve(&self, ticker: &str) -> Result<Info, Error> {
+        let call_ns = self.record_now();
+        let result = if self.resolve_allowed() {
+            let call = self.current_call().unwrap_or_else(CallCtx::background);
+            self.wiring.resolve(&call, ticker)
+        } else {
+            Err(symclient::Error::NotInInit)
+        };
+        if let Some(call_ns) = call_ns {
+            self.record_resolve(call_ns, ticker, &result);
+        }
+        result.map_err(sym_error)
+    }
+
+    /// Go `recordResolve`: recv is when the answer came, t the call.
+    fn record_resolve(&self, call_ns: i64, ticker: &str, result: &Result<Info, symclient::Error>) {
+        let Some(rec) = self.recorder() else {
+            return;
+        };
+        let mut head = Vec::new();
+        put_str(&mut head, ticker.as_bytes());
+        let (flags, rest) = match result {
+            Ok(info) => (outcome::OK, symclient::info_to_proto(info).encode_to_vec()),
+            Err(err) => (
+                resolve_outcome(err),
+                sym_error(err.clone()).to_string().into_bytes(),
+            ),
+        };
+        rec.append(Kind::RESOLVE, flags, rec.now_ns(), call_ns, 0, &head, &rest);
     }
 
     /// One decoded market data event to its hook (Go `mdHooks`). The
@@ -670,6 +845,25 @@ fn failed(text: &str) -> CallError {
     CallError::Failed(text.to_owned())
 }
 
+/// `Context.Rand`'s seed: std draws `RandomState`'s keys from the OS.
+fn random_seed() -> u64 {
+    RandomState::new().hash_one(0u8)
+}
+
+/// A failed resolve's flags (Go `resolveOutcome`). NotInInit, NotFound and
+/// Stopping are the SDK's own answers; the rest classify the request to
+/// SYM by its text, as an `order_reply` does.
+fn resolve_outcome(err: &symclient::Error) -> u16 {
+    match err {
+        symclient::Error::NotInInit => outcome::NOT_IN_INIT,
+        symclient::Error::NotFound(_) => outcome::NOT_FOUND,
+        symclient::Error::Closed => outcome::STOPPING,
+        symclient::Error::UnknownUid
+        | symclient::Error::InvalidTicker(_)
+        | symclient::Error::Failed(_) => sym::outcome_of(&err.to_string()),
+    }
+}
+
 /// A hook's result as C4 takes it. A panic is a failure with the dispatcher's
 /// `hook panic: ...` text.
 fn hook_result(result: thread::Result<Result<(), HookError>>) -> Result<(), CallError> {
@@ -736,6 +930,7 @@ mod tests {
     use mftik_proto::wire::mftiko::td::v1 as td;
 
     use super::*;
+    use crate::eventlog::{Record, Scratch};
     use crate::strategy::{BookHandler, FillHandler, Trade, TradeHandler};
 
     #[derive(Default)]
@@ -954,24 +1149,26 @@ mod tests {
         );
     }
 
+    struct Panics;
+
+    impl Strategy for Panics {
+        fn on_init(&mut self, _: &Context<Self>) -> Result<(), HookError> {
+            Ok(())
+        }
+        fn on_start(&mut self, _: &Context<Self>) -> Result<(), HookError> {
+            Err("no venue".into())
+        }
+        fn on_stop(&mut self, _: &Context<Self>) {
+            panic!("boom");
+        }
+    }
+
     #[test]
     fn on_stop_before_run_calls_the_strategy_and_a_panic_is_a_failure() {
         let plane = plane();
         assert_eq!(plane.on_stop_direct(), Ok(()));
         assert_eq!(seen(&plane), vec!["stop".to_owned()]);
 
-        struct Panics;
-        impl Strategy for Panics {
-            fn on_init(&mut self, _: &Context<Self>) -> Result<(), HookError> {
-                Ok(())
-            }
-            fn on_start(&mut self, _: &Context<Self>) -> Result<(), HookError> {
-                Err("no venue".into())
-            }
-            fn on_stop(&mut self, _: &Context<Self>) {
-                panic!("boom");
-            }
-        }
         let io = Io::start().expect("io thread");
         let clock = Clock::new();
         let plane = Plane::start(Panics, io.clone(), clock, Timers::new(io, clock)).expect("plane");
@@ -1056,5 +1253,169 @@ mod tests {
             ctx.exit();
         });
         assert!(seen(&plane).is_empty());
+    }
+
+    // ---------- the event log ----------
+
+    /// [`open_offline`] with the event log on.
+    fn logged<S: Strategy>(strategy: S, log: &Scratch) -> Arc<Plane<S>> {
+        let io = Io::start().expect("io thread");
+        let clock = Clock::new();
+        let plane =
+            Plane::start(strategy, io.clone(), clock, Timers::new(io, clock)).expect("plane");
+        let _ = plane.event_log.set(log.log());
+        open_offline(&plane);
+        plane
+    }
+
+    /// One line per frame: `rec_seq`, kind, and `ref` and `flags` when set.
+    fn lines(frames: &[Record]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|f| {
+                let mut line = format!("{} {}", f.seq, f.kind.name().unwrap_or("?"));
+                if f.r#ref != 0 {
+                    line += &format!(" ref={}", f.r#ref);
+                }
+                if f.flags != 0 {
+                    line += &format!(" flags={}", f.flags);
+                }
+                line
+            })
+            .collect()
+    }
+
+    fn resolved(ticker: &str, rest: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        put_str(&mut body, ticker.as_bytes());
+        body.extend_from_slice(rest);
+        body
+    }
+
+    #[test]
+    fn the_plane_writes_start_bindings_resolves_and_an_onstop_before_run() {
+        let log = Scratch::open();
+        let plane = logged(Recorder::default(), &log);
+        let start = StartPayload {
+            bindings: Some(Bindings::default()),
+        }
+        .encode_to_vec();
+        assert_eq!(plane.start_call(&start, &CallCtx::background()), Ok(()));
+        let v = |seq| Bindings {
+            version: Some(Version { epoch: 1, seq }),
+            ..Default::default()
+        };
+        let live = v(2).encode_to_vec();
+        assert_eq!(plane.live(&live), Ok(()));
+        // A snapshot that is refused is not written.
+        let selector = Bindings {
+            selectors: vec![Default::default()],
+            ..v(3)
+        };
+        assert!(plane.live(&selector.encode_to_vec()).is_err());
+        let cmd = Command {
+            cmd: Some(command::Cmd::Bindings(v(3))),
+        };
+        plane.handle_command(&Relayed {
+            at: plane.record_now(),
+            payload: cmd.encode_to_vec(),
+        });
+        plane.in_hook(|_, ctx| assert_eq!(ctx.resolve("BTC"), Err(Error::NotInInit)));
+        assert_eq!(plane.on_stop_direct(), Ok(()));
+
+        let frames = log.close();
+        assert_eq!(
+            lines(&frames),
+            [
+                "1 start",
+                "2 resolve flags=7",
+                "3 hook_end ref=1",
+                "4 bindings",
+                "5 bindings flags=1",
+                "6 resolve flags=5",
+                "7 onstop",
+                "8 hook_end ref=7",
+                "9 end",
+            ]
+        );
+        assert_eq!(frames[0].body, start);
+        // Without SYM the session is stopping, and only Init and Start may
+        // resolve.
+        assert_eq!(
+            frames[1].body,
+            resolved("x", b"sdk: the session is stopping")
+        );
+        assert_eq!(
+            frames[5].body,
+            resolved("BTC", b"sdk: only OnInit and OnStart may call this")
+        );
+        assert_eq!(frames[3].body, live);
+        assert_eq!(frames[4].body, v(3).encode_to_vec());
+        for f in &frames[..frames.len() - 1] {
+            match f.kind {
+                // recv is the answer, t the call.
+                Kind::RESOLVE => assert!(0 < f.t_ns && f.t_ns <= f.recv_ns, "{f:?}"),
+                Kind::HOOK_END => assert!(f.body.is_empty(), "{f:?}"),
+                _ => assert!(0 < f.recv_ns && f.recv_ns <= f.t_ns, "{f:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_panic_outside_the_dispatcher_is_in_the_file_when_the_call_returns() {
+        let log = Scratch::open();
+        let plane = logged(Panics, &log);
+        let start = StartPayload {
+            bindings: Some(Bindings::default()),
+        };
+        assert_eq!(
+            plane.start_call(&start.encode_to_vec(), &CallCtx::background()),
+            Err(CallError::Failed("no venue".into()))
+        );
+        assert_eq!(
+            plane.on_stop_direct(),
+            Err(CallError::Failed("hook panic: boom".into()))
+        );
+        assert_eq!(log.log().stats(), (4, 0));
+
+        let frames = log.close();
+        assert_eq!(
+            lines(&frames),
+            [
+                "1 start",
+                "2 hook_end ref=1 flags=2",
+                "3 onstop",
+                "4 hook_end ref=3 flags=1",
+                "5 end",
+            ]
+        );
+        assert_eq!(frames[1].body, b"no venue");
+        assert_eq!(frames[3].body, b"boom");
+    }
+
+    #[test]
+    fn a_failed_resolve_is_classified_as_go_classifies_it() {
+        use symclient::Error as E;
+        let request = |text: &str| E::Failed(format!("symclient: request sym: {text}"));
+        let cases = [
+            (E::NotInInit, outcome::NOT_IN_INIT),
+            (E::NotFound("delisted".into()), outcome::NOT_FOUND),
+            (E::Closed, outcome::STOPPING),
+            (request(sym::NO_RESPONDERS), outcome::NO_RESPONDERS),
+            (request(sym::DEADLINE_EXCEEDED), outcome::TIMEOUT),
+            (
+                E::Failed("symclient: subscribe sym.v1.changed.Bybit.Perp: nats: timeout".into()),
+                outcome::TIMEOUT,
+            ),
+            (request(sym::CANCELED), outcome::CANCELED),
+            (E::Failed("symclient: reply: bad".into()), outcome::FAILED),
+            (
+                E::InvalidTicker("symbol: bad ticker".into()),
+                outcome::FAILED,
+            ),
+        ];
+        for (err, flags) in cases {
+            assert_eq!(resolve_outcome(&err), flags, "{err:?}");
+        }
     }
 }

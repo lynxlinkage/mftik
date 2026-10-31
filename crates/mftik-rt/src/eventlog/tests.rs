@@ -544,17 +544,15 @@ impl Sink for Stuck {
     }
 }
 
-/// A full ring drops and counts; append returns while the disk is stuck.
-#[test]
-fn a_full_ring_drops_and_does_not_wait_for_the_disk() {
-    let vol = TempDir::new("evstuck");
+/// A log whose first write blocks until the sender sends; the receiver
+/// hears when that write starts.
+fn stuck(dir: &Path, f: impl FnOnce(&mut Config)) -> (Log, mpsc::Receiver<()>, mpsc::Sender<()>) {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let entered = Arc::new(Mutex::new(Some(entered_tx)));
     let release = Arc::new(Mutex::new(Some(release_rx)));
-    let log = Arc::new(open(&vol.0, |c| {
-        c.ring_bytes = 4 << 10;
-        c.flush_every = Duration::from_millis(1);
+    let log = open(dir, |c| {
+        f(c);
         c.create = Some(Box::new(move |path: &Path| {
             let file = fs::OpenOptions::new()
                 .write(true)
@@ -566,7 +564,19 @@ fn a_full_ring_drops_and_does_not_wait_for_the_disk() {
                 release: release.clone(),
             }) as Box<dyn Sink>)
         }));
-    }));
+    });
+    (log, entered_rx, release_tx)
+}
+
+/// A full ring drops and counts; append returns while the disk is stuck.
+#[test]
+fn a_full_ring_drops_and_does_not_wait_for_the_disk() {
+    let vol = TempDir::new("evstuck");
+    let (log, entered_rx, release_tx) = stuck(&vol.0, |c| {
+        c.ring_bytes = 4 << 10;
+        c.flush_every = Duration::from_millis(1);
+    });
+    let log = Arc::new(log);
     let body = [b'y'; 100];
     post(&log, 1, &body);
     entered_rx.recv().unwrap();
@@ -608,6 +618,27 @@ fn a_full_ring_drops_and_does_not_wait_for_the_disk() {
         .unwrap();
     assert_eq!(end.kind, Kind::END);
     assert_eq!(end.body, end_body(dropped).to_vec());
+}
+
+/// A bounded flush gives up on a stuck disk at its limit, and succeeds
+/// once the frames are in the file.
+#[test]
+fn a_bounded_flush_does_not_wait_past_its_limit() {
+    let vol = TempDir::new("evbounded");
+    let (log, entered_rx, release_tx) = stuck(&vol.0, |_| {});
+    post(&log, 1, b"a");
+    let started = Instant::now();
+    assert!(!log.flush_within(Duration::from_millis(100)));
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(100), "{took:?}");
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    entered_rx.recv().unwrap();
+    release_tx.send(()).unwrap();
+    assert!(log.flush_within(Duration::from_secs(5)));
+    assert_eq!(log.stats(), (1, 0));
+    log.close();
+    let records = read(&vol.0.join("3-1.mel")).1;
+    assert_eq!(records.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 2]);
 }
 
 #[test]

@@ -4,9 +4,10 @@
 //! The file format and the writer thread are mftik-rt's
 //! (`mftik_rt::eventlog`); this crate does no IO (E02-D001). [`Kind`] names
 //! the frames, the constants are their flags, and the functions encode the
-//! bodies that are not a message as received (§12.4). A [`Recorder`] is where
-//! [`crate::dispatch`] appends the frames of the hooks it runs: each input
-//! before its hook, and a `hook_end` after (§12.5).
+//! bodies that are not a message as received, or cut a field out of one
+//! (§12.4). A [`Recorder`] is where [`crate::dispatch`] appends the frames of
+//! the hooks it runs: each input before its hook, and a `hook_end` after
+//! (§12.5).
 
 /// What a frame holds (§12.4). Numbers are only added; a reader skips a kind
 /// it does not know.
@@ -141,6 +142,70 @@ pub fn td_view_head(generation: u64) -> [u8; 8] {
     generation.to_le_bytes()
 }
 
+/// The protobuf message `msg` with every occurrence of field `number` left
+/// out, as Go's `withoutField`: the `init` body is the InitPayload without
+/// its NATS credentials (E07-D010). The walk stops at bytes it cannot parse,
+/// a group included; these messages have none.
+pub fn without_field(mut msg: &[u8], number: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(msg.len());
+    while let Some((n, len, _)) = next_field(msg) {
+        if n != number {
+            out.extend_from_slice(&msg[..len]);
+        }
+        msg = &msg[len..];
+    }
+    out
+}
+
+/// The last occurrence of the length-delimited field `number` in `msg`, its
+/// bytes as they are there (Go `fieldBytes`): a Command's `bindings`. `None`
+/// when there is none, or `msg` does not parse.
+pub fn field_bytes(mut msg: &[u8], number: u32) -> Option<&[u8]> {
+    let mut found = None;
+    while !msg.is_empty() {
+        let (n, len, value) = next_field(msg)?;
+        if n == number && value.is_some() {
+            found = value;
+        }
+        msg = &msg[len..];
+    }
+    found
+}
+
+/// The first field of `msg`: its number, its length with the key, and the
+/// value of a length-delimited field.
+fn next_field(msg: &[u8]) -> Option<(u32, usize, Option<&[u8]>)> {
+    const MAX_FIELD: u32 = (1 << 29) - 1;
+    let (key, key_len) = varint(msg)?;
+    let number = u32::try_from(key >> 3)
+        .ok()
+        .filter(|n| (1..=MAX_FIELD).contains(n))?;
+    let rest = &msg[key_len..];
+    let (len, value) = match key & 7 {
+        0 => (varint(rest)?.1, None),
+        1 => (8, None),
+        2 => {
+            let (n, len_len) = varint(rest)?;
+            let end = len_len.checked_add(usize::try_from(n).ok()?)?;
+            (end, Some(rest.get(len_len..end)?))
+        }
+        5 => (4, None),
+        _ => return None,
+    };
+    (len <= rest.len()).then_some((number, key_len + len, value))
+}
+
+fn varint(b: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0;
+    for (i, &byte) in b.iter().take(10).enumerate() {
+        value |= u64::from(byte & 0x7f) << (7 * i);
+        if byte < 0x80 {
+            return Some((value, i + 1));
+        }
+    }
+    None
+}
+
 /// Where the dispatcher appends frames: the session's event log writer.
 pub trait Recorder: Send + Sync {
     /// Unix nanoseconds. Every time the dispatcher puts in a frame is read here.
@@ -163,6 +228,12 @@ pub trait Recorder: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use mftik_proto::wire::mftiko::common::v1::Version;
+    use mftik_proto::wire::mftiko::stsctl::v1::{
+        Bindings, Command, Fail, InitPayload, NatsCredentials, command,
+    };
+    use prost::Message;
+
     use super::*;
 
     #[test]
@@ -191,5 +262,74 @@ mod tests {
         put_str(&mut out, &[b'x'; 0x1_0001]);
         assert_eq!(out.len(), 2 + 0xffff);
         assert_eq!(out[..2], [0xff, 0xff]);
+    }
+
+    #[test]
+    fn without_field_leaves_out_every_occurrence_and_keeps_the_rest_as_it_was() {
+        let creds = NatsCredentials {
+            user_jwt: "jwt".into(),
+            seed: "seed".into(),
+            inbox_prefix: "_INBOX_s1".into(),
+        };
+        let init = InitPayload {
+            session_id: "s1".into(),
+            incarnation: 2,
+            params: vec![1, 2],
+            nats: Some(creds.clone()),
+            recv_window_ms: 500,
+            hook_timeout_s: 1,
+            ..Default::default()
+        };
+        // A second `nats` after the others, and a fixed64 and a fixed32
+        // field this payload does not know.
+        let mut msg = init.encode_to_vec();
+        msg.extend_from_slice(&[(9 << 3) | 2, creds.encoded_len() as u8]);
+        msg.extend_from_slice(&creds.encode_to_vec());
+        msg.extend_from_slice(&[(13 << 3) | 1, 1, 0, 0, 0, 0, 0, 0, 0]);
+        msg.extend_from_slice(&[(14 << 3) | 5, 1, 0, 0, 0]);
+
+        let out = without_field(&msg, 9);
+        let mut want = init.clone();
+        want.nats = None;
+        let mut known = want.encode_to_vec();
+        known.extend_from_slice(&msg[msg.len() - 14..]);
+        assert_eq!(out, known);
+        for secret in ["jwt", "seed", "_INBOX_s1"] {
+            assert!(!out.windows(secret.len()).any(|w| w == secret.as_bytes()));
+        }
+        // Bytes that do not parse end the walk: what came before is kept.
+        let cut = without_field(&init.encode_to_vec()[..7], 9);
+        assert_eq!(cut, [(1 << 3) | 2, 2, b's', b'1', 2 << 3, 2]);
+    }
+
+    #[test]
+    fn field_bytes_is_the_last_occurrence_as_it_was_sent() {
+        let first = Bindings {
+            version: Some(Version { epoch: 1, seq: 1 }),
+            ..Default::default()
+        };
+        let last = Bindings {
+            version: Some(Version { epoch: 1, seq: 2 }),
+            ..Default::default()
+        };
+        let cmd = Command {
+            cmd: Some(command::Cmd::Bindings(last.clone())),
+        };
+        assert_eq!(
+            field_bytes(&cmd.encode_to_vec(), 1),
+            Some(&last.encode_to_vec()[..])
+        );
+        let mut twice = Command {
+            cmd: Some(command::Cmd::Bindings(first)),
+        }
+        .encode_to_vec();
+        twice.extend_from_slice(&cmd.encode_to_vec());
+        assert_eq!(field_bytes(&twice, 1), Some(&last.encode_to_vec()[..]));
+        let fail = Command {
+            cmd: Some(command::Cmd::Fail(Fail { reason: "r".into() })),
+        };
+        assert_eq!(field_bytes(&fail.encode_to_vec(), 1), None);
+        assert_eq!(field_bytes(&twice[..twice.len() - 1], 1), None);
+        assert_eq!(field_bytes(&[], 1), None);
     }
 }

@@ -34,7 +34,7 @@ const MAX_FILE: u64 = 64 << 20;
 /// After a failed directory, open, or write, the writer tries again this much later.
 const RETRY_AFTER: Duration = Duration::from_secs(1);
 /// [`Log::close`] waits this long for the ring to reach the file.
-const CLOSE_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 /// Where one file's bytes go. [`Config::create`] returns one.
 pub trait Sink: Send {
@@ -213,17 +213,42 @@ impl Log {
     /// Waits until every frame appended before it is in a file or counted as
     /// dropped.
     pub fn flush(&self) {
-        let mut st = self.shared.lock();
+        self.flush_by(None);
+    }
+
+    /// [`Log::flush`] that waits at most `limit`, so a shutdown that flushes
+    /// never hangs on the disk (E07-D012). `false` when frames were still in
+    /// the ring then.
+    pub fn flush_within(&self, limit: Duration) -> bool {
+        self.flush_by(Instant::now().checked_add(limit))
+    }
+
+    fn flush_by(&self, deadline: Option<Instant>) -> bool {
+        let shared = &self.shared;
+        let mut st = shared.lock();
         let target = st.tail;
         while st.head < target && !st.exited {
             st.kick = true;
-            self.shared.wake.notify_one();
-            st = self
-                .shared
-                .moved
-                .wait(st)
-                .unwrap_or_else(PoisonError::into_inner);
+            shared.wake.notify_one();
+            st = match deadline {
+                None => shared
+                    .moved
+                    .wait(st)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return false;
+                    }
+                    shared
+                        .moved
+                        .wait_timeout(st, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
         }
+        st.head >= target
     }
 
     /// Appends the `end` frame and waits until the ring is in files, at most

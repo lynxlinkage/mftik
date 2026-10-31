@@ -1,10 +1,12 @@
 //! A session's event log, end to end (PROTOCOL §12.5, E07-D007, E07-D008).
 //!
-//! The strategy makes its own inputs: post 1 makes timer 1, whose run makes
+//! The log opens with `init` and `start`, each with its `hook_end`. Then the
+//! strategy makes its own inputs: post 1 makes timer 1, whose run makes
 //! post 2. Each input is written before its hook and a `hook_end` after it.
 //! A hook that panics gets a `hook_end` with the panic, a `HUNG` hook gets
 //! none, and every exit closes the log with `end`. MD and TD inputs are
-//! checked against nats-server by the path tests in `src/md` and `src/td`.
+//! checked against nats-server by the path tests in `src/md` and `src/td`,
+//! and every kind by `eventlog_kinds`.
 
 use std::env;
 use std::path::Path;
@@ -13,11 +15,12 @@ use std::time::Duration;
 
 use mftik_proto::wire::mftiko::common::v1::Outcome;
 use mftik_proto::wire::mftiko::session::v1::EventLog;
-use mftik_proto::wire::mftiko::stsctl::v1::EventLogStat;
+use mftik_proto::wire::mftiko::stsctl::v1::{EventLogStat, InitPayload};
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
 use mftik_rt::eventlog::{self, Kind, Reader, Record};
 use mftik_rt::{Context, HookError, Strategy};
 use mftik_testkit::*;
+use prost::Message;
 
 /// `InitPayload.params` names how post 2 ends.
 #[derive(Default)]
@@ -56,15 +59,16 @@ fn worker_entry() {
     }
 }
 
-/// Hello, Init with the log on, Start, and Stage(running).
-fn running(shim: &mut Shim, nats: &Nats, scenario: &str) {
+/// Hello, Init with the log on, Start, and Stage(running). Returns the
+/// InitPayload sent.
+fn running(shim: &mut Shim, nats: &Nats, scenario: &str) -> InitPayload {
     let mut payload = init_payload(&nats.creds, scenario);
     payload.event_log = Some(EventLog {
         enabled: true,
         keep_mb: 1,
     });
     hello(shim);
-    init(shim, payload, 5000);
+    init(shim, payload.clone(), 5000);
     expect_applied(shim, "live-1");
     expect_done(shim, Verb::Init, true, "");
     start(shim);
@@ -73,6 +77,7 @@ fn running(shim: &mut Shim, nats: &Nats, scenario: &str) {
         worker_up::Msg::Stage(stage) => assert_eq!(stage.name, "running"),
         other => panic!("want Stage(running), got {other:?}"),
     }
+    payload
 }
 
 /// Every frame in the volume's log directory, oldest first.
@@ -86,13 +91,13 @@ fn frames(volume: &Path) -> Vec<Record> {
 }
 
 /// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, and a
-/// `hook_end`'s text.
+/// `hook_end`'s text. The `init` ref, a random seed, is left out.
 fn lines(records: &[Record]) -> Vec<String> {
     records
         .iter()
         .map(|record| {
             let mut line = format!("{} {}", record.seq, record.kind.name().unwrap_or("?"));
-            if record.r#ref != 0 {
+            if record.r#ref != 0 && record.kind != Kind::INIT {
                 line += &format!(" ref={}", record.r#ref);
             }
             if record.flags != 0 {
@@ -128,13 +133,13 @@ fn assert_times(records: &[Record]) {
 fn each_input_is_followed_by_its_hook_end_and_the_exit_writes_end() {
     let nats = start_nats();
     let mut shim = Shim::spawn(&nats.url);
-    running(&mut shim, &nats, "");
-    // Six frames reach the file while the session runs.
-    let report = shim.wait_report(|r| r.event_log.as_ref().is_some_and(|s| s.records == 6));
+    let mut sent = running(&mut shim, &nats, "");
+    // Ten frames reach the file while the session runs.
+    let report = shim.wait_report(|r| r.event_log.as_ref().is_some_and(|s| s.records == 10));
     assert_eq!(
         report.event_log,
         Some(EventLogStat {
-            records: 6,
+            records: 10,
             dropped: 0
         })
     );
@@ -150,20 +155,31 @@ fn each_input_is_followed_by_its_hook_end_and_the_exit_writes_end() {
     assert_eq!(
         lines(&records),
         [
-            "1 post ref=1",
+            "1 init",
             "2 hook_end ref=1",
-            "3 timer ref=1",
+            "3 start",
             "4 hook_end ref=3",
-            "5 post ref=2",
+            "5 post ref=1",
             "6 hook_end ref=5",
-            "7 stop flags=1",
-            "8 onstop",
-            "9 hook_end ref=8",
-            "10 end",
+            "7 timer ref=1",
+            "8 hook_end ref=7",
+            "9 post ref=2",
+            "10 hook_end ref=9",
+            "11 stop flags=1",
+            "12 onstop",
+            "13 hook_end ref=12",
+            "14 end",
         ]
     );
     assert_times(&records);
-    assert_eq!(records[9].body, 0u64.to_le_bytes());
+    assert_eq!(records[13].body, 0u64.to_le_bytes());
+    // The init body is the cloid counter, then the payload as sent without
+    // its NATS credentials (E07-D010).
+    sent.nats = None;
+    assert_eq!(
+        InitPayload::decode(&records[0].body[8..]).expect("init payload"),
+        sent
+    );
 }
 
 #[test]
@@ -179,16 +195,20 @@ fn a_hook_that_panics_still_gets_its_hook_end() {
     assert_eq!(
         lines(&records),
         [
-            "1 post ref=1",
+            "1 init",
             "2 hook_end ref=1",
-            "3 timer ref=1",
+            "3 start",
             "4 hook_end ref=3",
-            "5 post ref=2",
-            r#"6 hook_end ref=5 flags=1 "boom""#,
-            "7 stop",
-            "8 onstop",
-            "9 hook_end ref=8",
-            "10 end",
+            "5 post ref=1",
+            "6 hook_end ref=5",
+            "7 timer ref=1",
+            "8 hook_end ref=7",
+            "9 post ref=2",
+            r#"10 hook_end ref=9 flags=1 "boom""#,
+            "11 stop",
+            "12 onstop",
+            "13 hook_end ref=12",
+            "14 end",
         ]
     );
     assert_times(&records);
@@ -207,13 +227,17 @@ fn a_hung_hook_has_no_hook_end_and_the_exit_still_writes_end() {
     assert_eq!(
         lines(&records),
         [
-            "1 post ref=1",
+            "1 init",
             "2 hook_end ref=1",
-            "3 timer ref=1",
+            "3 start",
             "4 hook_end ref=3",
-            "5 post ref=2",
-            "6 stop flags=2",
-            "7 end",
+            "5 post ref=1",
+            "6 hook_end ref=5",
+            "7 timer ref=1",
+            "8 hook_end ref=7",
+            "9 post ref=2",
+            "10 stop flags=2",
+            "11 end",
         ]
     );
     assert_times(&records);
