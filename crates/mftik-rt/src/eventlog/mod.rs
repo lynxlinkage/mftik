@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use mftik_core::eventlog::Kind;
-use mftik_core::eventlog::Recorder;
+use mftik_core::eventlog::{Recorder, put_str};
 pub use reader::{ReadError, Reader};
 #[cfg(test)]
 pub(crate) use scratch::Scratch;
@@ -248,12 +248,6 @@ pub fn files(dir: &Path) -> io::Result<Vec<File>> {
     }
     out.sort_by_key(|f| (f.incarnation, f.n));
     Ok(out)
-}
-
-fn put_str(dst: &mut Vec<u8>, bytes: &[u8]) {
-    let bytes = &bytes[..bytes.len().min(usize::from(u16::MAX))];
-    dst.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-    dst.extend_from_slice(bytes);
 }
 
 fn cut_str(b: &[u8]) -> Option<(&[u8], &[u8])> {
