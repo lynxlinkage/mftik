@@ -1,10 +1,12 @@
-//! A session's event log, end to end (PROTOCOL §12.5, E07-D007, E07-D008).
+//! A session's event log, end to end (PROTOCOL §12.5, E07-D007, E07-D008,
+//! E07-D012).
 //!
 //! The log opens with `init` and `start`, each with its `hook_end`. Then the
 //! strategy makes its own inputs: post 1 makes timer 1, whose run makes
 //! post 2. Each input is written before its hook and a `hook_end` after it.
 //! A hook that panics gets a `hook_end` with the panic, a `HUNG` hook gets
-//! none, and every exit closes the log with `end`. MD and TD inputs are
+//! none, and every exit closes the log with `end`. A panic in OnInit or
+//! OnStart is in the file before C4 hears of it. MD and TD inputs are
 //! checked against nats-server by the path tests in `src/md` and `src/td`,
 //! and every kind by `eventlog_kinds`.
 
@@ -21,8 +23,10 @@ use mftik_rt::eventlog::{self, Kind, Reader, Record};
 use mftik_rt::{Context, HookError, Strategy};
 use mftik_testkit::*;
 use prost::Message;
+use serde_json::Value;
 
-/// `InitPayload.params` names how post 2 ends.
+/// `InitPayload.params` names the hook that goes wrong, if one does: OnInit,
+/// OnStart, or post 2.
 #[derive(Default)]
 struct Steps {
     scenario: String,
@@ -31,10 +35,16 @@ struct Steps {
 impl Strategy for Steps {
     fn on_init(&mut self, ctx: &Context<Self>) -> Result<(), HookError> {
         self.scenario = String::from_utf8(ctx.params().to_vec())?;
+        if self.scenario == "init-panic" {
+            panic!("init boom");
+        }
         Ok(())
     }
 
     fn on_start(&mut self, ctx: &Context<Self>) -> Result<(), HookError> {
+        if self.scenario == "start-panic" {
+            panic!("start boom");
+        }
         ctx.post(|_, ctx| {
             ctx.after(Duration::ZERO, |_, ctx| {
                 ctx.post(|s, _| match s.scenario.as_str() {
@@ -59,9 +69,8 @@ fn worker_entry() {
     }
 }
 
-/// Hello, Init with the log on, Start, and Stage(running). Returns the
-/// InitPayload sent.
-fn running(shim: &mut Shim, nats: &Nats, scenario: &str) -> InitPayload {
+/// Hello, then Init with the log on. Returns the InitPayload sent.
+fn logged(shim: &mut Shim, nats: &Nats, scenario: &str) -> InitPayload {
     let mut payload = init_payload(&nats.creds, scenario);
     payload.event_log = Some(EventLog {
         enabled: true,
@@ -69,6 +78,13 @@ fn running(shim: &mut Shim, nats: &Nats, scenario: &str) -> InitPayload {
     });
     hello(shim);
     init(shim, payload.clone(), 5000);
+    payload
+}
+
+/// Hello, Init with the log on, Start, and Stage(running). Returns the
+/// InitPayload sent.
+fn running(shim: &mut Shim, nats: &Nats, scenario: &str) -> InitPayload {
+    let payload = logged(shim, nats, scenario);
     expect_applied(shim, "live-1");
     expect_done(shim, Verb::Init, true, "");
     start(shim);
@@ -88,6 +104,32 @@ fn frames(volume: &Path) -> Vec<Record> {
         records.extend(reader.read_all().expect("frames"));
     }
     records
+}
+
+/// The first `n` frames in the file now, while the worker may still be
+/// writing the ones after them.
+fn on_disk(volume: &Path, n: usize) -> Vec<Record> {
+    let files = eventlog::files(&volume.join(eventlog::DIR)).expect("log files");
+    let file = files.first().expect("a log file");
+    let mut reader = Reader::open(&file.path).expect("log file");
+    (0..n)
+        .map(|_| {
+            reader
+                .next_record()
+                .expect("a whole frame")
+                .expect("a frame")
+        })
+        .collect()
+}
+
+/// The frames as Go `mftiko-eventlog dump` prints them, after the header.
+fn dumped(volume: &Path) -> Vec<Value> {
+    let (ok, text) = eventlog_dump(&[volume.join(eventlog::DIR)]);
+    assert!(ok, "{text}");
+    text.lines()
+        .skip(1)
+        .map(|line| serde_json::from_str(line).expect("json"))
+        .collect()
 }
 
 /// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, and a
@@ -215,6 +257,55 @@ fn a_hook_that_panics_still_gets_its_hook_end() {
 }
 
 #[test]
+fn an_on_init_panic_is_in_the_file_before_done_and_the_exit_writes_end() {
+    let nats = start_nats();
+    let mut shim = Shim::spawn(&nats.url);
+    logged(&mut shim, &nats, "init-panic");
+    let why = "hook panic: init boom";
+    expect_done(&mut shim, Verb::Init, false, why);
+    let panicked = ["1 init", r#"2 hook_end ref=1 flags=1 "init boom""#];
+    assert_eq!(lines(&on_disk(&shim.volume.0, 2)), panicked);
+    expect_ending(&mut shim, Outcome::InitFailed, why, Some(false));
+    let ended = shim.end();
+    assert_eq!(ended.code, Some(10), "{}", ended.stderr);
+
+    let records = frames(&ended.volume.0);
+    assert_eq!(lines(&records), [panicked[0], panicked[1], "3 end"]);
+    assert_times(&records);
+    let dumped = dumped(&ended.volume.0);
+    assert_eq!(dumped[1]["ending"], "panic", "{}", dumped[1]);
+    assert_eq!(dumped[1]["panic"], "init boom", "{}", dumped[1]);
+}
+
+#[test]
+fn an_on_start_panic_is_in_the_file_before_done_and_on_stop_still_runs() {
+    let nats = start_nats();
+    let mut shim = Shim::spawn(&nats.url);
+    logged(&mut shim, &nats, "start-panic");
+    expect_applied(&mut shim, "live-1");
+    expect_done(&mut shim, Verb::Init, true, "");
+    start(&shim);
+    let why = "hook panic: start boom";
+    expect_done(&mut shim, Verb::Start, false, why);
+    let panicked = [
+        "1 init",
+        "2 hook_end ref=1",
+        "3 start",
+        r#"4 hook_end ref=3 flags=1 "start boom""#,
+    ];
+    assert_eq!(lines(&on_disk(&shim.volume.0, 4)), panicked);
+    expect_ending(&mut shim, Outcome::InitFailed, why, Some(true));
+    let ended = shim.end();
+    assert_eq!(ended.code, Some(10), "{}", ended.stderr);
+
+    let records = frames(&ended.volume.0);
+    let mut want = panicked.to_vec();
+    want.extend(["5 onstop", "6 hook_end ref=5", "7 end"]);
+    assert_eq!(lines(&records), want);
+    assert_times(&records);
+}
+
+#[test]
 fn a_hung_hook_has_no_hook_end_and_the_exit_still_writes_end() {
     let nats = start_nats();
     let mut shim = Shim::spawn(&nats.url);
@@ -241,4 +332,13 @@ fn a_hung_hook_has_no_hook_end_and_the_exit_still_writes_end() {
         ]
     );
     assert_times(&records);
+    // Go reads the watchdog's stop: no OnStop was asked for.
+    let dumped = dumped(&ended.volume.0);
+    let stop = &dumped[9];
+    assert_eq!(stop["kind"], "stop");
+    assert_eq!(stop["hung"], true, "{stop}");
+    assert!(stop.get("deliver").is_none(), "{stop}");
+    assert!(stop.get("onstop_asked_ns").is_none(), "{stop}");
+    assert_eq!(dumped[10]["kind"], "end");
+    assert_eq!(dumped[10]["dropped"], 0);
 }
