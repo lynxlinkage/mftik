@@ -451,6 +451,8 @@ fn a_reconnect_compares_revisions_at_once() {
     let mark = fake.mark();
     relay.cut();
     wait_until("the refetch after reconnect", || session.tick(BTC) == 0.125);
+    // The row is stored before the pass sends its closing Revisions.
+    wait_until("the pass to end", || fake.calls_since(mark).len() >= 4);
     assert_eq!(
         fake.calls_since(mark),
         [Call::Rev, Call::Rev, Call::ByUid(BTC, false), Call::Rev]
