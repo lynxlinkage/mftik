@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::envelope::encode_v1;
 use super::*;
+use crate::eventlog::Kind as FrameKind;
 
 const T0: i64 = 1_000_000_000;
 const FUSE: Duration = Duration::from_secs(5);
@@ -1556,4 +1557,453 @@ fn drive_after_run_returns_at_once() {
     // The loop is already started; drive does not start a second one.
     dispatcher.drive();
     assert!(stop(&dispatcher).is_ok());
+}
+
+// ---------- the event log (PROTOCOL §12.5, E07-03) ----------
+
+/// The event log's clock at the start of every recording test. Times in the
+/// expected lines are relative to it.
+const T_LOG: i64 = 1_700_000_000_000_000_000;
+
+/// An event log in memory. Its clock moves only when a test moves it, and
+/// it counts the reads.
+struct Memory {
+    clock: AtomicI64,
+    reads: AtomicUsize,
+    frames: Mutex<Vec<Frozen>>,
+}
+
+/// One frame as the log took it.
+struct Frozen {
+    seq: u64,
+    kind: FrameKind,
+    flags: u16,
+    recv_ns: i64,
+    t_ns: i64,
+    r#ref: u64,
+    body: Vec<u8>,
+}
+
+impl Memory {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            clock: AtomicI64::new(T_LOG),
+            reads: AtomicUsize::new(0),
+            frames: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn tick(&self) {
+        self.clock.fetch_add(MS, Ordering::Relaxed);
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// One line per frame: `rec_seq`, kind, and the fields that are set. An
+    /// MD body is printed without its envelope.
+    fn lines(&self) -> Vec<String> {
+        lock(&self.frames)
+            .iter()
+            .map(|frame| {
+                let mut line = format!("{} {}", frame.seq, frame.kind.name().unwrap_or("?"));
+                if frame.r#ref != 0 {
+                    line += &format!(" ref={}", frame.r#ref);
+                }
+                if frame.flags != 0 {
+                    line += &format!(" flags={}", frame.flags);
+                }
+                if frame.recv_ns != 0 {
+                    line += &format!(" recv={}", rel(frame.recv_ns));
+                }
+                if frame.t_ns != 0 {
+                    line += &format!(" t={}", rel(frame.t_ns));
+                }
+                let mut body = frame.body.as_slice();
+                if matches!(frame.kind, FrameKind::MD_FEED | FrameKind::MD_BOOK) {
+                    body = body.get(envelope::SIZE..).unwrap_or_default();
+                }
+                if !body.is_empty() {
+                    line += &format!(" {:?}", String::from_utf8_lossy(body));
+                }
+                line
+            })
+            .collect()
+    }
+}
+
+impl Recorder for Memory {
+    fn now_ns(&self) -> i64 {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.clock.load(Ordering::Relaxed)
+    }
+
+    fn append(
+        &self,
+        kind: FrameKind,
+        flags: u16,
+        recv_ns: i64,
+        t_ns: i64,
+        r#ref: u64,
+        a: &[u8],
+        b: &[u8],
+    ) -> u64 {
+        let mut frames = lock(&self.frames);
+        let seq = frames.len() as u64 + 1;
+        frames.push(Frozen {
+            seq,
+            kind,
+            flags,
+            recv_ns,
+            t_ns,
+            r#ref,
+            body: [a, b].concat(),
+        });
+        seq
+    }
+}
+
+fn rel(ns: i64) -> String {
+    let d = ns - T_LOG;
+    match d {
+        0 => "0s".to_owned(),
+        _ if d % MS == 0 => format!("{}ms", d / MS),
+        _ => format!("{d}ns"),
+    }
+}
+
+fn recorded(log: &Arc<Memory>) -> impl FnOnce(&mut Config) {
+    let rec: Arc<dyn Recorder> = log.clone();
+    move |config| config.rec = Some(rec)
+}
+
+fn td_event(r#ref: u64, recv_ns: i64, body: &'static [u8]) -> Input {
+    Input {
+        kind: FrameKind::TD_EVENT,
+        recv_ns,
+        r#ref,
+        body: Bytes::from_static(body),
+        ..Input::default()
+    }
+}
+
+#[test]
+fn inputs_are_written_in_delivery_order_each_followed_by_its_hook_end() {
+    let log = Memory::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tick = |name: &'static str| {
+        let (log, seen) = (Arc::clone(&log), Arc::clone(&seen));
+        move || {
+            lock(&seen).push(name);
+            log.tick();
+        }
+    };
+    let (feed, book) = (tick("feed"), tick("book"));
+    let ender = Arc::new(Mutex::new(None::<Dispatcher>));
+    let ender_book = Arc::clone(&ender);
+    let dispatcher = build(|config| {
+        recorded(&log)(config);
+        config.feed = Some(Box::new(move |_| feed()));
+        config.book = Some(Box::new(move |_| {
+            book();
+            if let Some(dispatcher) = lock(&ender_book).as_ref() {
+                dispatcher.exit();
+            }
+        }));
+    });
+    *lock(&ender) = Some(dispatcher.clone());
+    dispatcher
+        .push_in(td_event(7, T_LOG - 5 * MS, b"ev-1"), tick("td"))
+        .expect("td event");
+    dispatcher.push_md(&md(b"md-1")).expect("md");
+    dispatcher.post(tick("post")).expect("post");
+    dispatcher.timer(tick("timer")).fire();
+    dispatcher.push_book(&md(b"book-1")).expect("book");
+    dispatcher.push_td(tick("unrecorded")).expect("unrecorded");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    assert!(stop(&dispatcher).is_ok());
+    *lock(&ender) = None;
+
+    // Every TD entry ran before MD; the entry pushed without an input wrote nothing.
+    assert_eq!(
+        lock(&seen).as_slice(),
+        ["td", "post", "timer", "unrecorded", "feed", "book"]
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            r#"1 td_event ref=7 recv=-5ms t=0s "ev-1""#,
+            "2 hook_end ref=1 t=1ms",
+            "3 post ref=1 recv=0s t=1ms",
+            "4 hook_end ref=3 t=2ms",
+            "5 timer ref=1 recv=0s t=2ms",
+            "6 hook_end ref=5 t=3ms",
+            r#"7 md_feed recv=0s t=4ms "md-1""#,
+            "8 hook_end ref=7 t=5ms",
+            r#"9 md_book recv=0s t=5ms "book-1""#,
+            "10 hook_end ref=9 t=6ms",
+        ]
+    );
+}
+
+#[test]
+fn messages_the_prehook_drops_or_no_hook_takes_are_not_written() {
+    let log = Memory::new();
+    let window = Duration::from_nanos(100);
+    let dispatcher = build(|config| {
+        recorded(&log)(config);
+        config.recv_window = window;
+        config.feed = Some(Box::new(|_| {}));
+    });
+    dispatcher
+        .push_md(&md_at(T0 - 101, b"stale"))
+        .expect("stale");
+    dispatcher.push_md(b"short").expect("bad envelope");
+    // No book callback: the delta is skipped.
+    dispatcher.push_book(&md(b"book-1")).expect("book");
+    dispatcher.push_md(&md_at(T0 - 100, b"md-1")).expect("kept");
+    while dispatcher.run_one() {}
+    assert_eq!(
+        log.lines(),
+        [r#"1 md_feed recv=0s t=0s "md-1""#, "2 hook_end ref=1 t=0s"]
+    );
+}
+
+#[test]
+fn a_hook_that_panics_gets_a_hook_end_with_the_panic_text() {
+    let log = Memory::new();
+    let later = Arc::new(AtomicBool::new(false));
+    let later_hook = Arc::clone(&later);
+    let dispatcher = build(recorded(&log));
+    let log_hook = Arc::clone(&log);
+    dispatcher
+        .push_in(td_event(3, 0, b"ev-3"), move || {
+            log_hook.tick();
+            panic!("boom");
+        })
+        .expect("panics");
+    dispatcher
+        .push_in(td_event(7, 0, b"ev-7"), move || {
+            later_hook.store(true, Ordering::Relaxed)
+        })
+        .expect("never runs");
+    let rx = start(&dispatcher);
+    assert_eq!(
+        recv_end(&rx),
+        RunEnd::Crashed {
+            reason: "hook panic: boom".into()
+        }
+    );
+    assert!(stop(&dispatcher).is_ok());
+    assert!(!later.load(Ordering::Relaxed));
+    // CRASHED delivers nothing, so the second input is not written.
+    assert_eq!(
+        log.lines(),
+        [
+            r#"1 td_event ref=3 recv=0s t=0s "ev-3""#,
+            r#"2 hook_end ref=1 flags=1 t=1ms "boom""#,
+        ]
+    );
+}
+
+#[test]
+fn the_stop_drain_writes_its_inputs_and_a_formatted_panic() {
+    let log = Memory::new();
+    let dispatcher = build(recorded(&log));
+    let exiting = dispatcher.clone();
+    dispatcher.push_td(move || exiting.exit()).expect("exit");
+    // A Python exception reaches the dispatcher as this kind of panic: a
+    // `String` with the exception's type and text.
+    let text = "ValueError: boom";
+    dispatcher
+        .post(move || panic!("{text}"))
+        .expect("drained post");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    assert_eq!(
+        stop(&dispatcher),
+        Err(StopError::HookPanic("hook panic: ValueError: boom".into()))
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            "1 post ref=1 recv=0s t=0s",
+            r#"2 hook_end ref=1 flags=1 t=0s "ValueError: boom""#,
+        ]
+    );
+}
+
+#[test]
+fn a_hung_hook_has_its_input_and_never_a_hook_end() {
+    let log = Memory::new();
+    let (gate, _opener) = Gate::pair();
+    let gate_hold = Arc::clone(&gate);
+    let dispatcher = build(|config| {
+        recorded(&log)(config);
+        config.hook_timeout = Duration::from_nanos(1000);
+    });
+    let timer = dispatcher.timer(move || gate_hold.hold());
+    timer.fire();
+    let rx = start(&dispatcher);
+    gate.wait_entered();
+    assert_eq!(log.lines(), ["1 timer ref=1 recv=0s t=0s"]);
+    dispatcher.set_now_ns(T0 + 1000);
+    assert_eq!(recv_end(&rx), RunEnd::Hung);
+    let stopping = dispatcher.clone();
+    let stopped = thread::spawn(move || stopping.on_stop(&StopRequest::new(None)));
+    // The hook returns after the watchdog's HUNG: still no hook_end.
+    gate.open();
+    assert_eq!(stopped.join().expect("on_stop thread"), Ok(()));
+    wait_exited(&dispatcher);
+    assert_eq!(log.lines(), ["1 timer ref=1 recv=0s t=0s"]);
+}
+
+#[test]
+fn a_td_entry_names_its_input_from_inside_and_only_once() {
+    let log = Memory::new();
+    let dispatcher = build(recorded(&log));
+    // Outside a hook there is nothing to bind to.
+    dispatcher.record_input(&td_event(1, 0, b"ev-1"));
+    let (inside, log_hook) = (dispatcher.clone(), Arc::clone(&log));
+    dispatcher
+        .push_td(move || {
+            log_hook.tick();
+            inside.record_input(&td_event(7, T_LOG - 2 * MS, b"ev-7"));
+            inside.record_input(&td_event(8, 0, b"ev-8"));
+            log_hook.tick();
+        })
+        .expect("late input");
+    let inside = dispatcher.clone();
+    dispatcher
+        .push_in(td_event(9, 0, b"ev-9"), move || {
+            inside.record_input(&td_event(10, 0, b"ev-10"))
+        })
+        .expect("input given twice");
+    // Kind 0 is no input.
+    let inside = dispatcher.clone();
+    dispatcher
+        .push_td(move || inside.record_input(&Input::default()))
+        .expect("no input");
+    while dispatcher.run_one() {}
+    // The frame's t_ns is the hook's start, not when the entry named it.
+    assert_eq!(
+        log.lines(),
+        [
+            r#"1 td_event ref=7 recv=-2ms t=0s "ev-7""#,
+            "2 hook_end ref=1 t=2ms",
+            r#"3 td_event ref=9 recv=0s t=2ms "ev-9""#,
+            "4 hook_end ref=3 t=2ms",
+        ]
+    );
+}
+
+#[test]
+fn posts_and_timers_are_numbered_in_call_order() {
+    let log = Memory::new();
+    let dispatcher = build(recorded(&log));
+    let first = dispatcher.timer(|| {});
+    let host = dispatcher.number_timer();
+    let second = dispatcher.timer(|| {});
+    assert_eq!(host, 2, "a host timer shares the sequence");
+    dispatcher.post(|| {}).expect("post 1");
+    second.fire();
+    dispatcher
+        .push_in(
+            Input {
+                kind: FrameKind::TIMER,
+                r#ref: host,
+                ..Input::default()
+            },
+            || {},
+        )
+        .expect("host timer");
+    first.fire();
+    dispatcher.post(|| {}).expect("post 2");
+    let exiting = dispatcher.clone();
+    dispatcher.push_td(move || exiting.exit()).expect("exit");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    assert!(stop(&dispatcher).is_ok());
+    // A post the closed buffer refuses still takes a number.
+    assert_eq!(dispatcher.post(|| {}), Err(PushError::Closed));
+    assert_eq!(lock(&dispatcher.shared.mu).posts, 3);
+    assert_eq!(
+        log.lines(),
+        [
+            "1 post ref=1 recv=0s t=0s",
+            "2 hook_end ref=1 t=0s",
+            "3 timer ref=3 recv=0s t=0s",
+            "4 hook_end ref=3 t=0s",
+            "5 timer ref=2 recv=0s t=0s",
+            "6 hook_end ref=5 t=0s",
+            "7 timer ref=1 recv=0s t=0s",
+            "8 hook_end ref=7 t=0s",
+            "9 post ref=2 recv=0s t=0s",
+            "10 hook_end ref=9 t=0s",
+        ]
+    );
+}
+
+#[test]
+fn the_log_clock_is_read_only_at_the_recording_points() {
+    let log = Memory::new();
+    let dispatcher = build(|config| {
+        recorded(&log)(config);
+        config.feed = Some(Box::new(|_| {}));
+    });
+    let reads = |push: &dyn Fn()| {
+        let before = log.reads();
+        push();
+        assert!(dispatcher.run_one());
+        log.reads() - before
+    };
+    // Push, start, end.
+    assert_eq!(reads(&|| dispatcher.push_md(&md(b"md-1")).expect("md")), 3);
+    assert_eq!(reads(&|| dispatcher.post(|| {}).expect("post")), 3);
+    // A receive time from the host is not read again.
+    let given = || dispatcher.push_in(td_event(7, T_LOG, b"ev-1"), || {});
+    assert_eq!(reads(&|| given().expect("td")), 2);
+    // A hook without an input reads its start only, for record_input.
+    assert_eq!(reads(&|| dispatcher.push_td(|| {}).expect("td")), 1);
+    assert_eq!(dispatcher.record_now(), Some(T_LOG));
+}
+
+#[test]
+fn without_the_log_nothing_is_kept_numbered_or_read() {
+    let dispatcher = build(|config| config.feed = Some(Box::new(|_| {})));
+    let timer = dispatcher.timer(|| {});
+    assert_eq!(dispatcher.record_now(), None);
+    assert_eq!(dispatcher.number_timer(), 0);
+    dispatcher.push_md(&md(b"md-1")).expect("md");
+    dispatcher.post(|| {}).expect("post");
+    dispatcher
+        .push_in(td_event(7, 0, b"ev-1"), || {})
+        .expect("td");
+    timer.fire();
+    let inside = dispatcher.clone();
+    dispatcher
+        .push_td(move || inside.record_input(&td_event(8, 0, b"ev-8")))
+        .expect("late input");
+    let mut ran = 0;
+    while dispatcher.run_one() {
+        ran += 1;
+    }
+    assert_eq!(ran, 5);
+    let state = lock(&dispatcher.shared.mu);
+    assert!(!state.ring.keeps_times());
+    assert!(!state.td.keeps_inputs());
+    assert_eq!(state.posts, 0);
+    assert_eq!(state.timers[0].number, 0);
+    assert!(dispatcher.shared.rec.is_none());
+}
+
+#[test]
+fn with_the_log_the_queues_keep_inputs_and_times() {
+    let log = Memory::new();
+    let dispatcher = build(recorded(&log));
+    let state = lock(&dispatcher.shared.mu);
+    assert!(state.ring.keeps_times());
+    assert!(state.td.keeps_inputs());
 }

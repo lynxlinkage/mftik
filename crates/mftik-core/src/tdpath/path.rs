@@ -7,6 +7,7 @@ use std::time::Duration;
 use mftik_proto::wire::mftiko::{common::v1 as common, td::v1 as td};
 
 use crate::cloid::algo_of;
+use crate::dispatch::Input;
 
 /// Held `td.evt` messages across every account. One more fails the session
 /// (PROTOCOL §9.6, E08-D041). The dispatcher FIFO uses the same cap.
@@ -415,7 +416,7 @@ struct Account {
     sent_gen: u64,
     positions: BTreeMap<u32, td::Position>,
     balances: BTreeMap<String, td::Balance>,
-    hold: VecDeque<td::AccountEvent>,
+    hold: VecDeque<Held>,
     holding: bool,
     pending: bool,
     asking: bool,
@@ -511,6 +512,13 @@ impl Account {
     }
 }
 
+/// One held `td.evt` and its event log input, which is boxed so that a
+/// session without the log keeps one pointer per held event (E07-D009).
+struct Held {
+    event: td::AccountEvent,
+    input: Option<Box<Input>>,
+}
+
 /// One session's OMS and ledger.
 pub struct Path {
     session_id: String,
@@ -525,6 +533,8 @@ pub struct Path {
     rounds: HashMap<RoundTicket, Inflight>,
     pending_drops: Vec<(i64, String)>,
     cont: VecDeque<Cont>,
+    /// The event log input of the `td.evt` whose hook the last call returned.
+    input: Option<Input>,
 }
 
 impl Path {
@@ -564,6 +574,7 @@ impl Path {
             rounds: HashMap::new(),
             pending_drops: Vec::new(),
             cont: VecDeque::new(),
+            input: None,
         })
     }
 
@@ -780,6 +791,21 @@ impl Path {
     /// One decoded `td.evt`. Malformed bytes never reach here.
     #[must_use = "deliver hooks and sends, then end_hook"]
     pub fn on_account_event(&mut self, api_id: i64, event: td::AccountEvent) -> Vec<Effect> {
+        self.on_account_event_in(api_id, event, None)
+    }
+
+    /// [`Self::on_account_event`] with the event's event log input
+    /// (E07-D007). A held event keeps it until it is released. Whenever the
+    /// event's hook is returned, here or from [`Self::end_hook`],
+    /// [`Self::take_input`] hands the input back with it.
+    #[must_use = "deliver hooks and sends, then end_hook"]
+    pub fn on_account_event_in(
+        &mut self,
+        api_id: i64,
+        event: td::AccountEvent,
+        input: Option<Input>,
+    ) -> Vec<Effect> {
+        self.input = None;
         self.flush_drops();
         if self.failed || !self.accounts.contains_key(&api_id) {
             return Vec::new();
@@ -800,14 +826,14 @@ impl Path {
             }
         };
         match decision {
-            Live::Hold => self.hold_event(api_id, event),
+            Live::Hold => self.hold_event(api_id, event, input),
             Live::Drop => Vec::new(),
             Live::Resync => {
                 if let Some(account) = self.accounts.get_mut(&api_id) {
                     account.holding = true;
                     account.pending = true;
                 }
-                let mut effects = self.hold_event(api_id, event);
+                let mut effects = self.hold_event(api_id, event, input);
                 if self.failed {
                     return effects;
                 }
@@ -820,14 +846,26 @@ impl Path {
                 if let Some(account) = self.accounts.get_mut(&api_id) {
                     account.seq = event.seq;
                 }
-                self.apply(api_id, event).into_iter().collect()
+                let effect = self.apply(api_id, event);
+                if effect.is_some() {
+                    self.input = input;
+                }
+                effect.into_iter().collect()
             }
         }
+    }
+
+    /// The event log input of the `td.evt` whose hook the last call
+    /// returned, as [`Self::on_account_event_in`] took it. Take it with the
+    /// hook; `None` when that call returned no such hook.
+    pub fn take_input(&mut self) -> Option<Input> {
+        self.input.take()
     }
 
     /// The `td.order` round for `ticket` finished.
     #[must_use = "deliver a reject or timeout hook, then end_hook"]
     pub fn on_order_round(&mut self, ticket: RoundTicket, outcome: RoundOutcome) -> Vec<Effect> {
+        self.input = None;
         let Some(round) = self.rounds.remove(&ticket) else {
             return Vec::new();
         };
@@ -862,6 +900,7 @@ impl Path {
         generation: u64,
         outcome: ReconOutcome,
     ) -> Vec<Effect> {
+        self.input = None;
         if self.failed || !self.take_ask(api_id, generation) {
             return Vec::new();
         }
@@ -895,6 +934,7 @@ impl Path {
     /// continues recon release. Call this only after the hook has run.
     #[must_use = "release may return the next hook, send, or backoff"]
     pub fn end_hook(&mut self) -> Option<Effect> {
+        self.input = None;
         self.flush_drops();
         self.drive()
     }
@@ -1094,12 +1134,20 @@ impl Path {
         }
     }
 
-    fn hold_event(&mut self, api_id: i64, event: td::AccountEvent) -> Vec<Effect> {
+    fn hold_event(
+        &mut self,
+        api_id: i64,
+        event: td::AccountEvent,
+        input: Option<Input>,
+    ) -> Vec<Effect> {
         if self.held_count() >= HOLD_CAP {
             return self.fail_full();
         }
         if let Some(account) = self.accounts.get_mut(&api_id) {
-            account.hold.push_back(event);
+            account.hold.push_back(Held {
+                event,
+                input: input.map(Box::new),
+            });
         }
         Vec::new()
     }
@@ -1154,8 +1202,9 @@ impl Path {
                     }
                     ReleaseStep::Finish
                 } else {
-                    let event_inc = account.hold.front().map(source_inc).unwrap_or(0);
-                    let event_seq = account.hold.front().map(|event| event.seq).unwrap_or(0);
+                    let front = account.hold.front().map(|held| &held.event);
+                    let event_inc = front.map(source_inc).unwrap_or(0);
+                    let event_seq = front.map(|event| event.seq).unwrap_or(0);
                     match classify(account.inc, account.seq, event_inc, event_seq) {
                         Class::Drop => {
                             account.hold.pop_front();
@@ -1167,12 +1216,12 @@ impl Path {
                             ReleaseStep::Block
                         }
                         Class::Deliver => {
-                            let event = account
+                            let held = account
                                 .hold
                                 .pop_front()
                                 .unwrap_or_else(|| unreachable!("the hold was not empty"));
-                            account.seq = event.seq;
-                            ReleaseStep::Deliver(Box::new(event))
+                            account.seq = held.event.seq;
+                            ReleaseStep::Deliver(Box::new(held))
                         }
                     }
                 }
@@ -1180,8 +1229,10 @@ impl Path {
             match step {
                 ReleaseStep::Drop => {}
                 ReleaseStep::Finish | ReleaseStep::Block => return self.finish_ask(api_id),
-                ReleaseStep::Deliver(event) => {
-                    if let Some(effect) = self.apply(api_id, *event) {
+                ReleaseStep::Deliver(held) => {
+                    let Held { event, input } = *held;
+                    if let Some(effect) = self.apply(api_id, event) {
+                        self.input = input.map(|input| *input);
                         self.cont.push_front(Cont::Release(api_id));
                         return Some(effect);
                     }
@@ -1509,7 +1560,7 @@ enum ReleaseStep {
     Drop,
     Finish,
     Block,
-    Deliver(Box<td::AccountEvent>),
+    Deliver(Box<Held>),
 }
 
 enum AskEnd {

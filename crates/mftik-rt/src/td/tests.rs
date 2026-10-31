@@ -15,11 +15,13 @@ use std::time::{Duration, Instant as StdInstant};
 
 use mftik_core::cloid;
 use mftik_core::dispatch::{self, RunEnd, StopRequest};
+use mftik_core::eventlog::Recorder;
 use mftik_core::tdpath::{Origin, RejectedRequest, Td};
 use mftik_proto::wire::mftiko::common::v1 as common;
 use mftik_testkit::NatsServer;
 
 use super::*;
+use crate::eventlog::{Record, Scratch};
 
 const FUSE: Duration = Duration::from_secs(20);
 const SESSION: &str = "c0ffee";
@@ -406,10 +408,14 @@ struct Rig {
 }
 
 fn rig(recv_window: Duration) -> Rig {
-    rig_with(recv_window, None)
+    rig_with(recv_window, None, None)
 }
 
-fn rig_with(recv_window: Duration, on_stop: Option<StopWatch>) -> Rig {
+fn rig_with(
+    recv_window: Duration,
+    on_stop: Option<StopWatch>,
+    rec: Option<Arc<dyn Recorder>>,
+) -> Rig {
     let server = start_server();
     let peer = Peer::connect(server.url());
     let io = Io::start().expect("io");
@@ -442,6 +448,7 @@ fn rig_with(recv_window: Duration, on_stop: Option<StopWatch>) -> Rig {
         log: Some(Arc::new(move |line: &str| {
             disp_logs.lock().expect("logs").push(line.to_owned());
         })),
+        rec,
         ..Default::default()
     });
     let (reads, record, hooks_during) = (Arc::clone(&path), Arc::clone(&seen), Arc::clone(&during));
@@ -654,6 +661,95 @@ fn the_recon_watermark_releases_only_the_next_seq_and_api_id_is_the_subject() {
     assert_eq!(rig.stamps(7)[2], ("order", td_stamp(7, INCARNATION, 7)));
     assert_eq!(rig.stamps(7).len(), 3);
     assert_eq!(rig.peer.views.load(Ordering::SeqCst), 2);
+}
+
+/// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, and the
+/// seq of a `td_event`'s AccountEvent.
+fn describe(record: &Record) -> String {
+    let mut line = format!("{} {}", record.seq, record.kind.name().unwrap_or("?"));
+    if record.r#ref != 0 {
+        line += &format!(" ref={}", record.r#ref);
+    }
+    if record.flags != 0 {
+        line += &format!(" flags={}", record.flags);
+    }
+    if record.kind == Kind::TD_EVENT {
+        let event = td::AccountEvent::decode(record.body.as_slice()).expect("td event");
+        line += &format!(" seq={}", event.seq);
+    }
+    line
+}
+
+#[test]
+fn a_td_event_is_written_by_the_entry_that_runs_its_hook() {
+    let log = Scratch::open();
+    let rig = rig_with(Duration::from_millis(500), None, Some(log.recorder()));
+    rig.peer.serve_view(View::Inject);
+    rig.td.listen().expect("listen");
+    rig.td.recon().expect("recon");
+    // Held until the replies: seq 6 of each account is released, seq 4 and 5
+    // are dropped.
+    wait_until("seq 6 of both accounts", || {
+        rig.stamps(7).len() == 2 && rig.stamps(8).len() == 2
+    });
+    // Live: seq 5 is behind the cursor, and seq 7 is algo 2's order, which
+    // moves account 7's cursor and runs no hook in this session.
+    let foreign = td::AccountEvent {
+        seq: 7,
+        source: source(INCARNATION),
+        event: Some(td::account_event::Event::OrderUpdate(td::OrderUpdate {
+            order: Some(td::Order {
+                uid: 1001,
+                client_order_id: cloid::encode(2, cloid::EPOCH_MS + 1, 7).expect("cloid"),
+                status: td::OrderStatus::New as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+    };
+    rig.peer.publish(7, order_event(5, INCARNATION));
+    rig.peer.publish(7, foreign);
+    rig.peer.publish(7, order_event(8, INCARNATION));
+    rig.peer.flush();
+    wait_until("seq 8", || rig.stamps(7).len() == 3);
+    assert_eq!(rig.stamps(7)[2], ("order", td_stamp(7, INCARNATION, 8)));
+
+    let frames = log.close();
+    let lines: Vec<String> = frames.iter().map(describe).collect();
+    // OnRecon writes nothing here. The two releases run in the order the
+    // replies came.
+    let released = |a: i64, b: i64| {
+        vec![
+            format!("1 td_event ref={a} seq=6"),
+            "2 hook_end ref=1".to_owned(),
+            format!("3 td_event ref={b} seq=6"),
+            "4 hook_end ref=3".to_owned(),
+        ]
+    };
+    assert!(
+        lines[..4] == released(7, 8) || lines[..4] == released(8, 7),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines[4..],
+        ["5 td_event ref=7 seq=8", "6 hook_end ref=5", "7 end"]
+    );
+    // The body is the message as published. recv is when the reader took
+    // it; t is when the hook started.
+    for pair in frames[..6].chunks(2) {
+        let (input, end) = (&pair[0], &pair[1]);
+        let seq = td::AccountEvent::decode(input.body.as_slice())
+            .expect("td event")
+            .seq;
+        let published = match input.r#ref {
+            7 => order_event(seq, INCARNATION),
+            _ => position_event(seq, INCARNATION),
+        };
+        assert_eq!(input.body, published.encode_to_vec());
+        assert!(0 < input.recv_ns && input.recv_ns <= input.t_ns);
+        assert!(input.t_ns <= end.t_ns);
+        assert_eq!((end.recv_ns, end.body.len()), (0, 0));
+    }
 }
 
 #[test]
@@ -1007,6 +1103,7 @@ fn on_stop_keeps_events_applied_before_hold_full_and_drops_the_rest() {
             });
             Ok(())
         })),
+        None,
     );
     let parked = rig.peer.serve_live_and_parked();
     rig.td.listen().expect("listen");

@@ -40,6 +40,12 @@
 //! A `Fail` or [`Path::close`] drops outstanding waits. Later replies and
 //! backoff ticks are ignored.
 //!
+//! With the event log on (PROTOCOL §12), feed each `td.evt` through
+//! [`Path::on_account_event_in`] with its `td_event` input and call
+//! [`Path::take_input`] for every hook: the input of the event that hook
+//! delivers, held or live, comes back with it (E07-D007). An event that is
+//! dropped, or runs no strategy hook, never hands its input back.
+//!
 //! # Client order ids
 //!
 //! [`Path::submit`] asks a [`ClientOrderIds`] for the next id. The Go SDK calls

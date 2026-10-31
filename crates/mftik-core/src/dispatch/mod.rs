@@ -12,12 +12,25 @@
 //! [`Dispatcher::drive`] runs the same loop on the calling thread instead, and
 //! another thread waits with [`Dispatcher::wait_run`] (E03-D003).
 //!
-//! Hooks may call [`Dispatcher::push_td`], [`Dispatcher::push_md`],
-//! [`Dispatcher::push_book`], [`Dispatcher::exit`], [`Dispatcher::fail`],
+//! Hooks may call [`Dispatcher::push_td`], [`Dispatcher::push_in`],
+//! [`Dispatcher::post`], [`Dispatcher::push_md`], [`Dispatcher::push_book`],
+//! [`Dispatcher::record_input`], [`Dispatcher::exit`], [`Dispatcher::fail`],
 //! [`Dispatcher::set_now_ns`], [`Dispatcher::stats`], and [`Timer::fire`].
 //! They must not call [`Dispatcher::run`], [`Dispatcher::drive`],
 //! [`Dispatcher::wait_run`], [`Dispatcher::on_stop`], or
 //! [`Dispatcher::wait_exited`]: those wait for this same thread.
+//!
+//! With [`Config::rec`] set, the dispatcher writes the strategy event log's
+//! hook frames (PROTOCOL §12.4, §12.5; E07-D007). Before a hook runs it
+//! writes the hook's input: `md_feed` or `md_book` for a message the prehook
+//! kept, `timer`, `post`, or the [`Input`] a TD entry was pushed with or
+//! names from inside with [`Dispatcher::record_input`]. After the hook
+//! returns it writes a `hook_end` that refers to that frame, with the panic
+//! text when the hook panicked (E07-D008). A hook the watchdog found `HUNG`
+//! gets none. Without the log each recording point is one `Option` check:
+//! no clock is read, nothing is allocated, and no receive time or input is
+//! kept (E07-D009). The frame times are the recorder's clock, not the
+//! injected one.
 
 pub(crate) mod envelope;
 mod ring;
@@ -25,12 +38,15 @@ mod ring;
 use std::any::Any;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
+use bytes::Bytes;
 use ring::Ring;
+
+use crate::eventlog::{END_PANIC, Kind, Recorder};
 
 /// TD buffer capacity (E08-D015). Not a session-spec field. A full buffer ends the session `FAILED`.
 pub const TD_CAP: usize = 65536;
@@ -206,6 +222,58 @@ pub type DisarmCallback = Arc<dyn Fn(u64) + Send + Sync>;
 pub type OnStopHook = Box<dyn FnMut(&StopInfo) -> Result<(), String> + Send>;
 pub type MdHook = Box<dyn FnMut(&[u8]) + Send>;
 
+/// One hook's input as the event log writes it, before the hook runs
+/// (PROTOCOL §12.4). The frame's `t_ns` is the hook's start, and its body is
+/// `head` followed by `body`. Kind 0 writes nothing. A zero `recv_ns` on a TD
+/// entry becomes the time the entry was queued.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Input {
+    pub kind: Kind,
+    pub flags: u16,
+    pub recv_ns: i64,
+    pub r#ref: u64,
+    pub head: Bytes,
+    pub body: Bytes,
+}
+
+impl Input {
+    fn frame(&self) -> Frame<'_> {
+        Frame {
+            kind: self.kind,
+            flags: self.flags,
+            recv_ns: self.recv_ns,
+            r#ref: self.r#ref,
+            head: &self.head,
+            body: &self.body,
+        }
+    }
+}
+
+/// An input frame whose bytes are borrowed: an [`Input`], or an MD message
+/// pinned in the ring.
+#[derive(Clone, Copy)]
+struct Frame<'a> {
+    kind: Kind,
+    flags: u16,
+    recv_ns: i64,
+    r#ref: u64,
+    head: &'a [u8],
+    body: &'a [u8],
+}
+
+impl<'a> Frame<'a> {
+    fn md(kind: Kind, recv_ns: i64, msg: &'a [u8]) -> Self {
+        Self {
+            kind,
+            flags: 0,
+            recv_ns,
+            r#ref: 0,
+            head: &[],
+            body: msg,
+        }
+    }
+}
+
 /// Session inputs. Zero [`Config::ring_bytes`] selects [`MD_BYTES`]. Zero
 /// [`Config::hook_timeout`] does not arm the hard limit.
 pub struct Config {
@@ -231,6 +299,9 @@ pub struct Config {
     /// Host arms an OS timer and later calls [`Timer::fire`]. `deadline_ns` is injected time.
     pub arm_timer: Option<ArmCallback>,
     pub disarm_timer: Option<DisarmCallback>,
+    /// The strategy event log (E07-D007). `None` records nothing, and the
+    /// dispatcher keeps no receive times or inputs for it (E07-D009).
+    pub rec: Option<Arc<dyn Recorder>>,
 }
 
 impl Default for Config {
@@ -247,6 +318,7 @@ impl Default for Config {
             log: None,
             arm_timer: None,
             disarm_timer: None,
+            rec: None,
         }
     }
 }
@@ -277,6 +349,21 @@ struct Shared {
     arm_timer: Option<ArmCallback>,
     disarm_timer: Option<DisarmCallback>,
     watch_name: String,
+    rec: Option<Rec>,
+    /// Timers numbered so far, the event log's timer ids (PROTOCOL §12.5).
+    timers_made: AtomicU64,
+}
+
+/// The event log, and the input of the hook that is running. Only the
+/// dispatcher thread writes `start_ns`, `seq`, and `open`.
+struct Rec {
+    log: Arc<dyn Recorder>,
+    /// The running hook's start on the log's clock: its input's `t_ns`.
+    start_ns: AtomicI64,
+    /// The `rec_seq` of the running hook's input. 0 is none written.
+    seq: AtomicU64,
+    /// A hook is running, so [`Dispatcher::record_input`] has one to bind to.
+    open: AtomicBool,
 }
 
 struct State {
@@ -305,17 +392,25 @@ struct State {
     stop_req: Option<StopRequest>,
     stop_res: Option<Result<(), StopError>>,
     exited: bool,
+    /// [`Dispatcher::post`] calls with the log on, failed ones included.
+    posts: u64,
 }
 
 struct TimerSlot {
+    /// The event log's timer id. 0 without the log.
+    number: u64,
     queued: bool,
     dead: bool,
     deadline_ns: Option<i64>,
     cb: Option<Box<dyn FnMut() + Send>>,
 }
 
+/// A fixed ring of [`TD_CAP`] entries (E08-D015). `meta` is each entry's
+/// event log input, in step with `buf`. Only a session with the log on
+/// allocates it (E07-D009).
 struct TdQueue {
     buf: Vec<Option<TdItem>>,
+    meta: Vec<Option<Input>>,
     head: usize,
     len: usize,
 }
@@ -370,13 +465,14 @@ impl<T> Slot<T> {
 impl Dispatcher {
     pub fn new(config: Config) -> Self {
         let tag = next_thread_tag();
+        let recorded = config.rec.is_some();
         let shared = Arc::new(Shared {
             mu: Mutex::new(State {
                 now_ns: config.now_ns,
                 recv_window_ns: duration_to_ns(config.recv_window),
                 hook_timeout_ns: duration_to_ns(config.hook_timeout),
-                td: TdQueue::new(),
-                ring: Ring::new(config.ring_bytes),
+                td: TdQueue::new(recorded),
+                ring: Ring::new(config.ring_bytes, recorded),
                 timers: Vec::new(),
                 outcome: None,
                 outcome_set: false,
@@ -397,6 +493,7 @@ impl Dispatcher {
                 stop_req: None,
                 stop_res: None,
                 exited: false,
+                posts: 0,
             }),
             cv: Condvar::new(),
             on_stop: Slot::new(config.on_stop),
@@ -407,6 +504,8 @@ impl Dispatcher {
             arm_timer: config.arm_timer,
             disarm_timer: config.disarm_timer,
             watch_name: format!("mftik-w{tag}"),
+            rec: config.rec.map(Rec::new),
+            timers_made: AtomicU64::new(0),
         });
         Self { shared }
     }
@@ -439,7 +538,52 @@ impl Dispatcher {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.shared.enqueue(TdKind::Once(Box::new(hook)))
+        self.shared.enqueue(TdKind::Once(Box::new(hook)), None)
+    }
+
+    /// [`Dispatcher::push_td`] for a hook whose input the event log writes as
+    /// `input` before the hook runs (E07-D007). Without the log, `input` is
+    /// dropped here.
+    pub fn push_in<F>(&self, input: Input, hook: F) -> Result<(), PushError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let input = self.shared.rec.as_ref().map(|_| input);
+        self.shared.enqueue(TdKind::Once(Box::new(hook)), input)
+    }
+
+    /// `Context::post`: [`Dispatcher::push_td`], numbered from 1 in call
+    /// order. A call that is not queued still takes a number. The event log
+    /// writes the number as a `post` (PROTOCOL §12.5).
+    pub fn post<F>(&self, hook: F) -> Result<(), PushError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.shared.post(TdKind::Once(Box::new(hook)))
+    }
+
+    /// Writes `input` as the running hook's input, for a TD entry that only
+    /// learns what it delivers once it runs (E07-D007). Call it from that
+    /// hook, before the strategy code. The frame's `t_ns` is the hook's
+    /// start, and its `hook_end` follows when the hook returns. A hook writes
+    /// one input: a later call, or one outside a hook, writes nothing.
+    pub fn record_input(&self, input: &Input) {
+        if let Some(rec) = &self.shared.rec {
+            rec.input(input.frame());
+        }
+    }
+
+    /// The event log's clock, for an input's `recv_ns`. `None` without the
+    /// log, and then no clock is read (E07-D009).
+    pub fn record_now(&self) -> Option<i64> {
+        self.shared.rec.as_ref().map(|rec| rec.log.now_ns())
+    }
+
+    /// The next event log timer id, for a timer the host runs itself and
+    /// queues with [`Dispatcher::push_in`]. [`Dispatcher::timer`] numbers
+    /// from the same sequence. 0 without the log.
+    pub fn number_timer(&self) -> u64 {
+        self.shared.number_timer()
     }
 
     /// Copy one market-data message into the ring. A dropped message returns `Ok(())`.
@@ -458,6 +602,8 @@ impl Dispatcher {
     }
 
     /// Timer callback. It runs on the TD buffer, on the dispatcher thread.
+    /// With the log on, timers are numbered from 1 in the order they are
+    /// made, and each run is a `timer` frame with the number (PROTOCOL §12.5).
     pub fn timer<F>(&self, hook: F) -> Timer
     where
         F: FnMut() + Send + 'static,
@@ -465,6 +611,7 @@ impl Dispatcher {
         let mut state = lock(&self.shared.mu);
         let id = state.timers.len();
         state.timers.push(TimerSlot {
+            number: self.shared.number_timer(),
             queued: false,
             dead: false,
             deadline_ns: None,
@@ -556,6 +703,15 @@ impl Dispatcher {
         self.shared.wait_exited();
     }
 
+    /// One turn of the loop on the calling thread: the oldest TD entry, or
+    /// else one MD message. `false` when neither was waiting. For benchmarks
+    /// and tests only; a session does not call it, and it does not look at
+    /// stops or the watchdog.
+    #[doc(hidden)]
+    pub fn run_one(&self) -> bool {
+        self.shared.run_one()
+    }
+
     fn spawn_threads(&self) {
         let tag = self.shared.watch_name.trim_start_matches("mftik-w");
         let shared = Arc::clone(&self.shared);
@@ -607,28 +763,26 @@ impl Timer {
     /// [`Config::disarm_timer`]. This matches the Go dispatcher, whose `Fire` does not read the
     /// stopped flag.
     pub fn fire(&self) {
-        let mut full = false;
-        {
+        let pushed = {
             let mut state = lock(&self.shared.mu);
-            let queued = state.timers[self.id].queued;
-            if queued || state.td_closed || state.hung {
+            let slot = &state.timers[self.id];
+            if slot.queued {
                 return;
             }
-            if state.td.len() == TD_CAP {
-                state.set_stop(failed_full());
-                full = true;
-                self.shared.cv.notify_all();
-            } else {
+            let input = self.shared.rec.as_ref().map(|_| Input {
+                kind: Kind::TIMER,
+                r#ref: slot.number,
+                ..Input::default()
+            });
+            let pushed = self
+                .shared
+                .push_locked(&mut state, TdKind::Timer(self.id), input);
+            if pushed.is_ok() {
                 state.timers[self.id].queued = true;
-                let at_ns = state.now_ns;
-                state.td.push(TdItem {
-                    at_ns,
-                    kind: TdKind::Timer(self.id),
-                });
-                self.shared.cv.notify_all();
             }
-        }
-        if full {
+            pushed
+        };
+        if pushed == Err(PushError::Full) {
             self.shared.log(REASON_TD_FULL);
         }
     }
@@ -672,7 +826,7 @@ impl Shared {
     fn loop_body(&self) {
         loop {
             enum Next {
-                Td(TdItem),
+                Td(TdItem, Option<Input>),
                 Md,
                 Stop,
                 Hung,
@@ -687,8 +841,8 @@ impl Shared {
                         break Next::Stop;
                     }
                     if !state.td.is_empty() {
-                        let item = take_td(&mut state);
-                        break Next::Td(item);
+                        let (item, input) = take_td(&mut state);
+                        break Next::Td(item, input);
                     }
                     if state.ring.waiting() > 0 {
                         debug_assert!(!state.ring.is_pinned());
@@ -706,10 +860,28 @@ impl Shared {
                     self.phase1();
                     return;
                 }
-                Next::Td(item) => self.run_td(item),
+                Next::Td(item, input) => self.run_td(item, input),
                 Next::Md => self.run_md(),
             }
         }
+    }
+
+    fn run_one(&self) -> bool {
+        let td = {
+            let mut state = lock(&self.mu);
+            if !state.td.is_empty() {
+                Some(take_td(&mut state))
+            } else if state.ring.waiting() > 0 {
+                None
+            } else {
+                return false;
+            }
+        };
+        match td {
+            Some((item, input)) => self.run_td(item, input),
+            None => self.run_md(),
+        }
+        true
     }
 
     fn phase1(&self) {
@@ -780,14 +952,14 @@ impl Shared {
             if self.stop_expired(request) {
                 return Err(self.stop_reason(request));
             }
-            let item = {
+            let (item, input) = {
                 let mut state = lock(&self.mu);
                 if state.td.is_empty() {
                     return Ok(());
                 }
                 take_td(&mut state)
             };
-            self.run_td(item);
+            self.run_td(item, input);
             if let Some(message) = self.take_stop_panic() {
                 return Err(StopError::HookPanic(message));
             }
@@ -810,10 +982,11 @@ impl Shared {
         }
     }
 
-    fn run_td(&self, item: TdItem) {
+    fn run_td(&self, item: TdItem, input: Option<Input>) {
+        let frame = input.as_ref().map(Input::frame);
         match item.kind {
-            TdKind::Once(hook) => self.run_hook(hook),
-            TdKind::Timer(id) => self.run_hook(|| self.invoke_timer(id)),
+            TdKind::Once(hook) => self.run_hook(frame, hook),
+            TdKind::Timer(id) => self.run_hook(frame, || self.invoke_timer(id)),
         }
     }
 
@@ -850,17 +1023,18 @@ impl Shared {
     fn run_md(&self) {
         let peeked = {
             let mut state = lock(&self.mu);
-            state.ring.peek().map(|(book, len)| {
+            state.ring.peek().map(|(book, len, at)| {
                 (
                     book,
                     len,
+                    at,
                     state.ring.as_ptr(),
                     state.now_ns,
                     state.recv_window_ns,
                 )
             })
         };
-        let Some((book, len, ptr, now_ns, window_ns)) = peeked else {
+        let Some((book, len, at, ptr, now_ns, window_ns)) = peeked else {
             return;
         };
         struct Release<'a>(&'a Shared);
@@ -889,7 +1063,7 @@ impl Shared {
         if book {
             if self.book.is_some() {
                 self.note_md(age);
-                self.run_hook(|| {
+                self.run_hook(Some(Frame::md(Kind::MD_BOOK, at, msg)), || {
                     let _ = self.book.with_mut(|callback| callback(msg));
                 });
             }
@@ -901,16 +1075,31 @@ impl Shared {
         }
         if self.feed.is_some() {
             self.note_md(age);
-            self.run_hook(|| {
+            self.run_hook(Some(Frame::md(Kind::MD_FEED, at, msg)), || {
                 let _ = self.feed.with_mut(|callback| callback(msg));
             });
         }
     }
 
-    fn run_hook(&self, hook: impl FnOnce()) {
+    /// Runs one hook. With the log on, `input` is written before the hook
+    /// and a `hook_end` after it, so the input of a hook that panics or never
+    /// returns is in the log (PROTOCOL §12.5).
+    fn run_hook(&self, input: Option<Frame<'_>>, hook: impl FnOnce()) {
         let start = self.begin_hook();
-        let result = catch_unwind(AssertUnwindSafe(hook));
-        self.finish_hook(start);
+        let result = match &self.rec {
+            None => {
+                let result = catch_unwind(AssertUnwindSafe(hook));
+                self.finish_hook(start);
+                result
+            }
+            Some(rec) => {
+                rec.begin(input);
+                let result = catch_unwind(AssertUnwindSafe(hook));
+                let hung = self.finish_hook(start);
+                rec.end(result.as_ref().err().map(|payload| &**payload), hung);
+                result
+            }
+        };
         if let Err(payload) = result {
             self.note_panic(payload.as_ref());
         }
@@ -934,8 +1123,10 @@ impl Shared {
         state.hook_start_ns = start;
     }
 
-    fn finish_hook(&self, start: i64) {
-        let slow = {
+    /// Ends the hook that began at `start`. `true` when the watchdog found it
+    /// `HUNG`: once this clears `hook_on`, it no longer can.
+    fn finish_hook(&self, start: i64) -> bool {
+        let (slow, hung) = {
             let mut state = lock(&self.mu);
             let elapsed = age_ns(state.now_ns, start);
             state.hook_on = false;
@@ -943,11 +1134,12 @@ impl Shared {
             if slow {
                 state.hook_slow += 1;
             }
-            slow
+            (slow, state.hung)
         };
         if slow {
             self.log("hook exceeded 100ms");
         }
+        hung
     }
 
     fn note_panic(&self, payload: &dyn Any) {
@@ -1025,36 +1217,81 @@ impl Shared {
         lock(&self.mu).now_ns
     }
 
-    fn enqueue(&self, kind: TdKind) -> Result<(), PushError> {
-        let mut full = false;
+    fn enqueue(&self, kind: TdKind, input: Option<Input>) -> Result<(), PushError> {
         let result = {
             let mut state = lock(&self.mu);
-            if state.td_closed || state.hung {
-                Err(PushError::Closed)
-            } else if state.td.len() == TD_CAP {
-                state.set_stop(failed_full());
-                full = true;
-                self.cv.notify_all();
-                Err(PushError::Full)
-            } else {
-                let at_ns = state.now_ns;
-                state.td.push(TdItem { at_ns, kind });
-                self.cv.notify_all();
-                Ok(())
-            }
+            self.push_locked(&mut state, kind, input)
         };
-        if full {
+        if result == Err(PushError::Full) {
             self.log(REASON_TD_FULL);
         }
         result
     }
 
+    fn post(&self, kind: TdKind) -> Result<(), PushError> {
+        let result = {
+            let mut state = lock(&self.mu);
+            let input = self.rec.as_ref().map(|_| {
+                state.posts += 1;
+                Input {
+                    kind: Kind::POST,
+                    r#ref: state.posts,
+                    ..Input::default()
+                }
+            });
+            self.push_locked(&mut state, kind, input)
+        };
+        if result == Err(PushError::Full) {
+            self.log(REASON_TD_FULL);
+        }
+        result
+    }
+
+    /// Queues one TD entry under the lock. The caller logs a full buffer.
+    /// An input without a `recv_ns` is stamped with the log's clock now.
+    fn push_locked(
+        &self,
+        state: &mut State,
+        kind: TdKind,
+        mut input: Option<Input>,
+    ) -> Result<(), PushError> {
+        if state.td_closed || state.hung {
+            return Err(PushError::Closed);
+        }
+        if state.td.len() == TD_CAP {
+            state.set_stop(failed_full());
+            self.cv.notify_all();
+            return Err(PushError::Full);
+        }
+        if let (Some(rec), Some(input)) = (&self.rec, input.as_mut())
+            && input.kind != Kind::default()
+            && input.recv_ns == 0
+        {
+            input.recv_ns = rec.log.now_ns();
+        }
+        let at_ns = state.now_ns;
+        state.td.push(TdItem { at_ns, kind }, input);
+        self.cv.notify_all();
+        Ok(())
+    }
+
+    fn number_timer(&self) -> u64 {
+        match &self.rec {
+            Some(_) => self.timers_made.fetch_add(1, Ordering::Relaxed) + 1,
+            None => 0,
+        }
+    }
+
     fn push_md(&self, msg: &[u8], book: bool) -> Result<(), PushError> {
+        let at = match &self.rec {
+            Some(rec) => rec.log.now_ns(),
+            None => 0,
+        };
         let mut state = lock(&self.mu);
         if state.md_closed || state.hung {
             return Err(PushError::Closed);
         }
-        if state.ring.push(msg, book) {
+        if state.ring.push(msg, book, at) {
             self.cv.notify_all();
         }
         Ok(())
@@ -1160,13 +1397,92 @@ impl State {
     }
 }
 
-impl TdQueue {
-    fn new() -> Self {
+impl Rec {
+    fn new(log: Arc<dyn Recorder>) -> Self {
         Self {
-            buf: (0..TD_CAP).map(|_| None).collect(),
+            log,
+            start_ns: AtomicI64::new(0),
+            seq: AtomicU64::new(0),
+            open: AtomicBool::new(false),
+        }
+    }
+
+    /// A hook starts. Its input, if it has one now, is written before it runs.
+    fn begin(&self, input: Option<Frame<'_>>) {
+        self.start_ns.store(self.log.now_ns(), Ordering::Relaxed);
+        self.seq.store(0, Ordering::Relaxed);
+        self.open.store(true, Ordering::Relaxed);
+        if let Some(frame) = input {
+            self.input(frame);
+        }
+    }
+
+    /// The running hook's input, stamped with the hook's start. Kind 0 is
+    /// no input, and a hook writes only its first one.
+    fn input(&self, frame: Frame<'_>) {
+        if frame.kind == Kind::default()
+            || !self.open.load(Ordering::Relaxed)
+            || self.seq.load(Ordering::Relaxed) != 0
+        {
+            return;
+        }
+        let seq = self.log.append(
+            frame.kind,
+            frame.flags,
+            frame.recv_ns,
+            self.start_ns.load(Ordering::Relaxed),
+            frame.r#ref,
+            frame.head,
+            frame.body,
+        );
+        self.seq.store(seq, Ordering::Relaxed);
+    }
+
+    /// The hook returned, or panicked with `panic` (E07-D008). A hook with an
+    /// input gets a `hook_end` that refers to it, unless it was `HUNG`.
+    fn end(&self, panic: Option<&(dyn Any + Send)>, hung: bool) {
+        self.open.store(false, Ordering::Relaxed);
+        let seq = self.seq.swap(0, Ordering::Relaxed);
+        if seq == 0 || hung {
+            return;
+        }
+        let end_ns = self.log.now_ns();
+        match panic {
+            None => {
+                self.log.append(Kind::HOOK_END, 0, 0, end_ns, seq, &[], &[]);
+            }
+            Some(payload) => {
+                let text = panic_message(payload);
+                self.log.append(
+                    Kind::HOOK_END,
+                    END_PANIC,
+                    0,
+                    end_ns,
+                    seq,
+                    text.as_bytes(),
+                    &[],
+                );
+            }
+        }
+    }
+}
+
+impl TdQueue {
+    fn new(recorded: bool) -> Self {
+        fn slots<T>() -> Vec<Option<T>> {
+            (0..TD_CAP).map(|_| None).collect()
+        }
+        Self {
+            buf: slots(),
+            meta: if recorded { slots() } else { Vec::new() },
             head: 0,
             len: 0,
         }
+    }
+
+    #[cfg(test)]
+    fn keeps_inputs(&self) -> bool {
+        self.meta.capacity() > 0
     }
 
     fn len(&self) -> usize {
@@ -1177,26 +1493,31 @@ impl TdQueue {
         self.len == 0
     }
 
-    fn push(&mut self, item: TdItem) {
+    /// `input` is kept only when the queue keeps inputs.
+    fn push(&mut self, item: TdItem, input: Option<Input>) {
         let index = (self.head + self.len) % self.buf.len();
         debug_assert!(self.buf[index].is_none());
         self.buf[index] = Some(item);
+        if let Some(slot) = self.meta.get_mut(index) {
+            *slot = input;
+        }
         self.len += 1;
     }
 
-    fn pop(&mut self) -> Option<TdItem> {
+    fn pop(&mut self) -> Option<(TdItem, Option<Input>)> {
         if self.len == 0 {
             return None;
         }
         let item = self.buf[self.head].take();
+        let input = self.meta.get_mut(self.head).and_then(Option::take);
         self.head = (self.head + 1) % self.buf.len();
         self.len -= 1;
-        item
+        item.map(|item| (item, input))
     }
 }
 
-fn take_td(state: &mut State) -> TdItem {
-    let item = state.td.pop().expect("td queue is not empty");
+fn take_td(state: &mut State) -> (TdItem, Option<Input>) {
+    let (item, input) = state.td.pop().expect("td queue is not empty");
     if let TdKind::Timer(id) = &item.kind {
         let id = *id;
         if let Some(slot) = state.timers.get_mut(id) {
@@ -1207,7 +1528,7 @@ fn take_td(state: &mut State) -> TdItem {
     if age > state.td_max_ns {
         state.td_max_ns = age;
     }
-    item
+    (item, input)
 }
 
 fn hook_exceeded(state: &State) -> bool {

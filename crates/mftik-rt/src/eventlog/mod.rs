@@ -10,22 +10,31 @@
 //!   retention, as Go `sdk/internal/evlog` (§12.1).
 //! - [`Reader`] (in `reader`): reads one file back. Tests check what the
 //!   writer wrote with it.
-//!
-//! This module only writes what it is given; the recording points that build
-//! the frames are not here.
+//! - [`Recording`]: a [`Log`] as the dispatcher's [`Recorder`], which writes
+//!   each hook's input and `hook_end` (E07-D007). The other recording
+//!   points are not here.
 
 mod reader;
 mod writer;
 
+#[cfg(test)]
+mod scratch;
 #[cfg(test)]
 mod tests;
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+pub use mftik_core::eventlog::Kind;
+use mftik_core::eventlog::Recorder;
 pub use reader::{ReadError, Reader};
+#[cfg(test)]
+pub(crate) use scratch::Scratch;
 pub use writer::{Config, Log, Sink};
+
+use crate::clock::Clock;
 
 /// Opens every file.
 pub const MAGIC: &[u8; 8] = b"MFTIKOEL";
@@ -52,61 +61,36 @@ pub const MAX_HEADER_STRING: usize = 1024;
 /// The header up to `session_id`.
 const HEADER_FIXED: usize = 28;
 
-/// What a frame holds (§12.4). Numbers are only added; a reader skips a kind
-/// it does not know.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Kind(pub u16);
+/// The dispatcher's [`Recorder`]: frames go to the [`Log`], and their times
+/// are the session's [`Clock`], which the prehook and the hook budget read
+/// too (E03-D004).
+pub struct Recording {
+    log: Arc<Log>,
+    clock: Clock,
+}
 
-impl Kind {
-    pub const INIT: Kind = Kind(1);
-    pub const START: Kind = Kind(2);
-    pub const BINDINGS: Kind = Kind(3);
-    pub const RESOLVE: Kind = Kind(4);
-    pub const MD_FEED: Kind = Kind(5);
-    pub const MD_BOOK: Kind = Kind(6);
-    pub const TD_EVENT: Kind = Kind(7);
-    pub const TD_VIEW: Kind = Kind(8);
-    pub const ORDER_REPLY: Kind = Kind(9);
-    pub const READ_REPLY: Kind = Kind(10);
-    pub const TIMER: Kind = Kind(11);
-    pub const POST: Kind = Kind(12);
-    pub const STOP: Kind = Kind(13);
-    pub const ONSTOP: Kind = Kind(14);
-    pub const HOOK_END: Kind = Kind(15);
-    pub const ORDER_CALL: Kind = Kind(16);
-    pub const ORDER_PUBLISH: Kind = Kind(17);
-    pub const READ_CALL: Kind = Kind(18);
-    pub const END: Kind = Kind(19);
+impl Recording {
+    pub fn new(log: Arc<Log>, clock: Clock) -> Self {
+        Self { log, clock }
+    }
+}
 
-    /// Whether this reader knows the kind.
-    pub fn known(self) -> bool {
-        (Self::INIT.0..=Self::END.0).contains(&self.0)
+impl Recorder for Recording {
+    fn now_ns(&self) -> i64 {
+        self.clock.now_ns()
     }
 
-    /// The kind's name in `dump`, or `None` for a kind this reader does not know.
-    pub fn name(self) -> Option<&'static str> {
-        const NAMES: [&str; 19] = [
-            "init",
-            "start",
-            "bindings",
-            "resolve",
-            "md_feed",
-            "md_book",
-            "td_event",
-            "td_view",
-            "order_reply",
-            "read_reply",
-            "timer",
-            "post",
-            "stop",
-            "onstop",
-            "hook_end",
-            "order_call",
-            "order_publish",
-            "read_call",
-            "end",
-        ];
-        self.known().then(|| NAMES[usize::from(self.0) - 1])
+    fn append(
+        &self,
+        kind: Kind,
+        flags: u16,
+        recv_ns: i64,
+        t_ns: i64,
+        r#ref: u64,
+        a: &[u8],
+        b: &[u8],
+    ) -> u64 {
+        self.log.append(kind, flags, recv_ns, t_ns, r#ref, a, b)
     }
 }
 

@@ -817,6 +817,7 @@ dependencies = [
 name = "mftik-core"
 version = "1.2.0"
 dependencies = [
+ "bytes",
  "criterion",
  "mftik-proto",
  "prost",

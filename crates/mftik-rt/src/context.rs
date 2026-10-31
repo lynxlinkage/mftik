@@ -297,7 +297,8 @@ impl<S: Strategy> Context<S> {
 
 /// Go's `Post`: hands a callback to the dispatcher from any thread. It runs
 /// on the TD buffer like any hook. Before Init has the dispatcher, or once
-/// the TD buffer is closed, the callback is dropped.
+/// the TD buffer is closed, the callback is dropped. With the event log on,
+/// posts are numbered in call order, dropped ones included (PROTOCOL §12.5).
 pub struct Poster<S> {
     plane: Arc<Plane<S>>,
 }
@@ -320,7 +321,7 @@ impl<S: Strategy> Poster<S> {
         };
         self.plane.fresh_now();
         let plane = Arc::clone(&self.plane);
-        let _ = disp.push_td(move || plane.in_hook(f));
+        let _ = disp.post(move || plane.in_hook(f));
     }
 }
 
