@@ -30,6 +30,7 @@ func run() error {
 	repository := fs.String("repository", "", "repository without the host")
 	digest := fs.String("digest", "", "image manifest digest")
 	data := fs.String("data", "", "artifact data directory")
+	layers := fs.Int("layers", 3, "layers the image must have")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -56,7 +57,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if len(fetched.Layers) != 3 {
+	if len(fetched.Layers) != *layers {
 		return fmt.Errorf("%d layers", len(fetched.Layers))
 	}
 	rootfs, err := client.UnpackImage(context.Background(), fetched.Digest, fetched.Layers, artifact.UnpackLimits{})
