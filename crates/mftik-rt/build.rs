@@ -1,8 +1,9 @@
 //! `sdk_version` is this crate's package version and git commit (E06-D008).
 //!
 //! vergen-gitcl emits `VERGEN_GIT_SHA` when `git rev-parse` accepts the
-//! worktree. The manylinux wheel runs as root on a runner-owned checkout, and
-//! git then refuses the worktree (`not within a suitable 'git' worktree`).
+//! worktree. A build whose user does not own the checkout (root in a
+//! container on a runner-owned checkout, for one) makes git refuse the
+//! worktree (`not within a suitable 'git' worktree`).
 //! The SHA is still written: `git -c safe.directory=* rev-parse HEAD`, then
 //! `GITHUB_SHA`. vergen reads `VERGEN_GIT_SHA` on that failure path.
 

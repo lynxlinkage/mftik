@@ -106,7 +106,9 @@ jobs:
           test -x /tmp/mftik-smoke/bin/python
           MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --test session --test context --test reads --test hooks -- --ignored --test-threads=1
 
-  # E04-D063: the two release wheels. Same matrix as release.yml. No sdist.
+  # E04-D063, E06-D019: the two release wheels. Same matrix as release.yml.
+  # No sdist. The Linux wheel is pinned to ubuntu-22.04, not ubuntu-latest:
+  # its manylinux_2_35 tag is that runner's glibc.
   wheels:
     name: wheel (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
@@ -114,14 +116,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64
-            manylinux: "2_28"
-            platform: manylinux_2_28_x86_64
+          - os: ubuntu-22.04
+            platform: manylinux_2_35_x86_64
             cargo_jobs: "4"
           - os: macos-latest
-            target: aarch64
-            manylinux: ""
             platform: macos_arm64
             cargo_jobs: "1"
     env:
@@ -130,8 +128,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/wheel
         with:
-          target: ${{ matrix.target }}
-          manylinux: ${{ matrix.manylinux }}
           platform: ${{ matrix.platform }}
 
   # Temporary copy only. The committed proto tree is not edited.

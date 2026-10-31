@@ -47,14 +47,7 @@ PYI = (
     "mftik/md/v1.pyi",
     "mftik/td/v1.pyi",
 )
-LEGACY_MANYLINUX_X86_64 = frozenset(
-    {
-        "manylinux1_x86_64",
-        "manylinux2010_x86_64",
-        "manylinux2014_x86_64",
-    }
-)
-PLATFORMS = ("manylinux_2_28_x86_64", "macos_arm64")
+PLATFORMS = ("manylinux_2_35_x86_64", "macos_arm64")
 EM_X86_64 = 62
 MACHO_64_LE = 0xFEEDFACF
 CPU_TYPE_ARM64 = 0x0100000C
@@ -168,15 +161,8 @@ def parse_wheel_filename(path: Path, version: str) -> str:
 
 
 def platform_kind(platform: str) -> str:
-    tags = platform.split(".")
-    if "manylinux_2_28_x86_64" in tags:
-        for tag in tags:
-            if tag in LEGACY_MANYLINUX_X86_64:
-                continue
-            match = re.fullmatch(r"manylinux_2_(\d+)_x86_64", tag)
-            if match is None or int(match.group(1)) > 28:
-                raise CheckError(f"linux platform tag {tag} is not manylinux_2_28 x86_64")
-        return "manylinux_2_28_x86_64"
+    if platform == "manylinux_2_35_x86_64":
+        return platform
     if re.fullmatch(r"macosx_[0-9]+_[0-9]+_arm64", platform):
         return "macos_arm64"
     raise CheckError(f"platform {platform} is not a release wheel")
@@ -224,7 +210,7 @@ def extension_name(zf: zipfile.ZipFile) -> str:
 
 
 def check_extension(blob: bytes, kind: str) -> None:
-    if kind == "manylinux_2_28_x86_64":
+    if kind == "manylinux_2_35_x86_64":
         if len(blob) < 20 or blob[:4] != b"\x7fELF" or blob[4] != 2 or blob[5] != 1:
             raise CheckError("extension is not little-endian ELF64")
         machine = int.from_bytes(blob[18:20], "little")

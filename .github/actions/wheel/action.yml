@@ -2,15 +2,8 @@ name: wheel
 description: Build one abi3 wheel with maturin and smoke it in a clean venv.
 
 inputs:
-  target:
-    description: maturin-action target, x86_64 or aarch64
-    required: true
-  manylinux:
-    description: manylinux tag for the Linux build. Empty on macOS.
-    required: false
-    default: ""
   platform:
-    description: manylinux_2_28_x86_64 or macos_arm64
+    description: manylinux_2_35_x86_64 or macos_arm64
     required: true
 
 runs:
@@ -24,6 +17,7 @@ runs:
       shell: bash
       run: scripts/release-check versions
 
+    # The Linux tag is the build machine's glibc (E06-D019): ubuntu-22.04 has 2.35.
     - name: Runner matches the wheel
       shell: bash
       env:
@@ -33,7 +27,10 @@ runs:
         command -v python3.11
         arch="$(uname -m)"
         case "$WHEEL_PLATFORM" in
-          manylinux_2_28_x86_64) test "$arch" = x86_64 ;;
+          manylinux_2_35_x86_64)
+            test "$arch" = x86_64
+            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+            ;;
           macos_arm64) test "$arch" = arm64 ;;
           *) echo "unknown platform $WHEEL_PLATFORM" >&2; exit 1 ;;
         esac
@@ -42,17 +39,30 @@ runs:
       shell: bash
       run: rm -rf dist && mkdir dist
 
-    # maturin build does not pass --sdist. The next step rejects one anyway.
-    - name: Build the wheel
+    - if: inputs.platform == 'manylinux_2_35_x86_64'
+      uses: dtolnay/rust-toolchain@stable
+
+    # maturin build does not pass --sdist. The smoke step rejects one anyway.
+    # No manylinux container (E06-D019). maturin refuses the tag when the
+    # extension needs a glibc symbol newer than 2.35 or a library outside the
+    # manylinux_2_35 policy.
+    - name: Build the wheel (Linux)
+      if: inputs.platform == 'manylinux_2_35_x86_64'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3.11 -m pip install --disable-pip-version-check maturin==1.15.0
+        python3.11 -m maturin build --release --out dist --interpreter python3.11 \
+          --compatibility manylinux_2_35
+
+    - name: Build the wheel (macOS)
+      if: inputs.platform == 'macos_arm64'
       uses: PyO3/maturin-action@v1.51.0
       with:
-        target: ${{ inputs.target }}
-        manylinux: ${{ inputs.manylinux }}
+        target: aarch64
+        manylinux: ""
         maturin-version: "1.15.0"
         args: --release --out dist --interpreter python3.11
-        before-script-linux: |
-          command -v python3.11
-          python3.11 --version
 
     - name: Smoke the wheel in a clean venv
       shell: bash
