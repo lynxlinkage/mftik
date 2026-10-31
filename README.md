@@ -52,7 +52,7 @@ uv run ruff format --check python tests/python examples/python crates/mftik-py/t
 
 ## CI
 
-GitHub Actions runs on `ubuntu-latest`, except the Linux release wheel, which is built on `ubuntu-22.04` (below). `cargo clippy --workspace --all-targets -- -D warnings` fails the build on warnings. The workflow also checks formatting, tests, and that the proto tree still matches the pinned commit. [`scripts/sync-proto-negative`](scripts/sync-proto-negative) appends a line to a temporary copy of that tree and requires `scripts/sync-proto --check` to fail.
+GitHub Actions runs on `ubuntu-latest`, except the Linux release wheel and `conformance-rootfs-rust`, which run on `ubuntu-22.04` (below). `cargo clippy --workspace --all-targets -- -D warnings` fails the build on warnings. The workflow also checks formatting, tests, and that the proto tree still matches the pinned commit. [`scripts/sync-proto-negative`](scripts/sync-proto-negative) appends a line to a temporary copy of that tree and requires `scripts/sync-proto --check` to fail.
 
 The Python job uses Python 3.11 (E04-D014). It syncs the locked uv tools, checks that [`docs/python`](docs/python/README.md) names every public `mftik` symbol and that any code excerpt matches [`examples/python`](examples/python), runs `ruff check` and `ruff format --check`, builds an `mftik` wheel with maturin, installs that wheel into a fresh environment, and runs [`tests/python/smoke_import.py`](tests/python/smoke_import.py), the Python unit tests, `mypy.stubtest` against `mftik._mftik`, and the Python session end-to-end tests.
 
@@ -66,6 +66,12 @@ The `mftiko-conformance` job runs the suite on every pull request. [`scripts/ins
 GOBIN="$PWD/bin" scripts/install-mftiko-conformance
 cargo build --release -p mftik-conform
 bin/mftiko-conformance -json report.json -- target/release/conform
+```
+
+`conformance-rootfs-rust` packs that binary with the pinned `mftiko-pack -bin` (E08-D001). Every binary that calls `mftik_rt::run` carries what the packer reads: the `mftiko.contracts=` marker, and on Linux a Go build info record that gives the manifest's `sdk.version` (E08-D005). [`tests/python/conformance_rootfs_rust.py`](tests/python/conformance_rootfs_rust.py) pushes the image to a registry on 127.0.0.1, pulls and unpacks it with the pinned mftiko artifact package, and runs the suite in the unpacked rootfs. The job builds and runs the binary on `ubuntu-22.04`, whose glibc is 2.35 (E08-D002). Locally it needs Docker, or `MFTIK_REGISTRY_BIN` pointing at a `registry` binary:
+
+```bash
+MFTIK_CONFORMANCE="$PWD/bin/mftiko-conformance" python3 tests/python/conformance_rootfs_rust.py
 ```
 
 The Rust writer of the strategy event log (PROTOCOL §12) is checked against mftiko's own reader: [`scripts/install-mftiko-eventlog`](scripts/install-mftiko-eventlog) is the `go install` of `mftiko-eventlog` from the same pinned commit, and the rust job points `MFTIK_EVENTLOG` at it for `crates/mftik-rt/tests/eventlog_dump.rs`. Those tests fail when the tool is missing. Locally:

@@ -356,6 +356,43 @@ jobs:
           path: report-rootfs.json
           if-no-files-found: warn
 
+  # E08-D001, E08-D002, E08-D005 (#479): examples/conform packed with the
+  # pinned mftiko-pack -bin, unpacked with the pinned mftiko artifact package,
+  # and run with mftiko-conformance in that rootfs. ubuntu-22.04 is the glibc
+  # 2.35 baseline: the binary is built and run there.
+  conformance-rootfs-rust:
+    name: conformance-rootfs-rust
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runner has glibc 2.35
+        run: test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Install mftiko-conformance from the pinned mftiko commit
+        run: GOBIN="$RUNNER_TEMP/conformance-bin" bash scripts/install-mftiko-conformance
+      - name: Build the conform strategy
+        run: cargo build --release -p mftik-conform
+      - name: Pack the binary and run mftiko-conformance in its rootfs
+        env:
+          MFTIK_CONFORM_BIN: ${{ github.workspace }}/target/release/conform
+          MFTIK_CONFORMANCE: ${{ runner.temp }}/conformance-bin/mftiko-conformance
+          MFTIK_REPORT: ${{ github.workspace }}/report-rootfs-rust.json
+        run: python3.11 tests/python/conformance_rootfs_rust.py
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mftiko-conformance-rootfs-rust
+          path: report-rootfs-rust.json
+          if-no-files-found: warn
+
   # E05-D031–E05-D035: md_watch, maker, and stateful. The wheel is
   # python-conform-wheel's mftik-abi3-wheel artifact; this job does not build
   # one. Pack builds each image and does not push it.
