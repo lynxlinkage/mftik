@@ -501,6 +501,8 @@ CI 的 `conformance-rootfs-rust` job 在 `ubuntu-22.04` 建 release 的 `example
 
 #489（E08-03）接上 mftiko E09-D099（BullionBear/mftiko#505，squash `88a03d9`，PROTOCOL v1.93 §8.2）：`mftiko-pack -bin` 讀到 `mftiko.sdk=<lang> <version>` 加換行時，以它填 manifest 的 `runtime` 與 `sdk`，優先於 Go build info。`pack.rs` 多一個 `#[used]` static `SDK`：`mftiko.sdk=rust ` 加 `CARGO_PKG_VERSION` 加換行，各平台都嵌，與 `CONTRACTS` 一樣由 `keep` 讀。manifest 因此是 `runtime: rust`、`sdk: {lang: rust, version: 1.3.0}`，版本照寫、不加 `v`，與 Python 的打包相同。build info 留到 E08-04 才拿掉；在那之前 binary 兩份都有，打包以紀錄為準，舊的 mftiko-pack 仍讀 build info 寫成 `go`。Python extension 的 `.so` 也帶這份紀錄，但 Python 的打包自己寫 manifest（`runtime: python`），不讀它。proto 與 conformance 的 pin 從 `5fbfd14` 改到 `88a03d9`；這段區間 `contract/proto` 沒有改動。`conformance-rootfs-rust` 改檢查 `runtime` 與 `sdk.lang` 是 `rust`、`sdk.version` 是 workspace 版本不帶 `v`；單元測試另檢查紀錄符合 mftiko `parseSDKRecord` 的語法。
 
+#490（E08-04）拿掉 E08-D005 的 Go build info：`pack.rs` 刪掉 `BUILD_INFO`、`GO_VERSION`、`MODINFO`、`INFO_START`、`INFO_END`、uvarint 與它們的測試，`keep` 只讀 `CONTRACTS` 與 `SDK`。Linux binary 不再有 `.go.buildinfo` section，`go version -m` 讀不到東西。打包要 mftiko v0.5.1 以上的 `mftiko-pack`（第一個含 `88a03d9` 的 tag）；更舊的讀不到紀錄，又沒有 build info，會以 `artifact: no sdk version in buildinfo` 拒絕。`docs/rust/pack.md`、`install.md` 寫明這個下限。`conformance-rootfs-rust` 在打包前檢查兩個 binary 都沒有 `.go.buildinfo` 與 build info 的 magic（`\xff Go buildinf:`），manifest 仍是 `runtime: rust`。
+
 ## 決定（2026-11-01，E07-D013–E07-D015）
 
 Yi Te 於 #473 核可。E07-05 補 `ctx.now()` 與 `ctx.rand()`（E07-D004）。seed 已由 E07-04 產生並寫進 `init` 的 `ref`。本票沒有改 PROTOCOL。Replay 仍是 #474。

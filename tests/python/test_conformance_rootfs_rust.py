@@ -72,6 +72,12 @@ class RustRootfsTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 rust.require_image(_report(root), NAME, DIGEST, PROGRAM, VERSION)
 
+    def test_build_info_is_refused(self) -> None:
+        rust.require_no_build_info(NAME, b"\x7fELF mftiko.sdk=rust 1.0.0\n")
+        for program in (b"\x7fELF\x00.go.buildinfo\x00", b"\x7fELF\xff Go buildinf:\x08\x02"):
+            with self.subTest(program=program), self.assertRaises(SystemExit):
+                rust.require_no_build_info(NAME, program)
+
     def test_image_rejects_other_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = _rootfs(Path(tmp))

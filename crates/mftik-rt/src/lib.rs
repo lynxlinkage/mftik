@@ -25,7 +25,7 @@
 //!   thread and ring, and a reader (PROTOCOL §12, E07-D001–E07-D003).
 //! - [`replay`]: offline replay of one incarnation without NATS or C4
 //!   (PROTOCOL §12.6, E07-D016–E07-D019).
-//! - `pack`: the `mftiko.contracts=` marker and the Go build info record
+//! - `pack`: the `mftiko.contracts=` marker and the `mftiko.sdk=` record
 //!   that `mftiko-pack -bin` reads out of a strategy binary (E08-D001,
 //!   E08-D005).
 //! - [`frame`], [`ctl`], [`reader`], [`beat`]: C4 frames on fd 3 and the

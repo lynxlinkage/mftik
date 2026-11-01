@@ -2,7 +2,7 @@
 
 `mftik-rt` is the Rust strategy SDK. A session worker is a binary that calls `mftik_rt::run`. The supported worker platform is Ubuntu 22.04 or later on x86_64 (`x86_64-unknown-linux-gnu`, glibc 2.35 or newer). There is no musl build. macOS on arm64 is for development; the packed image the platform runs is always linux amd64.
 
-The crate is not on crates.io (E08-D004). Depend on it by git tag. The tag has to be a release after 1.2.0: v1.2.0 does not embed the `mftiko.contracts=` marker, the `mftiko.sdk=` record, or the Go build info that `mftiko-pack -bin` reads (E08-D001, E08-D005), so packing a binary linked to that tag fails.
+The crate is not on crates.io (E08-D004). Depend on it by git tag. The tag has to be a release after 1.2.0: v1.2.0 does not embed the `mftiko.contracts=` marker or the `mftiko.sdk=` record that `mftiko-pack -bin` reads (E08-D001, E08-D005), so packing a binary linked to that tag fails. Packing needs `mftiko-pack` from mftiko v0.5.1 or later.
 
 ```toml
 [package]
