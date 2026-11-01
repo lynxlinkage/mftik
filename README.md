@@ -22,7 +22,7 @@ The Python API is snake_case and matches the Go SDK's hook and context names. Th
 
 ## Proto
 
-`contract/proto/mftiko` is a copy of BullionBear/mftiko `contract/proto/mftiko` at `5fbfd14ae61a5131326df67ce14a0a79f59c7fd1`. [`scripts/sync-proto`](scripts/sync-proto) reproduces that copy and writes the source commit to `contract/proto/SOURCE`.
+`contract/proto/mftiko` is a copy of BullionBear/mftiko `contract/proto/mftiko` at `88a03d9de1c0750a2e9be66a5fc83a2d6992ab84`. [`scripts/sync-proto`](scripts/sync-proto) reproduces that copy and writes the source commit to `contract/proto/SOURCE`.
 
 ```bash
 scripts/sync-proto          # copy again and rewrite SOURCE
@@ -69,7 +69,7 @@ cargo build --release -p mftik-conform
 bin/mftiko-conformance -json report.json -- target/release/conform
 ```
 
-`conformance-rootfs-rust` packs that binary and [`examples/rust/md_watch`](examples/rust/md_watch) with the pinned `mftiko-pack -bin` (E08-D001, E08-D009). Every binary that calls `mftik_rt::run` carries what the packer reads: the `mftiko.contracts=` marker, and on Linux a Go build info record that gives the manifest's `sdk.version` (E08-D005). [`tests/python/conformance_rootfs_rust.py`](tests/python/conformance_rootfs_rust.py) pushes each image to a registry on 127.0.0.1, pulls and unpacks it with the pinned mftiko artifact package, runs the suite in conform's rootfs, and runs [`examples/rust/md_watch/test_e2e.py`](examples/rust/md_watch/test_e2e.py) from md_watch's rootfs under the Python md_watch harness. The job builds and runs the binaries on `ubuntu-22.04`, whose glibc is 2.35 (E08-D002). Locally it needs Docker, or `MFTIK_REGISTRY_BIN` pointing at a `registry` binary, and `nats-server` (`MFTIK_NATS_SERVER`, or on `PATH`):
+`conformance-rootfs-rust` packs that binary and [`examples/rust/md_watch`](examples/rust/md_watch) with the pinned `mftiko-pack -bin` (E08-D001, E08-D009). Every binary that calls `mftik_rt::run` carries what the packer reads: the `mftiko.contracts=` marker and the `mftiko.sdk=rust <version>` record, which makes the manifest's `runtime` and `sdk.lang` `rust` (E08-D005, #489). On Linux it also carries a Go build info record, kept until E08-04 for packers older than mftiko E09-D099. [`tests/python/conformance_rootfs_rust.py`](tests/python/conformance_rootfs_rust.py) pushes each image to a registry on 127.0.0.1, pulls and unpacks it with the pinned mftiko artifact package, runs the suite in conform's rootfs, and runs [`examples/rust/md_watch/test_e2e.py`](examples/rust/md_watch/test_e2e.py) from md_watch's rootfs under the Python md_watch harness. The job builds and runs the binaries on `ubuntu-22.04`, whose glibc is 2.35 (E08-D002). Locally it needs Docker, or `MFTIK_REGISTRY_BIN` pointing at a `registry` binary, and `nats-server` (`MFTIK_NATS_SERVER`, or on `PATH`):
 
 ```bash
 cargo build --release -p mftik-conform -p mftik-md-watch
