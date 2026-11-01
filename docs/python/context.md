@@ -20,7 +20,7 @@ Instruments are UIDs after the first lookup. Resolve a ticker once, keep the UID
 
 `now` returns when the hook running on this thread started, in nanoseconds on the session clock, the same origin as `md_ts_ns`. Every call in that hook returns the same value. With the event log on it is the `t_ns` of the hook's input. Outside any hook it is the time now. It does not raise `ContextError`.
 
-`rand` returns one `random.Random` for the session, seeded with the `init` frame's seed. The first call creates it; later calls return the same object. Calling it before OnInit, when there is no seed, raises `Error` with the message `sdk: the session has no seed before OnInit`. A stale context still raises `ContextError`. `sampler` logs `now` twice and one draw on every hook. See [Examples](examples.md).
+`rand` returns one `random.Random` for the session, seeded with the `init` frame's seed. The first call creates it; later calls return the same object. Calling it before OnInit, when there is no seed, raises `Error` with the message `sdk: the session has no seed before OnInit`. A stale context still raises `ContextError`. `sampler` logs `now` twice and one draw on every hook. See [Examples](examples.md). `replay` gives each hook its recorded `now` and a new `random.Random` from the recorded seed, so a replay draws the same numbers. See [Replay](replay.md).
 
 ## Instruments
 

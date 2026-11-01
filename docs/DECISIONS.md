@@ -541,3 +541,21 @@ Harness 給 binary 模式（E08-D009）：`crates/mftik-py/tests/examples.rs` �
 - **E07-D018** `ReplayReport` 欄位同 Go：`mismatches`、`inputs`、`skipped`、`missing`、`orders`、`reads`；每筆 mismatch 記 rec_seq、種類、紀錄值與回放值。hook 結束方式在 Rust 比 panic 訊息；Python 比例外類別與訊息（E07-07）。
 - **E07-D019** 驗收：錄製後回放零 mismatch；修改過的策略產生 mismatch；有缺號的紀錄正確計入 `missing`。phase 1 不比對 log（E07-D005）。
 
+
+## 決定（Yi Te，2026-11-01，E07-D020–E07-D024）
+
+Yi Te 於 #485 核可。E07-07 Python `mftik.replay` 包裝 #486 的 Rust 回放引擎。本票沒有改 PROTOCOL，也沒有改 mftiko。
+
+- **E07-D020** 介面：`mftik.replay(StrategyCls, dir, *, incarnation=None, volume_dir=None, input_dir=None)`，參數一一對應 Rust `ReplayOptions`，未給則沿用 Rust 預設。
+- **E07-D021** 回傳：唯讀 `ReplayReport`，欄位與 Rust 完全一致：`session_id`、`incarnation`、`sdk_version`、`sdk_commit`、`inputs`、`skipped`、`missing`、`orders`、`reads`、`mismatches`。
+- **E07-D022** 錯誤：log 讀不到或 header 不合時丟 `mftik.ReplayError`；有 mismatch 不丟例外，只寫進報告。
+- **E07-D023** hook 比對：例外以完整類別名稱加訊息字串比對；重建時使用同一 mftik 例外類別。
+- **E07-D024** 測試：以 `examples/python/sampler` 錄製後回放須零 mismatch；修改後的策略須產生 mismatch。放進現有 python CI，不另開 job。
+
+#485（E07-07）在 mftik-py 加 `_run_replay` 與 `ReplayReport`，Python 端 `mftik.replay`（`python/mftik/_replay.py`）先檢查參數再以無參數建構策略：`StrategyCls` 必須是 `Strategy` 的子類別，否則 `TypeError`；建構子的例外原樣拋出，不包成 `ReplayError`。`dir`、`volume_dir`、`input_dir` 收 `str` 或 `os.PathLike[str]`，`bytes` 是 `TypeError`；`volume_dir`、`input_dir` 未給是空字串，與 Rust 預設相同。`incarnation` 未給是 0，即 Rust 的「最新的一個」；給了必須是 1 到 2³²−1 的 `int`，0 與超出範圍是 `ValueError`，`bool` 與非整數是 `TypeError`（E07-D020）。`ReplayReport` 是 frozen 類別，不能從 Python 建構，`mismatches` 是 `tuple[str, ...]`（E07-D021）。`ReplayError` 是 `mftik.Error` 的子類別，訊息是 Rust `ReplayError` 的文字，都以 `sdk: replay:` 開頭（E07-D022）。
+
+E07-D023：hook 的例外照 E04-D004、E07-D008 記成 `{type(e).__name__}: {str(e)}`，`Done.error` 與 `hook panic:` 也是這段文字。回放走同一個 binding，引擎比 `hook_end` 的 flags 與 body，所以比對的就是類別名稱加訊息，Python 端不另寫比對。「完整類別名稱」沿用 `__name__`，不改成 `module.qualname`：改了會同時改變紀錄格式與 `Done.error`，1.3.0 錄的 log 回放時每個以例外結束的 hook 都會 mismatch。重建時的類別：回放時從 log 來的錯誤經過與 session 相同的 `context_error`、`read_error` 對應，所以類別由 Rust `Error` 的 variant 決定。Resolve 失敗時 `resolve` frame 的 flags 是 Go `resolveOutcome` 對請求的分類，不是錯誤本身；#486 的 `resolve_err` 把 flags 沒點名的都變成 `Error::Other`，session 裡拿到 `mftik.UnknownUid`（symclient `settle` 時列已不在）的呼叫回放時會變成 `mftik.Error`。本票改成：flags 沒點名時，文字等於某個 SDK 固定訊息（NotInInit、UnknownUid、UnknownAccount、AlgoNotDeclared、NoFeed、Stopping）就還原成那個 variant，其餘仍是 `Other`。`mftik-rt` 的 `replay::tests` 對每種 symclient 錯誤檢查「session 拿到的錯誤」等於「回放還原的錯誤」。
+
+行程內的狀態：引擎會 `cloidgen::restore` 與設定 note session，`Context.rand` 的 `random.Random` 原本是行程內唯一的 `PyOnceLock`（E07-D014）。同一行程回放兩次（例如先回放原策略再回放修改版）會沿用前一次已抽過的 `Random`，或用錯 log 的 seed。現在 `RANDOM` 是可清除的 `Mutex<Option<…>>`，不在持鎖時呼叫 Python；每次回放開始前清掉，第一次 `rand()` 用這份 log 的 seed 建新的。一個行程同時只跑一個回放，另一條執行緒的呼叫會等；等鎖時不持 GIL，因為持鎖的回放跑 hook 需要 GIL。在 hook 裡呼叫拋 `ReplayError`（`sdk: replay: called inside a hook`），行程已呼叫過 `run` 也拋（`sdk: replay: this process hosts a session`），免得蓋掉 live session 的 cloid 計數。
+
+測試（E07-D024）：`crates/mftik-py/tests/examples.rs` 的 scenario 加 `event_log_dir`，有設時 InitPayload 開啟 event log、`incarnation` 設 1，session 結束後把 volume 的 `eventlog/` 複製出去。`examples/python/sampler/test_e2e.py` 錄一個 session 後在測試行程內回放：`Sampler` 零 mismatch、`skipped`、`missing` 為 0、`inputs` 等於錄到的 hook 數；`Draws`（同順序抽亂數、改為記下而不寫 log）回放兩次，每個 hook 的 `now` 與抽到的值都等於錄製時 log 裡的值，拿掉每次回放前的清除這個測試就失敗；`Changed`（timer 丟 `ValueError`）產生 `ValueError: sampler: changed` 的結束方式 mismatch 與後續 timer 沒有排的 mismatch，之後再回放 `Sampler` 仍是零 mismatch。phase 1 不比對 log（E07-D005），`now`／抽值的比對只在測試裡。這個檔案原本就在 `examples` job 執行，workflow 不變。`tests/python/test_replay.py` 不用 NATS，測參數檢查、建構子例外、空目錄與壞檔頭的 `ReplayError`；`mftik-py` 的 `replay::tests` 測 hook 內呼叫被拒。文件是 `docs/python/replay.md`，並在 README、reference、errors、context、examples 連過去。版本不升，版本與 tag 由 Yi Te 決定。

@@ -284,13 +284,15 @@ The first `on_recon` for the account reads `position` and `open_orders`. Open or
         )
 ```
 
+`sampler`'s `test_e2e.py` also records a session with the event log on and runs it again with `replay`: the strategy replays with no difference, every hook gets its recorded `now` and draw, and a copy whose timer raises does not match. See [Replay](replay.md).
+
 `sampler` is started with `python -m mftik.run sampler:Sampler`. Its pack command is the same shape as `md_watch`.
 
-```bash examples/python/sampler/README.md:20-20
+```bash examples/python/sampler/README.md:25-25
 python -m mftik.run sampler:Sampler
 ```
 
-```bash examples/python/sampler/README.md:24-29
+```bash examples/python/sampler/README.md:29-34
 python -m mftik.pack \
   -dir examples/python/sampler \
   -target sampler:Sampler \

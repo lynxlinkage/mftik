@@ -16,6 +16,11 @@ fixed venue or product.
 twice (the same start time), whether `rand` returned the same object,
 and one `getrandbits(64)` draw. Each line is one JSON object on stderr.
 
+`test_e2e.py` records one session with the event log on and runs it
+again with `mftik.replay`. The strategy replays with no mismatch, each
+hook gets its recorded `now` and draw, and a copy whose timer raises
+produces a mismatch.
+
 ```bash
 python -m mftik.run sampler:Sampler
 ```

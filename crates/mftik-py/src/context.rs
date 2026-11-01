@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use mftik_core::book::OrderBook;
@@ -18,7 +19,6 @@ use mftik_rt::clock::Clock;
 use mftik_rt::{Context, Poster};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyTuple};
 
 use crate::log::PyLog;
@@ -33,8 +33,10 @@ use crate::{
 static HOOK_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// `Context.rand`'s `random.Random`, made from the session's seed on the
-/// first call (E07-D014). A process runs one session.
-static RANDOM: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+/// first call (E07-D014). A process runs one session; each `mftik.replay`
+/// clears it first, so a replay draws from a new `Random` of its log's seed.
+/// The lock is never held across a Python call.
+static RANDOM: Mutex<Option<Py<PyAny>>> = Mutex::new(None);
 
 pub(crate) const NO_SEED: &str = "sdk: the session has no seed before OnInit";
 
@@ -86,6 +88,22 @@ impl Drop for HookScope {
 
 pub(crate) fn hook_depth() -> usize {
     HOOK_DEPTH.load(Ordering::SeqCst)
+}
+
+/// Whether a hook is running on this thread.
+pub(crate) fn in_hook() -> bool {
+    running_ptr().is_some()
+}
+
+/// Drops the session's `random.Random`; the next `Context.rand` makes a new
+/// one from the seed of the session running then (E07-D014, E07-D020).
+pub(crate) fn reset_random(_py: Python<'_>) {
+    let old = lock(&RANDOM).take();
+    drop(old);
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub(crate) fn with_python_hook<T>(
@@ -411,11 +429,18 @@ impl PyContext {
         let Some(seed) = with_context(self.token, Context::seed)? else {
             return Err(crate::error::Error::new_err(NO_SEED));
         };
-        let random = RANDOM.get_or_try_init(py, || {
-            let random = py.import("random")?.getattr("Random")?;
-            random.call1((seed,)).map(Bound::unbind)
-        })?;
-        Ok(random.clone_ref(py))
+        if let Some(random) = lock(&RANDOM).as_ref() {
+            return Ok(random.clone_ref(py));
+        }
+        let made = py
+            .import("random")?
+            .getattr("Random")?
+            .call1((seed,))?
+            .unbind();
+        let mut slot = lock(&RANDOM);
+        let random = slot.get_or_insert_with(|| made.clone_ref(py)).clone_ref(py);
+        drop(slot);
+        Ok(random)
     }
 
     /// SYM lookup. Only OnInit and OnStart succeed. The wait releases the GIL

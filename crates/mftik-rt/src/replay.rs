@@ -716,14 +716,32 @@ fn describe_read(x: &Record) -> String {
     }
 }
 
+/// The error a recorded Resolve gave the strategy. The flags classify the
+/// request (Go `resolveOutcome`), not the error, so a failure the flags do
+/// not name is told apart by its text: an SDK error's text is fixed, and
+/// that text turns back into the same variant. A binding then raises the
+/// same class it raised in the session (E07-D023).
 fn resolve_err(flags: u16, text: &[u8]) -> Error {
     let text = String::from_utf8_lossy(text).into_owned();
     match flags {
         outcome::NOT_IN_INIT => Error::NotInInit,
-        outcome::NOT_FOUND => Error::Other(text),
         outcome::STOPPING => Error::Stopping,
-        _ => Error::Other(text),
+        _ => error_of_text(text),
     }
+}
+
+fn error_of_text(text: String) -> Error {
+    [
+        Error::NotInInit,
+        Error::UnknownUid,
+        Error::UnknownAccount,
+        Error::AlgoNotDeclared,
+        Error::NoFeed,
+        Error::Stopping,
+    ]
+    .into_iter()
+    .find(|err| err.to_string() == text)
+    .unwrap_or(Error::Other(text))
 }
 
 /// What the replay sends: `order_call`, `order_publish`, `read_call`.
@@ -776,4 +794,37 @@ impl Recorder for Memory {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use mftik_core::symclient;
+
+    use super::resolve_err;
+    use crate::plane::resolve_outcome;
+    use crate::wiring::sym_error;
+
+    /// A failed Resolve is recorded as `resolveOutcome` flags and the text the
+    /// strategy got. Replay gives back the same error, variant and text, so a
+    /// binding raises the same class (E07-D023).
+    #[test]
+    fn a_recorded_resolve_error_is_the_error_the_session_returned() {
+        for err in [
+            symclient::Error::NotInInit,
+            symclient::Error::UnknownUid,
+            symclient::Error::InvalidTicker("symbol: bad ticker".into()),
+            symclient::Error::NotFound("delisted".into()),
+            symclient::Error::Failed("nats: timeout".into()),
+            symclient::Error::Failed("no responders".into()),
+            symclient::Error::Closed,
+        ] {
+            let live = sym_error(err.clone());
+            let text = live.to_string();
+            assert_eq!(
+                resolve_err(resolve_outcome(&err), text.as_bytes()),
+                live,
+                "{err:?}"
+            );
+        }
+    }
 }
