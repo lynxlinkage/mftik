@@ -7,6 +7,7 @@ members = [
     "crates/mftik-rt",
     "crates/mftik-testkit",
     "examples/conform",
+    "examples/rust/md_watch",
 ]
 
 [workspace.package]
