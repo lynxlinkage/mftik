@@ -4,7 +4,8 @@
 ``MFTIK_CONFORM_BIN`` (default ``target/release/conform``) and
 ``MFTIK_MD_WATCH_BIN`` (default ``target/release/md_watch``) are packed by the
 pinned ``mftiko-pack -bin``, which takes the manifest's ``contracts``,
-``runtime``, and ``sdk`` out of the binary (E08-D001, E08-D005, #489). Each image is pushed to
+``runtime``, and ``sdk`` out of the binary (E08-D001, E08-D005, #489). The
+binary carries no Go build info (#490). Each image is pushed to
 a registry on 127.0.0.1, then pulled and unpacked with mftiko
 ``internal/platform/artifact``. Both tools come from the E04-D076 commit, as in
 ``data_input_e2e.py``. Conformance runs in conform's rootfs as in
@@ -38,6 +39,8 @@ from conformance_rootfs import (
 from data_input_e2e import checkout_mftiko, go
 
 ENTRYPOINT = ["bin/strategy"]
+# What Go's debug/buildinfo looks for: the section, and the record's magic.
+BUILD_INFO_MARKS = (b".go.buildinfo", b"\xff Go buildinf:")
 MD_WATCH_TEST = REPO / "examples" / "rust" / "md_watch" / "test_e2e.py"
 
 
@@ -49,6 +52,8 @@ def main() -> None:
         "conform": binary_path("MFTIK_CONFORM_BIN", "conform"),
         "md_watch": binary_path("MFTIK_MD_WATCH_BIN", "md_watch"),
     }
+    for name, binary in binaries.items():
+        require_no_build_info(name, binary.read_bytes())
     report_path = Path(os.environ.get("MFTIK_REPORT", "report-rootfs-rust.json")).resolve()
     work = Path(tempfile.mkdtemp(prefix="mftik-rust-rootfs-"))
     registry = None
@@ -93,6 +98,17 @@ def binary_path(variable: str, name: str) -> Path:
     if not binary.is_file():
         raise SystemExit(f"{variable} is not a file: {binary}")
     return binary
+
+
+def require_no_build_info(name: str, program: bytes) -> None:
+    """No ``.go.buildinfo`` section and no build info record (#490).
+
+    ``mftiko-pack`` reads the ``mftiko.sdk=`` record; ``go version -m`` finds
+    nothing to read.
+    """
+    for mark in BUILD_INFO_MARKS:
+        if mark in program:
+            raise SystemExit(f"{name} carries Go build info: {mark!r}")
 
 
 def sdk_version() -> str:
@@ -170,7 +186,7 @@ def require_image(
     """The manifest mftiko-pack writes, and a rootfs that holds only the binary.
 
     mftiko-pack takes ``runtime`` and ``sdk`` from the binary's ``mftiko.sdk=``
-    record ahead of its Go build info (mftiko E09-D099, #489).
+    record (mftiko E09-D099, #489).
     """
     want: dict[str, object] = {
         "digest": digest,
