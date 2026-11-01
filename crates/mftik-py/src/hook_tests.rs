@@ -530,6 +530,69 @@ obj = Logs()
     });
 }
 
+/// `ctx.now` is the running hook's start from any `Context`, and the time now
+/// outside every hook. `ctx.rand` needs the seed Init brings, and a stale
+/// context is a `ContextError` (E07-D013, E07-D014).
+#[test]
+fn now_is_the_running_hooks_start_and_rand_needs_a_seed() {
+    with_mftik(|py| {
+        let (obj, seen) = load(
+            py,
+            r#"
+import time
+
+import mftik
+
+def raised(call):
+    try:
+        call()
+    except mftik.Error as exc:
+        return [type(exc).__name__, str(exc)]
+    return None
+
+class Times(Strategy):
+    def on_init(self, ctx):
+        self.held = ctx
+        self.first = ctx.now()
+        time.sleep(0.002)
+        rec("init", same=ctx.now() == self.first, rand=raised(ctx.rand))
+
+    def on_start(self, ctx):
+        rec("start", held=self.held.now() == ctx.now(), rand=raised(self.held.rand))
+
+    def outside(self):
+        before = self.held.now()
+        time.sleep(0.002)
+        after = self.held.now()
+        rec(
+            "outside",
+            later=before - self.first >= 2_000_000,
+            moves=after - before >= 2_000_000,
+        )
+
+obj = Times()
+"#,
+        );
+        mftik_rt::in_one_hook(PyStrategy::new(obj.clone_ref(py)), |strategy, ctx| {
+            strategy.on_init(ctx).unwrap();
+        })
+        .unwrap();
+        mftik_rt::in_one_hook(PyStrategy::new(obj.clone_ref(py)), |strategy, ctx| {
+            strategy.on_start(ctx).unwrap();
+        })
+        .unwrap();
+        obj.call_method0(py, "outside").unwrap();
+        assert_eq!(
+            lines(py, &seen),
+            [
+                r#"{"hook": "init", "rand": ["Error", "sdk: the session has no seed before OnInit"], "same": true}"#,
+                r#"{"held": true, "hook": "start", "rand": ["ContextError", "mftik.Context is only valid inside the hook that received it"]}"#,
+                r#"{"hook": "outside", "later": true, "moves": true}"#,
+            ]
+        );
+    });
+}
+
 /// Fd 2 points at another descriptor, through Python's `os`, until this
 /// drops.
 struct Fd2 {

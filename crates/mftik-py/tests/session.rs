@@ -14,6 +14,7 @@ use mftik_proto::wire::mftiko::common::v1::Outcome;
 use mftik_proto::wire::mftiko::session::v1::EventLog;
 use mftik_proto::wire::mftiko::stsctl::v1::InitPayload;
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
+use mftik_rt::GATE_LINE;
 use mftik_rt::eventlog::{self, Kind, Reader, Record};
 use mftik_testkit::{
     Ended, Nats, Shim, WorkerSpawn, expect_applied, expect_done, expect_ending, expect_hello, init,
@@ -269,6 +270,79 @@ fn an_after_callback_exception_still_gets_its_hook_end() {
     );
     assert_eq!(records[5].body, b"RuntimeError: after broke");
     assert!(records[4].t_ns <= records[5].t_ns);
+}
+
+/// `random.Random(seed).getrandbits(64)`, `n` times, in the venv's Python.
+fn python_draws(seed: u64, n: usize) -> Vec<String> {
+    let code = format!(
+        "import random\nr = random.Random({seed})\nprint(*(r.getrandbits(64) for _ in range({n})))"
+    );
+    let output = Command::new(python_bin())
+        .args(["-c", &code])
+        .output()
+        .expect("draw in python");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("draws are utf-8")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// E07-D013, E07-D014, E07-D015: each hook's `ctx.now()` is its input's
+/// `t_ns` on every call, and `ctx.rand()` is one `random.Random` seeded with
+/// the `init` frame's `ref`.
+#[test]
+#[ignore = "python CI job: MFTIK_PYTHON is the venv whose wheel is installed"]
+fn now_is_the_inputs_t_ns_and_rand_is_seeded_by_the_init_frame() {
+    let nats = start_nats();
+    let mut shim = spawn(python_module("cases:NowRand"), &nats);
+    let mut payload = init_payload(&nats.creds, "");
+    payload.event_log = Some(EventLog {
+        enabled: true,
+        keep_mb: 1,
+    });
+    running_with(&mut shim, payload, &package_version());
+    expect_ending(&mut shim, Outcome::Done, "", Some(true));
+    let ended = shim.end();
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+
+    let records = event_log(&ended.volume.0);
+    let hooks: Vec<_> = records
+        .iter()
+        .filter(|r| !matches!(r.kind, Kind::HOOK_END | Kind::STOP | Kind::END))
+        .collect();
+    let kinds: Vec<_> = hooks.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            Kind::INIT,
+            Kind::START,
+            Kind::POST,
+            Kind::TIMER,
+            Kind::ONSTOP
+        ]
+    );
+    let draws = python_draws(records[0].r#ref, hooks.len());
+    let want: Vec<String> = hooks
+        .iter()
+        .zip(&draws)
+        .map(|(r, draw)| {
+            let (hook, t) = (r.kind.name().unwrap_or("?"), r.t_ns);
+            format!(r#"{{"hook":"{hook}","now":{t},"again":{t},"same":true,"draw":{draw}}}"#)
+        })
+        .collect();
+    let printed: Vec<&str> = ended
+        .lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| *line != GATE_LINE.trim_end())
+        .collect();
+    assert_eq!(printed, want, "{}", ended.stderr);
 }
 
 #[test]
