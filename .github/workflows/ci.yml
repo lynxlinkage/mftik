@@ -110,7 +110,7 @@ jobs:
         run: |
           test -n "$MFTIK_NATS_SERVER"
           test -x /tmp/mftik-smoke/bin/python
-          MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --test session --test context --test reads --test hooks -- --ignored --test-threads=1
+          MFTIK_PYTHON=/tmp/mftik-smoke/bin/python cargo test -p mftik-py --test session --test context --test reads --test hooks --test replay -- --ignored --test-threads=1
 
   # E04-D063, E06-D019: the two release wheels. Same matrix as release.yml.
   # No sdist. The Linux wheel is pinned to ubuntu-22.04, not ubuntu-latest:

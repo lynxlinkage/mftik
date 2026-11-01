@@ -20,6 +20,8 @@ The platform starts one process:
 
 The class has to implement `on_init`, `on_start`, and `on_stop`. Those three, and the optional hooks, are the [lifecycle](lifecycle.md). The object is constructed before any of them runs, with no arguments, so configuration belongs in `on_init`, read from `params`. The strategies under `examples/python` all read their configuration in `on_init`. See [Examples](examples.md).
 
+To run the same class over a recorded event log, without hosting a session, call `replay`. See [Replay](replay.md).
+
 ## When the class cannot be loaded
 
 A bad command line, an import error, a constructor error, or an object that is not a `Strategy` does not skip the session protocol. The process still sends Hello. The session ends `INIT_FAILED`. `Done.error` is `load module:Class: TypeName: message`. The traceback is written to stderr and is not part of that error string. The process does not exit 1 before Hello.

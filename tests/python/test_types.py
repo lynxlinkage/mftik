@@ -115,6 +115,7 @@ class TypesTest(unittest.TestCase):
             self.assertIsInstance(err, mftik.Error)
             self.assertEqual(str(err), text)
         self.assertTrue(issubclass(mftik.ContextError, mftik.Error))
+        self.assertTrue(issubclass(mftik.ReplayError, mftik.Error))
         self.assertFalse(isinstance(mftik.Error("a"), mftik.NotInInit))
 
     def test_proto_messages_are_not_constructed_from_python(self) -> None:

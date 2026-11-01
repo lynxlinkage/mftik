@@ -34,7 +34,7 @@ A load failure uses the same `INIT_FAILED` ending. Its `Done.error` is `load mod
 
 ## `Error` and its subclasses
 
-`Error` is the base class of the SDK's context failures. The subclasses are `NotInInit`, `UnknownUid`, `UnknownAccount`, `AlgoNotDeclared`, `NoFeed`, `Stopping`, `ReadError`, and `ContextError`. Catch `Error` to handle any of them. They are not subclasses of each other.
+`Error` is the base class of the SDK's context failures. The subclasses are `NotInInit`, `UnknownUid`, `UnknownAccount`, `AlgoNotDeclared`, `NoFeed`, `Stopping`, `ReadError`, `ContextError`, and `ReplayError`. Catch `Error` to handle any of them. They are not subclasses of each other.
 
 | Exception | Message |
 | --- | --- |
@@ -48,6 +48,8 @@ A load failure uses the same `INIT_FAILED` ending. Its `Done.error` is `load mod
 `ContextError` means a `Context` or a `BookView` was used outside the hook that produced it. The messages are `mftik.Context is only valid inside the hook that received it` and `mftik.BookView is only valid inside the hook that received it`. `now` does not raise `ContextError`: it is the start of the hook running on this thread, or the time now when none is. See [Threads](threads.md).
 
 `ReadError` is not raised by `tape`, `book_snapshot`, `fetch_klines`, or `fetch_open_interest`. Those methods hand it to the callback as the third argument. The message is the runtime's text. A timeout looks like `mdpath: md.view: context deadline exceeded`. A missing responder looks like `mdpath: md.fetch: nats: no responders available for request`.
+
+`ReplayError` means the event log could not be replayed at all: `dir` could not be read, that incarnation has no file, or the header did not parse. The message starts with `sdk: replay:`. Mismatches do not raise; they are strings on `ReplayReport.mismatches`. See [Replay](replay.md).
 
 Other failures use the base `Error` and keep their text. A ticker `resolve` cannot find raises `Error` with a message that starts `symbol: no such instrument:`. `rand` before OnInit raises `Error` with the message `sdk: the session has no seed before OnInit`. `ValueError` and `TypeError` are used for arguments the SDK rejects before a session call, such as a bad `after` delay, a non-`Order` passed to `submit`, or a `str` passed as volume bytes. Those are Python's own exceptions, not subclasses of `Error`.
 

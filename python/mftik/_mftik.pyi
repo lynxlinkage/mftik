@@ -24,6 +24,8 @@ __all__ = [
     "Stopping",
     "ReadError",
     "ContextError",
+    "ReplayError",
+    "ReplayReport",
     "Md",
     "Td",
     "Feed",
@@ -54,6 +56,7 @@ __all__ = [
     "_run",
     "_run_load_failed",
     "_registered_hooks",
+    "_replay",
     "session_contracts",
 ]
 
@@ -66,6 +69,7 @@ class NoFeed(Error): ...
 class Stopping(Error): ...
 class ReadError(Error): ...
 class ContextError(Error): ...
+class ReplayError(Error): ...
 
 class Origin(enum.IntEnum):
     from_td = 1
@@ -343,7 +347,29 @@ def volume_read(volume_dir: str, input_dir: str, name: str) -> bytes | None: ...
 
 log: Log
 
+@final
+class ReplayReport:
+    session_id: str
+    incarnation: int
+    sdk_version: str
+    sdk_commit: str
+    inputs: int
+    skipped: int
+    missing: int
+    orders: int
+    reads: int
+    mismatches: tuple[str, ...]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __repr__(self) -> str: ...
+
 def _run(strategy: object, release: str, version: str, commit: str) -> None: ...
 def _run_load_failed(message: str, release: str) -> None: ...
 def _registered_hooks(strategy: object) -> list[str]: ...
+def _replay(
+    strategy: object,
+    dir: str,
+    incarnation: int = 0,
+    volume_dir: str = "",
+    input_dir: str = "",
+) -> ReplayReport: ...
 def session_contracts() -> list[str]: ...

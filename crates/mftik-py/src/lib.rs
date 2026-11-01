@@ -8,6 +8,7 @@ mod context;
 mod error;
 mod log;
 mod proto;
+mod replay;
 mod sdk;
 mod strategy;
 mod topic;
@@ -21,6 +22,7 @@ use pyo3::wrap_pyfunction;
 use crate::context::{PyBookView, PyContext, PyPoster};
 use crate::error::ContextError;
 use crate::log::PyLog;
+use crate::replay::{_replay, PyReplayReport};
 use crate::strategy::{LoadFailed, PyStrategy};
 use crate::volume::{volume_read, volume_write};
 
@@ -51,6 +53,7 @@ fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoster>()?;
     m.add_class::<PyBookView>()?;
     m.add_class::<PyLog>()?;
+    m.add_class::<PyReplayReport>()?;
     m.add("log", PyLog { session_id: None })?;
     m.add_function(wrap_pyfunction!(volume_write, m)?)?;
     m.add_function(wrap_pyfunction!(volume_read, m)?)?;
@@ -58,6 +61,7 @@ fn mftik(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_run_load_failed, m)?)?;
     m.add_function(wrap_pyfunction!(_registered_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(session_contracts, m)?)?;
+    m.add_function(wrap_pyfunction!(_replay, m)?)?;
     Ok(())
 }
 

@@ -541,3 +541,11 @@ Harness 給 binary 模式（E08-D009）：`crates/mftik-py/tests/examples.rs` �
 - **E07-D018** `ReplayReport` 欄位同 Go：`mismatches`、`inputs`、`skipped`、`missing`、`orders`、`reads`；每筆 mismatch 記 rec_seq、種類、紀錄值與回放值。hook 結束方式在 Rust 比 panic 訊息；Python 比例外類別與訊息（E07-07）。
 - **E07-D019** 驗收：錄製後回放零 mismatch；修改過的策略產生 mismatch；有缺號的紀錄正確計入 `missing`。phase 1 不比對 log（E07-D005）。
 
+## 決策（E07-D020–D024）
+
+- **E07-D020 介面**：`mftik.replay(StrategyCls, dir, *, incarnation=None, volume_dir=None, input_dir=None)`，參數一一對應 Rust `ReplayOptions`，未給則沿用 Rust 預設。
+- **E07-D021 回傳**：唯讀 `ReplayReport`，欄位與 Rust 完全一致：`session_id`、`incarnation`、`sdk_version`、`sdk_commit`、`inputs`、`skipped`、`missing`、`orders`、`reads`、`mismatches`。
+- **E07-D022 錯誤**：log 讀不到或 header 不合時丟 `mftik.ReplayError`；有 mismatch 不丟例外，只寫進報告。
+- **E07-D023 hook 比對**：例外以完整類別名稱加訊息字串比對；重建時使用同一 mftik 例外類別。
+- **E07-D024 測試**：以 `examples/python/sampler` 錄製後回放須零 mismatch；修改後的策略須產生 mismatch。放進現有 python CI，不另開 job。
+

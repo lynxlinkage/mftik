@@ -10,6 +10,8 @@ A name that starts with one underscore is part of the native module. Strategy co
 
 `run` hosts one `Strategy` until the process exits. It does not return. `run(strategy, release=None, *, version="", commit="")` sends `release` as `Hello.release` when that argument is set. `version` and `commit` are the strategy's log fields. Empty strings are still written. They do not change `Hello.release`. See [Install and run](install.md).
 
+`replay` runs a strategy class over one incarnation of a recorded event log and returns a `ReplayReport`. `replay(StrategyCls, dir, *, incarnation=None, volume_dir=None, input_dir=None)` constructs the class with no arguments. `dir` is the volume's `eventlog` directory. Omitted options use the Rust defaults. See [Replay](replay.md).
+
 `log` is the module-level `Log`. Use it outside a hook. It does not carry `session_id`. `debug`, `info`, `warn`, and `error` take a positional-only message and keyword fields: `log.info("msg", key=value)`. A field value must be a `str`, `int`, `float`, `bool`, or `None`. Anything else, including a subclass or a list, raises `TypeError`. A call below `MFTIKO_LOG_LEVEL` returns at once without checking the message or the fields, so it raises no `TypeError`. Lines are JSON objects on stderr. `MFTIKO_LOG_LEVEL` defaults to info. `MFTIKO_LOG_FORMAT=console` selects the console layout.
 
 `Strategy` is the base class. Construct it with no arguments. `on_init`, `on_start`, and `on_stop` are required. The 17 optional hooks are listed in [Lifecycle](lifecycle.md).
@@ -82,6 +84,7 @@ Every hook receives a `Context`. The methods below raise `ContextError` outside 
 | `Stopping` | The session is already stopping |
 | `ReadError` | A read callback's failure. Not raised by the method that sent the request |
 | `ContextError` | A `Context` or `BookView` used outside its hook |
+| `ReplayError` | The event log could not be read or its header did not parse |
 
 The messages are in [Errors and exit codes](errors.md).
 
@@ -198,7 +201,13 @@ These names are on `mftik._mftik`. They are how the interpreter entry and the pa
 
 `_registered_hooks` returns the optional hook names the class overrides. The decision matches registration: a method counts when `type(strategy).on_x is not Strategy.on_x`.
 
+`_replay` is the native entry `replay` calls after it has constructed the class and mapped `None` options to the Rust defaults.
+
 `session_contracts` returns the contract names a worker Hello and a packed manifest both list.
+
+## Replay report
+
+`ReplayReport` is the value `replay` returns. It is frozen. The fields are `session_id`, `incarnation`, `sdk_version`, `sdk_commit`, `inputs`, `skipped`, `missing`, `orders`, `reads`, and `mismatches`. `mismatches` is a tuple of strings. Empty means the replay matched the recording. See [Replay](replay.md).
 
 ## Proto messages
 

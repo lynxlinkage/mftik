@@ -1,5 +1,8 @@
 """STS Python SDK. Protocol logic and IO stay in the Rust crates."""
 
+from __future__ import annotations
+
+import os
 import sys
 
 from mftik._mftik import (
@@ -26,6 +29,8 @@ from mftik._mftik import (
     ReconEvent,
     RejectedRequest,
     RejectEvent,
+    ReplayError,
+    ReplayReport,
     Stopping,
     TapeQuery,
     Td,
@@ -74,6 +79,8 @@ __all__ = [
     "ReconEvent",
     "RejectEvent",
     "RejectedRequest",
+    "ReplayError",
+    "ReplayReport",
     "Stopping",
     "Strategy",
     "TapeQuery",
@@ -85,12 +92,54 @@ __all__ = [
     "common",
     "log",
     "md",
+    "replay",
     "run",
     "td",
     "volume",
 ]
 
 __version__ = package_version()
+
+
+def replay(
+    strategy_cls: type[Strategy],
+    dir: str | os.PathLike[str],
+    *,
+    incarnation: int | None = None,
+    volume_dir: str | os.PathLike[str] | None = None,
+    input_dir: str | os.PathLike[str] | None = None,
+) -> ReplayReport:
+    """Run ``strategy_cls`` over one incarnation of the event log in ``dir``.
+
+    ``dir`` is the session volume's ``eventlog`` directory. The class is
+    constructed with no arguments. ``None`` options use the Rust defaults:
+    newest incarnation, empty volume and input directories.
+    """
+    from mftik._mftik import _replay
+
+    if not isinstance(strategy_cls, type) or not issubclass(strategy_cls, Strategy):
+        raise TypeError("strategy must be a subclass of mftik.Strategy")
+    if incarnation is None:
+        incarnation = 0
+    elif isinstance(incarnation, bool) or not isinstance(incarnation, int):
+        raise TypeError("incarnation must be int")
+    obj = strategy_cls()
+    if not isinstance(obj, Strategy):
+        raise TypeError("strategy must be a subclass of mftik.Strategy")
+    return _replay(
+        obj,
+        _path_str(dir, "dir"),
+        incarnation,
+        "" if volume_dir is None else _path_str(volume_dir, "volume_dir"),
+        "" if input_dir is None else _path_str(input_dir, "input_dir"),
+    )
+
+
+def _path_str(value: str | os.PathLike[str], name: str) -> str:
+    text = os.fspath(value)
+    if isinstance(text, bytes):
+        raise TypeError(f"{name} must be a str, not bytes")
+    return text
 
 
 def __getattr__(name: str):

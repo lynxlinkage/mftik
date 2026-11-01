@@ -284,7 +284,7 @@ The first `on_recon` for the account reads `position` and `open_orders`. Open or
         )
 ```
 
-`sampler` is started with `python -m mftik.run sampler:Sampler`. Its pack command is the same shape as `md_watch`.
+`sampler` is started with `python -m mftik.run sampler:Sampler`. Its pack command is the same shape as `md_watch`. `replay` of a recorded `eventlog` directory against this class is the Python replay example. See [Replay](replay.md).
 
 ```bash examples/python/sampler/README.md:20-20
 python -m mftik.run sampler:Sampler

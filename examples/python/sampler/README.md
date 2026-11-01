@@ -28,3 +28,15 @@ python -m mftik.pack \
   -repo 127.0.0.1:9/mftik/sampler \
   -no-push
 ```
+
+Replay a recorded incarnation against the same class. `dir` is the session
+volume's `eventlog` directory. `replay` constructs the class with no
+arguments.
+
+```python
+import mftik
+from sampler import Sampler
+
+report = mftik.replay(Sampler, "eventlog")
+assert not report.mismatches
+```

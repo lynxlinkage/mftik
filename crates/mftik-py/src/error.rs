@@ -18,6 +18,12 @@ pyo3::create_exception!(
     Error,
     "The Context is no longer valid for this call."
 );
+pyo3::create_exception!(
+    mftik,
+    ReplayError,
+    Error,
+    "The event log could not be replayed."
+);
 
 pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Error", py.get_type::<Error>())?;
@@ -29,6 +35,7 @@ pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Stopping", py.get_type::<Stopping>())?;
     module.add("ReadError", py.get_type::<ReadError>())?;
     module.add("ContextError", py.get_type::<ContextError>())?;
+    module.add("ReplayError", py.get_type::<ReplayError>())?;
     Ok(())
 }
 

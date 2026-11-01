@@ -14,6 +14,7 @@
 | [Session spec](session.md) | Every field of the session file and what it means to a Python strategy |
 | [Volume and inputs](volume.md) | Durable files and read-only inputs |
 | [Examples](examples.md) | `md_watch`, `maker`, `stateful`, `pretrained`, and `sampler`, quoted from `examples/python` |
+| [Replay](replay.md) | `replay` of a recorded event log, `ReplayReport`, and `ReplayError` |
 | [API reference](reference.md) | Every public name |
 
 A hook runs on one thread, one at a time. It must return. The only object that may cross threads is a `Poster`. `Context` and `BookView` work only inside the hook that received them.
