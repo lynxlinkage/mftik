@@ -322,6 +322,7 @@ pub struct Ended {
 pub struct WorkerSpawn {
     program: PathBuf,
     args: Vec<OsString>,
+    env_clear: bool,
     env: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
     current_dir: Option<PathBuf>,
@@ -332,6 +333,7 @@ impl WorkerSpawn {
         Self {
             program: program.into(),
             args: Vec::new(),
+            env_clear: false,
             env: Vec::new(),
             env_remove: Vec::new(),
             current_dir: None,
@@ -350,6 +352,14 @@ impl WorkerSpawn {
     {
         self.args
             .extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        self
+    }
+
+    /// Does not inherit this process's environment: the worker gets only
+    /// [`WorkerSpawn::env`] and the shim's variables, as a shim starts one
+    /// (PROTOCOL §4.6).
+    pub fn env_clear(mut self) -> Self {
+        self.env_clear = true;
         self
     }
 
@@ -390,6 +400,9 @@ impl Shim {
         let volume = TempDir::new("volume");
         let fd = theirs.as_raw_fd();
         let mut cmd = Command::new(&worker.program);
+        if worker.env_clear {
+            cmd.env_clear();
+        }
         cmd.args(&worker.args)
             .env_remove("MFTIKO_INPUT_DIR")
             .stdin(Stdio::null())

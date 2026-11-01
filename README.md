@@ -16,8 +16,9 @@ Decisions for this repo are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 | `mftik-rt` | `crates/mftik-rt` | Session worker runtime: fd 3, C4, the dispatcher, NATS, and timers. `Strategy` and `Context`. |
 | `mftik-testkit` | `crates/mftik-testkit` | Dev-only nats-server and fake-shim harness (`publish = false`). |
 | `mftik-conform` | `examples/conform` | The Rust standard conformance strategy (PROTOCOL §9.8), the `conform` binary. |
+| `mftik-md-watch` | `examples/rust/md_watch` | The Rust md_watch example: one instrument's trades and book, the `md_watch` binary. |
 
-The Python API is snake_case and matches the Go SDK's hook and context names. The user guide and API reference are in [`docs/python`](docs/python/README.md).
+The Python API is snake_case and matches the Go SDK's hook and context names. The user guide and API reference are in [`docs/python`](docs/python/README.md). The Rust user guide is in [`docs/rust`](docs/rust/README.md). Its snippets are compiled by `cargo test --doc -p mftik-rt` (E08-D008).
 
 ## Proto
 
@@ -44,8 +45,8 @@ Python uses [uv](https://docs.astral.sh/uv/) and [maturin](https://www.maturin.r
 ```bash
 uv sync
 uv run maturin develop
-uv run ruff check python tests/python examples/python crates/mftik-py/tests/pystrategies
-uv run ruff format --check python tests/python examples/python crates/mftik-py/tests/pystrategies
+uv run ruff check python tests/python examples/python examples/rust crates/mftik-py/tests/pystrategies
+uv run ruff format --check python tests/python examples/python examples/rust crates/mftik-py/tests/pystrategies
 ```
 
 `mftik` requires Python 3.11 or newer (abi3). A session worker starts with `python -m mftik.run module:Class`. `Class` is constructed with no arguments and must be a `mftik.Strategy`.
@@ -68,9 +69,10 @@ cargo build --release -p mftik-conform
 bin/mftiko-conformance -json report.json -- target/release/conform
 ```
 
-`conformance-rootfs-rust` packs that binary with the pinned `mftiko-pack -bin` (E08-D001). Every binary that calls `mftik_rt::run` carries what the packer reads: the `mftiko.contracts=` marker, and on Linux a Go build info record that gives the manifest's `sdk.version` (E08-D005). [`tests/python/conformance_rootfs_rust.py`](tests/python/conformance_rootfs_rust.py) pushes the image to a registry on 127.0.0.1, pulls and unpacks it with the pinned mftiko artifact package, and runs the suite in the unpacked rootfs. The job builds and runs the binary on `ubuntu-22.04`, whose glibc is 2.35 (E08-D002). Locally it needs Docker, or `MFTIK_REGISTRY_BIN` pointing at a `registry` binary:
+`conformance-rootfs-rust` packs that binary and [`examples/rust/md_watch`](examples/rust/md_watch) with the pinned `mftiko-pack -bin` (E08-D001, E08-D009). Every binary that calls `mftik_rt::run` carries what the packer reads: the `mftiko.contracts=` marker, and on Linux a Go build info record that gives the manifest's `sdk.version` (E08-D005). [`tests/python/conformance_rootfs_rust.py`](tests/python/conformance_rootfs_rust.py) pushes each image to a registry on 127.0.0.1, pulls and unpacks it with the pinned mftiko artifact package, runs the suite in conform's rootfs, and runs [`examples/rust/md_watch/test_e2e.py`](examples/rust/md_watch/test_e2e.py) from md_watch's rootfs under the Python md_watch harness. The job builds and runs the binaries on `ubuntu-22.04`, whose glibc is 2.35 (E08-D002). Locally it needs Docker, or `MFTIK_REGISTRY_BIN` pointing at a `registry` binary, and `nats-server` (`MFTIK_NATS_SERVER`, or on `PATH`):
 
 ```bash
+cargo build --release -p mftik-conform -p mftik-md-watch
 MFTIK_CONFORMANCE="$PWD/bin/mftiko-conformance" python3 tests/python/conformance_rootfs_rust.py
 ```
 
@@ -89,4 +91,4 @@ printf '%s\n' "$PWD/examples/python" > "$site/mftik-conform.pth"
 bin/mftiko-conformance -json report.json -- .venv/bin/python -m mftik.run conform:Conform
 ```
 
-Example strategies are [`md_watch`](examples/python/md_watch) (market data), [`maker`](examples/python/maker) (orders), [`stateful`](examples/python/stateful) (a fill count kept in the volume), [`pretrained`](examples/python/pretrained) (a read-only input), and [`sampler`](examples/python/sampler) (`now` and `rand`). Each directory has an English README and `test_e2e.py`. The `examples` CI job installs the `mftik-abi3-wheel` artifact, runs those tests, and packs each strategy once without pushing.
+Example strategies are [`md_watch`](examples/python/md_watch) (market data), [`maker`](examples/python/maker) (orders), [`stateful`](examples/python/stateful) (a fill count kept in the volume), [`pretrained`](examples/python/pretrained) (a read-only input), and [`sampler`](examples/python/sampler) (`now` and `rand`). Each directory has an English README and `test_e2e.py`. The `examples` CI job installs the `mftik-abi3-wheel` artifact, runs those tests, and packs each strategy once without pushing. The Rust md_watch is [`examples/rust/md_watch`](examples/rust/md_watch); `conformance-rootfs-rust` packs it and runs its e2e test from the unpacked rootfs.

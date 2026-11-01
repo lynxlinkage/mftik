@@ -1,0 +1,19 @@
+[package]
+name = "mftik-md-watch"
+description = "The Rust md_watch example: one instrument's trades and book, counts kept in the volume."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "md_watch"
+path = "src/main.rs"
+
+[dependencies]
+mftik-rt = { path = "../../../crates/mftik-rt" }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+mftik-core = { path = "../../../crates/mftik-core" }
