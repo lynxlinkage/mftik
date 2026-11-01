@@ -23,11 +23,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mftik_core::dispatch::Dispatcher;
 use mftik_core::mdpath::{ReadError, TapeQuery};
 use mftik_core::symbol::Info;
 use mftik_proto::wire::mftiko::md::v1 as md;
 use mftik_proto::wire::mftiko::td::v1 as td;
 
+use crate::clock::Clock;
 use crate::md::BookView;
 use crate::plane::Plane;
 use crate::strategy::{Order, Strategy};
@@ -78,15 +80,42 @@ impl std::error::Error for Error {}
 /// A hook's view of the session. See the module docs.
 pub struct Context<S> {
     plane: Arc<Plane<S>>,
+    /// The hook's start when the plane runs the hook itself. `None` is a
+    /// dispatcher hook: the dispatcher has its start.
+    start_ns: Option<i64>,
 }
 
 impl<S: Strategy> Context<S> {
-    pub(crate) fn new(plane: Arc<Plane<S>>) -> Self {
-        Self { plane }
+    pub(crate) fn new(plane: Arc<Plane<S>>, start_ns: Option<i64>) -> Self {
+        Self { plane, start_ns }
     }
 
     pub fn session_id(&self) -> &str {
         self.plane.session().map_or("", |s| s.id.as_str())
+    }
+
+    /// When this hook started, in ns since the Unix epoch on the session
+    /// clock, the origin of `md_ts_ns` (E03-D004). Every call in the hook
+    /// returns the same value. With the event log on it is the `t_ns` of the
+    /// hook's input (E07-D013).
+    pub fn now_ns(&self) -> i64 {
+        self.start_ns
+            .or_else(|| self.plane.dispatcher().map(Dispatcher::hook_start_ns))
+            .unwrap_or_default()
+    }
+
+    /// The session clock that [`Context::now_ns`] is on. The Python binding
+    /// reads it for `Context.now` outside a hook (E07-D013).
+    #[doc(hidden)]
+    pub fn clock(&self) -> Clock {
+        self.plane.clock()
+    }
+
+    /// The seed for the strategy's random draws, made once per worker. The
+    /// `init` frame records it as its `ref` (PROTOCOL §12.4). `None` before
+    /// Init (E07-D014).
+    pub fn seed(&self) -> Option<u64> {
+        self.plane.session().map(|s| s.seed)
     }
 
     /// The strategy's own parameters from the session spec; the platform
