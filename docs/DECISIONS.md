@@ -516,3 +516,20 @@ Yi Te 於 #473 核可。E07-05 補 `ctx.now()` 與 `ctx.rand()`（E07-D004）。
 與 Go 不同的地方。Go 的 `Now()` 是 step clock：執行中 hook 的開始，沒有 hook 時仍是上一個 hook 的開始。mftik 在 hook 外回傳當下時間（E07-D013）。Go 的 `Rand()` 是 `rand.New(rand.NewPCG(seed, 0))`；Python 是 `random.Random(seed)`（E07-D004）。關閉 log 時 hook 開始用注入的時鐘，不多讀一次（E07-D009）；Go 每次 beginHook 都讀牆鐘。
 
 測試：`mftik-core` 的 `src/dispatch/tests.rs` 測 log 關時 hook 開始是注入的時鐘且不移動、log 開時是輸入的 `t_ns` 且不讀時鐘。`mftik-rt` 的 `src/plane.rs` 測 OnInit／OnStart／OnStop 與 dispatcher hook 的開始，以及 Init 前 seed 是 `None`；`tests/eventlog_session.rs` 每個 hook 印兩次 `now_ns` 與 seed，對上輸入的 `t_ns` 與 `init` 的 `ref`。mftik-py 的 in-process 測試測同一 hook 內 `now` 不變、過期 context 的 `now` 是正在跑的 hook 的開始、hook 外會走、`rand` 在沒有 seed 時拋錯；`tests/session.rs` 以安裝的 wheel、開著 event log，確認每個 hook 的 `now` 是輸入的 `t_ns`，`rand().getrandbits(64)` 的序列與 `random.Random(init.ref)` 相同（python CI job）。
+
+## 決定（2026-11-01，E08-D006–E08-D009）
+
+Yi Te 於 #480 核可。E08-02 Rust 範例與文件。本票沒有改 PROTOCOL，也沒有改 mftiko。
+
+- E08-D006 新增 `examples/rust/md_watch`（workspace crate），行為對應 Python `examples/python/md_watch`（訂行情、記錄、volume 存狀態）。`examples/conform` 不搬、不動。
+- E08-D007 `docs/rust/` 用一般 Markdown，語言與章節結構照 `docs/python`：入門、hook、Context、打包部署四篇。不架 mdBook。
+- E08-D008 文件片段以 `mftik-rt` 內 `#[cfg(doctest)]` + `include_str!` 掛入 `docs/rust/*.md`，由 `cargo test --doc` 編譯每段 Rust 片段，不另寫工具。
+- E08-D009 擴充 E08-01 的 `conformance-rootfs-rust` job：以 `mftiko-pack -bin` 打包 `md_watch`，並用 Python md_watch 同一套 harness 在 rootfs 內跑起來。
+
+#480（E08-02）加 workspace member `examples/rust/md_watch`（crate `mftik-md-watch`，binary `md_watch`）。Python 的 `md_watch` 只記行情、不寫 volume；Rust 這份在 volume 檔 `counts`（`{"trades":N,"books":N}`）存筆數：OnInit 讀到就接著算，heartbeat 與 OnStop 原子覆寫，沒有 volume 目錄就不存。params、OnTrade／OnBook／OnTimer 的欄位與 Python 相同。`examples/conform` 沒動。
+
+Harness 給 binary 模式（E08-D009）：`crates/mftik-py/tests/examples.rs` 的 scenario 可帶 `program` 與 `cwd`；worker 不繼承本行程的環境，只拿 shim 的變數（PROTOCOL §4.6），Hello.release 必須是 `mftik_rt::RELEASE`（`run(..., None)` 送的）。`examples/rust/md_watch/test_e2e.py` 用 Python `md_watch` 同一套 scenario 與檢查，再讀 `counts`；設了 `MFTIK_MD_WATCH_ROOTFS` 就跑 rootfs 裡的 `bin/strategy`，否則 `cargo build -p mftik-md-watch`。
+
+`conformance-rootfs-rust` 在 `ubuntu-22.04` 建 release 的 `conform` 與 `md_watch`，兩個都用釘住的 `mftiko-pack -bin` 打包、拉開。conform 仍跑 `mftiko-conformance`；md_watch 的 rootfs 跑 `test_e2e.py`。job 裝 nats-server 給 harness。Python job 的 ruff 也掃 `examples/rust`。
+
+`docs/rust/` 四篇英文 Markdown：入門、hook、Context、打包部署，對 `docs/python` 的同名結構，不架 mdBook。Rust 片段是完整可編譯的例子，不是從範例檔摘行；`mftik-rt` 以 `#[cfg(doctest)]` + `include_str!` 掛上，`cargo test --workspace`（含 `--doc`）編譯它們。入門寫 git tag 依賴、不上 crates.io，並註明要 1.2.0 之後的 release 才能打包（v1.2.0 沒有 E08-01 的標記與 build info），以及保持 `panic = "unwind"`。

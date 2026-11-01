@@ -73,9 +73,9 @@ jobs:
           uv run --frozen --no-sync python scripts/check-python-doc-api
           uv run --frozen --no-sync python scripts/check-python-doc-snippets
       - name: Ruff
-        run: uv run --frozen --no-sync ruff check python tests/python examples/python crates/mftik-py/tests/pystrategies
+        run: uv run --frozen --no-sync ruff check python tests/python examples/python examples/rust crates/mftik-py/tests/pystrategies
       - name: Ruff format
-        run: uv run --frozen --no-sync ruff format --check python tests/python examples/python crates/mftik-py/tests/pystrategies
+        run: uv run --frozen --no-sync ruff format --check python tests/python examples/python examples/rust crates/mftik-py/tests/pystrategies
       - name: Build the mftik wheel
         run: uv run --frozen --no-sync maturin build --release --out dist
       - name: Install the wheel
@@ -358,8 +358,10 @@ jobs:
 
   # E08-D001, E08-D002, E08-D005 (#479): examples/conform packed with the
   # pinned mftiko-pack -bin, unpacked with the pinned mftiko artifact package,
-  # and run with mftiko-conformance in that rootfs. ubuntu-22.04 is the glibc
-  # 2.35 baseline: the binary is built and run there.
+  # and run with mftiko-conformance in that rootfs. E08-D009 (#480):
+  # examples/rust/md_watch packed and unpacked the same way, and run from its
+  # rootfs under the Python md_watch harness. ubuntu-22.04 is the glibc 2.35
+  # baseline: the binaries are built and run there.
   conformance-rootfs-rust:
     name: conformance-rootfs-rust
     runs-on: ubuntu-22.04
@@ -377,11 +379,17 @@ jobs:
           cache: false
       - name: Install mftiko-conformance from the pinned mftiko commit
         run: GOBIN="$RUNNER_TEMP/conformance-bin" bash scripts/install-mftiko-conformance
-      - name: Build the conform strategy
-        run: cargo build --release -p mftik-conform
-      - name: Pack the binary and run mftiko-conformance in its rootfs
+      # The md_watch harness runs a real nats-server, the version the rust job pins.
+      - name: Install nats-server
+        run: |
+          GOBIN="$RUNNER_TEMP/nats-bin" go install github.com/nats-io/nats-server/v2@v2.15.0
+          echo "MFTIK_NATS_SERVER=$RUNNER_TEMP/nats-bin/nats-server" >> "$GITHUB_ENV"
+      - name: Build the Rust strategies
+        run: cargo build --release -p mftik-conform -p mftik-md-watch
+      - name: Pack the binaries and run them in their rootfs
         env:
           MFTIK_CONFORM_BIN: ${{ github.workspace }}/target/release/conform
+          MFTIK_MD_WATCH_BIN: ${{ github.workspace }}/target/release/md_watch
           MFTIK_CONFORMANCE: ${{ runner.temp }}/conformance-bin/mftiko-conformance
           MFTIK_REPORT: ${{ github.workspace }}/report-rootfs-rust.json
         run: python3.11 tests/python/conformance_rootfs_rust.py

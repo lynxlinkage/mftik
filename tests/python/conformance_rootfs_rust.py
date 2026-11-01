@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Pack the Rust conform strategy with ``mftiko-pack -bin`` and run its rootfs (#479).
+"""Pack the Rust strategies with ``mftiko-pack -bin`` and run their rootfs (#479, #480).
 
-``MFTIK_CONFORM_BIN`` (default ``target/release/conform``) is packed by the
+``MFTIK_CONFORM_BIN`` (default ``target/release/conform``) and
+``MFTIK_MD_WATCH_BIN`` (default ``target/release/md_watch``) are packed by the
 pinned ``mftiko-pack -bin``, which takes the manifest's ``contracts`` and
-``sdk.version`` out of the binary (E08-D001, E08-D005). The image is pushed to
+``sdk.version`` out of the binary (E08-D001, E08-D005). Each image is pushed to
 a registry on 127.0.0.1, then pulled and unpacked with mftiko
 ``internal/platform/artifact``. Both tools come from the E04-D076 commit, as in
-``data_input_e2e.py``. Conformance runs as in ``conformance_rootfs.py``: the
-rootfs is the working directory, the manifest entrypoint is argv, and ``PATH``
-is only the directory that contains ``MFTIK_CONFORMANCE``.
+``data_input_e2e.py``. Conformance runs in conform's rootfs as in
+``conformance_rootfs.py``: the rootfs is the working directory, the manifest
+entrypoint is argv, and ``PATH`` is only the directory that contains
+``MFTIK_CONFORMANCE``. md_watch's rootfs runs ``examples/rust/md_watch/test_e2e.py``,
+the Python md_watch harness and checks (E08-D009). That needs ``cargo`` and
+``nats-server`` (``MFTIK_NATS_SERVER``, or on ``PATH``).
 """
 
 from __future__ import annotations
@@ -34,15 +38,17 @@ from conformance_rootfs import (
 from data_input_e2e import checkout_mftiko, go
 
 ENTRYPOINT = ["bin/strategy"]
+MD_WATCH_TEST = REPO / "examples" / "rust" / "md_watch" / "test_e2e.py"
 
 
 def main() -> None:
     tool = Path(os.environ.get("MFTIK_CONFORMANCE", ""))
     if not tool.is_file() or not os.access(tool, os.X_OK):
         raise SystemExit("MFTIK_CONFORMANCE must be the mftiko-conformance binary")
-    binary = Path(os.environ.get("MFTIK_CONFORM_BIN", REPO / "target" / "release" / "conform"))
-    if not binary.is_file():
-        raise SystemExit(f"MFTIK_CONFORM_BIN is not a file: {binary}")
+    binaries = {
+        "conform": binary_path("MFTIK_CONFORM_BIN", "conform"),
+        "md_watch": binary_path("MFTIK_MD_WATCH_BIN", "md_watch"),
+    }
     report_path = Path(os.environ.get("MFTIK_REPORT", "report-rootfs-rust.json")).resolve()
     work = Path(tempfile.mkdtemp(prefix="mftik-rust-rootfs-"))
     registry = None
@@ -51,13 +57,27 @@ def main() -> None:
         port, registry = start_registry(work)
         home = work / "home"
         (home / ".docker").mkdir(parents=True)
-        digest = pack(checkout, binary, port, home)
-        pulled = check_image(checkout, work, port, digest)
+        packer = build_packer(checkout, home)
+        digests = {
+            name: pack(packer, binary, name, port, home) for name, binary in binaries.items()
+        }
+        pulled = {
+            name: check_image(checkout, work / f"artifact-{name}", port, name, digest)
+            for name, digest in digests.items()
+        }
         stop_registry(registry)
         registry = None
-        rootfs = require_image(pulled, digest, binary.read_bytes(), sdk_version())
-        entry = require_entrypoint(rootfs, pulled.get("entrypoint"))
-        run_conformance(tool, rootfs, entry, report_path, work)
+        version = sdk_version()
+        rootfs = {
+            name: require_image(
+                pulled[name], name, digests[name], binaries[name].read_bytes(), version
+            )
+            for name in binaries
+        }
+        entry = require_entrypoint(rootfs["conform"], pulled["conform"].get("entrypoint"))
+        run_conformance(tool, rootfs["conform"], entry, report_path, work)
+        require_entrypoint(rootfs["md_watch"], pulled["md_watch"].get("entrypoint"))
+        run_md_watch(rootfs["md_watch"])
     except Exception:
         print(f"mftik rust rootfs conformance kept {work}", file=sys.stderr)
         raise
@@ -68,30 +88,42 @@ def main() -> None:
             stop_registry(registry)
 
 
+def binary_path(variable: str, name: str) -> Path:
+    binary = Path(os.environ.get(variable, REPO / "target" / "release" / name))
+    if not binary.is_file():
+        raise SystemExit(f"{variable} is not a file: {binary}")
+    return binary
+
+
 def sdk_version() -> str:
     """``v`` and the workspace version, the replacement mftik-rt's build info names."""
     with (REPO / "Cargo.toml").open("rb") as handle:
         return "v" + tomllib.load(handle)["workspace"]["package"]["version"]
 
 
-def pack(checkout: Path, binary: Path, port: int, home: Path) -> str:
-    """Build the pinned mftiko-pack, then run it with ``home`` as ``HOME``.
+def build_packer(checkout: Path, home: Path) -> Path:
+    """The pinned mftiko-pack, built next to ``home``.
 
-    It is built first so ``go`` keeps its own module cache instead of filling
-    ``home`` with read-only modules.
+    It is built before any pack runs with ``home`` as ``HOME``, so ``go`` keeps
+    its own module cache instead of filling ``home`` with read-only modules.
     """
     tool = home.parent / "mftiko-pack"
     run(["go", "build", "-o", str(tool), "./cmd/mftiko-pack"], cwd=checkout)
+    return tool
+
+
+def pack(tool: Path, binary: Path, name: str, port: int, home: Path) -> str:
+    """Push ``binary`` as ``mftik/<name>:<name>`` and return the manifest digest."""
     cmd = [
         str(tool),
         "-bin",
         str(binary.resolve()),
         "-name",
-        "conform",
+        name,
         "-repo",
-        f"127.0.0.1:{port}/mftik/conform",
+        f"127.0.0.1:{port}/mftik/{name}",
         "-tag",
-        "conform",
+        name,
         "-plain-http",
     ]
     env = os.environ.copy()
@@ -108,8 +140,7 @@ def pack(checkout: Path, binary: Path, port: int, home: Path) -> str:
     return lines[0]
 
 
-def check_image(checkout: Path, work: Path, port: int, digest: str) -> dict[str, object]:
-    data = work / "artifact-data"
+def check_image(checkout: Path, data: Path, port: int, name: str, digest: str) -> dict[str, object]:
     data.mkdir()
     stdout = go(
         checkout,
@@ -118,7 +149,7 @@ def check_image(checkout: Path, work: Path, port: int, digest: str) -> dict[str,
             "-registry",
             f"127.0.0.1:{port}",
             "-repository",
-            "mftik/conform",
+            f"mftik/{name}",
             "-digest",
             digest,
             "-data",
@@ -133,7 +164,9 @@ def check_image(checkout: Path, work: Path, port: int, digest: str) -> dict[str,
     return parsed
 
 
-def require_image(report: dict[str, object], digest: str, program: bytes, version: str) -> Path:
+def require_image(
+    report: dict[str, object], name: str, digest: str, program: bytes, version: str
+) -> Path:
     """The manifest mftiko-pack writes, and a rootfs that holds only the binary.
 
     mftiko-pack writes ``runtime`` and ``sdk.lang`` as ``go`` for every binary
@@ -142,7 +175,7 @@ def require_image(report: dict[str, object], digest: str, program: bytes, versio
     want: dict[str, object] = {
         "digest": digest,
         "kind": "strategy",
-        "name": "conform",
+        "name": name,
         "os": "linux",
         "arch": "amd64",
         "contracts": CONTRACTS,
@@ -166,6 +199,17 @@ def require_image(report: dict[str, object], digest: str, program: bytes, versio
     if (rootfs / "bin" / "strategy").read_bytes() != program:
         raise SystemExit("bin/strategy is not the packed binary")
     return rootfs
+
+
+def run_md_watch(rootfs: Path) -> None:
+    """md_watch's e2e test, with the worker started from ``rootfs`` (E08-D009)."""
+    env = os.environ.copy()
+    env["MFTIK_MD_WATCH_ROOTFS"] = str(rootfs)
+    cmd = [sys.executable, str(MD_WATCH_TEST), "-v"]
+    print("+", f"MFTIK_MD_WATCH_ROOTFS={rootfs}", " ".join(cmd), file=sys.stderr)
+    proc = subprocess.run(cmd, cwd=REPO, env=env, check=False)
+    if proc.returncode != 0:
+        raise SystemExit(f"md_watch e2e in its rootfs exited {proc.returncode}")
 
 
 if __name__ == "__main__":

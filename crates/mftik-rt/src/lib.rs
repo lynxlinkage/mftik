@@ -75,3 +75,19 @@ pub use strategy::{
     RejectHandler, RejectedRequest, Strategy, Td, Ticker, TickerHandler, Trade, TradeHandler,
     topic,
 };
+
+/// User guide under `docs/rust/`. Each page is compiled as rustdoc tests
+/// (E08-D008): `cargo test --doc` type-checks every Rust fence.
+#[cfg(doctest)]
+mod user_docs {
+    #[doc = include_str!("../../../docs/rust/README.md")]
+    mod readme {}
+    #[doc = include_str!("../../../docs/rust/install.md")]
+    mod install {}
+    #[doc = include_str!("../../../docs/rust/lifecycle.md")]
+    mod lifecycle {}
+    #[doc = include_str!("../../../docs/rust/context.md")]
+    mod context {}
+    #[doc = include_str!("../../../docs/rust/pack.md")]
+    mod pack {}
+}
