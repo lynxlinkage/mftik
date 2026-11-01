@@ -89,4 +89,4 @@ printf '%s\n' "$PWD/examples/python" > "$site/mftik-conform.pth"
 bin/mftiko-conformance -json report.json -- .venv/bin/python -m mftik.run conform:Conform
 ```
 
-Example strategies are [`md_watch`](examples/python/md_watch) (market data), [`maker`](examples/python/maker) (orders), and [`stateful`](examples/python/stateful) (a fill count kept in the volume). Each directory has an English README and `test_e2e.py`. The `examples` CI job installs the `mftik-abi3-wheel` artifact, runs those tests, and packs each strategy once without pushing.
+Example strategies are [`md_watch`](examples/python/md_watch) (market data), [`maker`](examples/python/maker) (orders), [`stateful`](examples/python/stateful) (a fill count kept in the volume), [`pretrained`](examples/python/pretrained) (a read-only input), and [`sampler`](examples/python/sampler) (`now` and `rand`). Each directory has an English README and `test_e2e.py`. The `examples` CI job installs the `mftik-abi3-wheel` artifact, runs those tests, and packs each strategy once without pushing.

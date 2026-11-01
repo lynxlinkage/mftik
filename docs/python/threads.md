@@ -16,7 +16,7 @@ Do not run an asyncio loop on this thread and then block a hook waiting for it. 
 
 ## What may leave the hook
 
-`Context` is valid only inside the hook that received it. Using it after the hook returns, or from any other thread, raises `ContextError`. The message is `mftik.Context is only valid inside the hook that received it`.
+`Context` is valid only inside the hook that received it. Using it after the hook returns, or from any other thread, raises `ContextError`. The message is `mftik.Context is only valid inside the hook that received it`. `now` is the exception: it is the start of the hook running on this thread, or the time now when none is. It does not raise `ContextError`. `rand` still raises `ContextError` on a stale context.
 
 `book` returns a `BookView` or `None`. The view is valid only inside that same hook. Using it later, or from another thread, raises `ContextError` with the message `mftik.BookView is only valid inside the hook that received it`. The lists from `bids` and `asks` are copies. Those lists, and the copies returned by `order`, `open_orders`, `position`, and `balance`, are ordinary objects and stay usable after the hook returns.
 

@@ -3,6 +3,7 @@
 //! A `Context` handed to a hook stores only a token. The token matches the
 //! hook's thread-local scope, so using it after the hook returns, or from any
 //! other thread, raises `mftik.ContextError` instead of touching the runtime.
+//! `now` is the exception: outside a hook it is the time now (E07-D013).
 //! [`Poster`] is the one object that may cross threads. A [`PyBookView`] is
 //! the same kind of token: each method borrows the book again, and the levels
 //! it returns are owned copies (E04-D051, E04-D052).
@@ -13,9 +14,11 @@ use std::time::Duration;
 
 use mftik_core::book::OrderBook;
 use mftik_core::mdpath::ReadError as MdReadError;
+use mftik_rt::clock::Clock;
 use mftik_rt::{Context, Poster};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyTuple};
 
 use crate::log::PyLog;
@@ -29,6 +32,11 @@ use crate::{
 
 static HOOK_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+/// `Context.rand`'s `random.Random`, made from the session's seed on the
+/// first call (E07-D014). A process runs one session.
+static RANDOM: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+pub(crate) const NO_SEED: &str = "sdk: the session has no seed before OnInit";
 
 thread_local! {
     static ACTIVE: Cell<*const Active> = const { Cell::new(std::ptr::null()) };
@@ -106,6 +114,18 @@ fn context_ptr(token: u64) -> Option<*const Context<PyStrategy>> {
             return None;
         }
         Some(active.ctx)
+    })
+}
+
+/// The `Context` of the hook running on this thread, whatever its token.
+fn running_ptr() -> Option<*const Context<PyStrategy>> {
+    ACTIVE.with(|slot| {
+        let ptr = slot.get();
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: as in `context_ptr`, without the token check.
+        Some(unsafe { (*ptr).ctx })
     })
 }
 
@@ -190,7 +210,8 @@ pub(crate) fn delay_duration(seconds: f64) -> PyResult<Duration> {
 }
 
 fn py_context(py: Python<'_>, token: u64) -> PyResult<Py<PyContext>> {
-    Py::new(py, PyContext { token })
+    let clock = with_context(token, Context::clock)?;
+    Py::new(py, PyContext { token, clock })
 }
 
 /// Runs `callback(ctx)` as a hook. A Python exception becomes a panic whose
@@ -331,6 +352,8 @@ fn fail(py: Python<'_>, err: PyErr) -> Result<(), String> {
 #[pyclass(frozen, module = "mftik._mftik", name = "Context")]
 pub(crate) struct PyContext {
     token: u64,
+    /// The session clock, for `now` outside a hook.
+    clock: Clock,
 }
 
 #[pymethods]
@@ -369,6 +392,30 @@ impl PyContext {
 
     fn input_dir(&self, name: &str) -> PyResult<String> {
         with_context(self.token, |ctx| ctx.input_dir(name))
+    }
+
+    /// In a hook, its start in ns on the session clock, the same for every
+    /// call; with the event log on, its input's `t_ns`. Outside any hook,
+    /// the time now (E07-D013).
+    fn now(&self) -> i64 {
+        match running_ptr() {
+            // SAFETY: the pointer is this thread's live hook, as in `with_context`.
+            Some(ptr) => unsafe { &*ptr }.now_ns(),
+            None => self.clock.now_ns(),
+        }
+    }
+
+    /// The session's `random.Random`, seeded with the `init` frame's seed
+    /// on the first call and the same object after it (E07-D014).
+    fn rand(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some(seed) = with_context(self.token, Context::seed)? else {
+            return Err(crate::error::Error::new_err(NO_SEED));
+        };
+        let random = RANDOM.get_or_try_init(py, || {
+            let random = py.import("random")?.getattr("Random")?;
+            random.call1((seed,)).map(Bound::unbind)
+        })?;
+        Ok(random.clone_ref(py))
     }
 
     /// SYM lookup. Only OnInit and OnStart succeed. The wait releases the GIL
@@ -610,7 +657,10 @@ mod tests {
         let _guard = crate::lock_python_tests();
         Python::initialize();
         Python::attach(|py| {
-            let ctx = PyContext { token: 0 };
+            let ctx = PyContext {
+                token: 0,
+                clock: Clock::new(),
+            };
             let Err(err) = ctx.log() else {
                 panic!("log outside a hook returned a logger");
             };

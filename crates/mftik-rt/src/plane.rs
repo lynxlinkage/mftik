@@ -176,15 +176,34 @@ impl<S: Strategy> Plane<S> {
         Ok(plane)
     }
 
-    /// Runs `f` with the strategy and a hook's [`Context`].
+    /// Runs `f` with the strategy and a hook's [`Context`]. Once Init has
+    /// the dispatcher, every hook through here is one the dispatcher runs,
+    /// and [`Context::now_ns`] is its start; before that the start is now.
     pub(crate) fn in_hook<R>(self: &Arc<Self>, f: impl FnOnce(&mut S, &Context<S>) -> R) -> R {
+        let start_ns = self.disp.get().is_none().then(|| self.clock.now_ns());
+        self.in_hook_at(start_ns, f)
+    }
+
+    /// [`Plane::in_hook`] for a hook that started at `start_ns`. `None` is
+    /// the dispatcher's running hook.
+    fn in_hook_at<R>(
+        self: &Arc<Self>,
+        start_ns: Option<i64>,
+        f: impl FnOnce(&mut S, &Context<S>) -> R,
+    ) -> R {
         let mut strategy = self.strategy.lock().unwrap_or_else(PoisonError::into_inner);
-        let ctx = Context::new(Arc::clone(self));
+        let ctx = Context::new(Arc::clone(self), start_ns);
         f(&mut strategy, &ctx)
     }
 
     pub(crate) fn session(&self) -> Option<&Session> {
         self.session.get()
+    }
+
+    /// The session clock: the dispatcher's injected clock and the event
+    /// log's both read it (E03-D004).
+    pub(crate) fn clock(&self) -> Clock {
+        self.clock
     }
 
     /// `Report.event_log`: present only while the event log is on (Go
@@ -351,29 +370,33 @@ impl<S: Strategy> Plane<S> {
     }
 
     /// Runs a hook the dispatcher does not run: OnInit, OnStart, and an
-    /// OnStop before Run (Go `outside`). With the event log on, `input` is
-    /// written first, stamped with the hook's start, and a `hook_end` after.
-    /// A panic's frames are flushed to the file at once, waiting at most
-    /// five seconds: the process may end before its exit closes the log
-    /// (E07-D012).
+    /// OnStop before Run (Go `outside`). Its start is [`Context::now_ns`].
+    /// With the event log on, `input` is written first, stamped with that
+    /// start, and a `hook_end` after. A panic's frames are flushed to the
+    /// file at once, waiting at most five seconds: the process may end
+    /// before its exit closes the log (E07-D012).
     fn outside(
         self: &Arc<Self>,
         input: Option<Input>,
         hook: impl FnOnce(&mut S, &Context<S>) -> Result<(), HookError>,
     ) -> Result<(), CallError> {
         let rec = self.recorder();
+        let start_ns = match rec {
+            Some(rec) => rec.now_ns(),
+            None => self.clock.now_ns(),
+        };
         let seq = rec.zip(input).map(|(rec, input)| {
             rec.append(
                 input.kind,
                 input.flags,
                 input.recv_ns,
-                rec.now_ns(),
+                start_ns,
                 input.r#ref,
                 &input.head,
                 &input.body,
             )
         });
-        let result = catch_unwind(AssertUnwindSafe(|| self.in_hook(hook)));
+        let result = catch_unwind(AssertUnwindSafe(|| self.in_hook_at(Some(start_ns), hook)));
         if let (Some(rec), Some(seq)) = (rec, seq) {
             let (flags, text) = match &result {
                 Ok(Ok(())) => (0, String::new()),
@@ -1247,12 +1270,90 @@ mod tests {
                 ctx.fetch_open_interest(1, |_, _, _| {}),
                 Err(Error::Stopping)
             );
+            assert_eq!(ctx.seed(), None);
+            // The hook started when the plane called it.
+            let now = ctx.now_ns();
+            thread::sleep(Duration::from_millis(1));
+            assert_eq!(ctx.now_ns(), now);
+            assert!(now < ctx.clock().now_ns());
             // No dispatcher yet: these are dropped, as Go.
             ctx.after(Duration::ZERO, |s, _| s.seen.push("after".into()));
             ctx.post(|s, _| s.seen.push("post".into()));
             ctx.exit();
         });
         assert!(seen(&plane).is_empty());
+    }
+
+    /// Each hook's `now_ns`, read twice 1ms apart, and its `seed`.
+    #[derive(Default)]
+    struct Times {
+        seen: Vec<(&'static str, i64, i64, Option<u64>)>,
+    }
+
+    impl Times {
+        fn note(&mut self, hook: &'static str, ctx: &Context<Self>) {
+            let now = ctx.now_ns();
+            thread::sleep(Duration::from_millis(1));
+            self.seen.push((hook, now, ctx.now_ns(), ctx.seed()));
+        }
+    }
+
+    impl Strategy for Times {
+        fn on_init(&mut self, ctx: &Context<Self>) -> Result<(), HookError> {
+            self.note("init", ctx);
+            Ok(())
+        }
+        fn on_start(&mut self, ctx: &Context<Self>) -> Result<(), HookError> {
+            self.note("start", ctx);
+            ctx.post(|s, ctx| s.note("post", ctx));
+            Ok(())
+        }
+        fn on_stop(&mut self, ctx: &Context<Self>) {
+            self.note("stop", ctx);
+        }
+    }
+
+    fn start_payload() -> Vec<u8> {
+        StartPayload {
+            bindings: Some(Bindings::default()),
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn without_the_log_now_is_when_the_plane_or_the_dispatcher_started_the_hook() {
+        let io = Io::start().expect("io thread");
+        let clock = Clock::new();
+        let plane = Plane::start(Times::default(), io.clone(), clock, Timers::new(io, clock))
+            .expect("plane");
+        open_offline(&plane);
+        let before = clock.now_ns();
+        assert_eq!(
+            plane.start_call(&start_payload(), &CallCtx::background()),
+            Ok(())
+        );
+        let queued = clock.now_ns();
+        thread::sleep(Duration::from_millis(1));
+        let disp = plane.dispatcher().expect("dispatcher");
+        assert!(disp.run_one());
+        assert_eq!(plane.on_stop_direct(), Ok(()));
+        let after = clock.now_ns();
+        let seen = plane.in_hook(|s, _| s.seen.clone());
+        let [start, post, stop] = [0, 1, 2].map(|i| seen[i].1);
+        // OnStart and OnStop read the clock as they start. The post starts at
+        // the dispatcher's clock, which the post moved when it queued.
+        assert!(before <= start && start <= queued, "{seen:?}");
+        assert!(start <= post && post <= queued, "{seen:?}");
+        assert!(queued < stop && stop <= after, "{seen:?}");
+        assert_eq!(post, disp.hook_start_ns());
+        assert_eq!(
+            seen,
+            [
+                ("start", start, start, None),
+                ("post", post, post, None),
+                ("stop", stop, stop, None),
+            ]
+        );
     }
 
     // ---------- the event log ----------
@@ -1391,6 +1492,43 @@ mod tests {
         );
         assert_eq!(frames[1].body, b"no venue");
         assert_eq!(frames[3].body, b"boom");
+    }
+
+    #[test]
+    fn with_the_log_now_is_the_t_ns_of_the_hooks_input() {
+        let log = Scratch::open();
+        let plane = logged(Times::default(), &log);
+        assert_eq!(
+            plane.start_call(&start_payload(), &CallCtx::background()),
+            Ok(())
+        );
+        assert!(plane.dispatcher().expect("dispatcher").run_one());
+        assert_eq!(plane.on_stop_direct(), Ok(()));
+        let seen = plane.in_hook(|s, _| s.seen.clone());
+
+        let frames = log.close();
+        assert_eq!(
+            lines(&frames),
+            [
+                "1 start",
+                "2 hook_end ref=1",
+                "3 post ref=1",
+                "4 hook_end ref=3",
+                "5 onstop",
+                "6 hook_end ref=5",
+                "7 end",
+            ]
+        );
+        let t = |i: usize| frames[i].t_ns;
+        // Without Init there is no seed.
+        assert_eq!(
+            seen,
+            [
+                ("start", t(0), t(0), None),
+                ("post", t(2), t(2), None),
+                ("stop", t(4), t(4), None),
+            ]
+        );
     }
 
     #[test]

@@ -1,0 +1,7 @@
+name: sampler-abc
+sts_instance: sts-1
+strategy:
+  repository: registry.example/acme/strategies/sampler
+  ref: v1.1.0
+params:
+  every_s: 30

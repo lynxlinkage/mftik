@@ -591,6 +591,17 @@ impl Dispatcher {
         self.shared.rec.as_ref().map(|rec| rec.log.now_ns())
     }
 
+    /// When the running hook started, `Context.now` (E07-D013). With the
+    /// event log on it is the `t_ns` of the hook's input, the log's clock at
+    /// the start; without it, the injected clock as the hook began. Neither
+    /// reads a clock (E07-D009). Between hooks it is the last hook's start.
+    pub fn hook_start_ns(&self) -> i64 {
+        match &self.shared.rec {
+            Some(rec) => rec.start_ns.load(Ordering::Relaxed),
+            None => lock(&self.shared.mu).hook_start_ns,
+        }
+    }
+
     /// The event log, for the frames the host writes outside a hook's input
     /// and `hook_end`: an order or a read as the strategy made it. `None`
     /// without the log.

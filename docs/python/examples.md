@@ -1,6 +1,6 @@
 # Examples
 
-Four strategies live under `examples/python`: `md_watch`, `maker`, `stateful`, and `pretrained`. Each directory has an English README and `test_e2e.py`. A session starts the class with `python -m mftik.run module:Class`. The class is constructed with no arguments. Settings come from `params`, which is the session's `InitPayload.params` JSON. `pretrained` reads an input instead. The platform does not interpret that JSON. None of these files names a venue or a product.
+Five strategies live under `examples/python`: `md_watch`, `maker`, `stateful`, `pretrained`, and `sampler`. Each directory has an English README and `test_e2e.py`. A session starts the class with `python -m mftik.run module:Class`. The class is constructed with no arguments. Settings come from `params`, which is the session's `InitPayload.params` JSON. `pretrained` reads an input instead. The platform does not interpret that JSON. None of these files names a venue or a product.
 
 Every listing below is a range of one of those files. The info string is the path and the inclusive line numbers. `scripts/check-python-doc-snippets` compares the listing to those lines. A hook records itself with `ctx.log`. That is one JSON object per line on stderr. The runtime's gate line stays on stdout.
 
@@ -10,6 +10,7 @@ Every listing below is a range of one of those files. The info string is the pat
 | `maker` | `python -m mftik.run maker:Maker` | `submit`, `cancel`, `batch_cancel`, `open_orders`, and `position` |
 | `stateful` | `python -m mftik.run stateful:Stateful` | A fill count restored with `read` and replaced with `write` |
 | `pretrained` | `python -m mftik.run pretrained:Pretrained` | A model read in `on_init` from a read-only input |
+| `sampler` | `python -m mftik.run sampler:Sampler` | `now` and `rand` on every hook. It does not send orders |
 
 ## md_watch
 
@@ -246,3 +247,55 @@ The first `on_recon` for the account reads `position` and `open_orders`. Open or
 `on_init` reads `weights.json` from `ctx.input_dir("model")` and keeps it in memory. The input is a data artifact uploaded with `mftiko-pack data`. [Volume and inputs](volume.md#pretrained-models) quotes the hook, the upload command, and the session file's `inputs`.
 
 `pretrained` is started with `python -m mftik.run pretrained:Pretrained`. Its pack command uses `-dir examples/python/pretrained` and `-target pretrained:Pretrained`. Besides its own `test_e2e.py`, `tests/python/data_input_e2e.py` packs it and runs it from the rootfs against a real data artifact.
+
+## sampler
+
+`on_init` keeps the session's `random.Random`. Each hook logs `now` twice (the same start time), whether `rand` returned that same object, and one `getrandbits(64)` draw.
+
+```python examples/python/sampler/sampler.py:73-77
+    def on_init(self, ctx: mftik.Context) -> None:
+        params = _parse(ctx.params())
+        self._every = params.every_s
+        self._rng = ctx.rand()
+        self._stamp(ctx, "OnInit")
+```
+
+```python examples/python/sampler/sampler.py:79-81
+    def on_start(self, ctx: mftik.Context) -> None:
+        ctx.after(self._every, self._on_timer)
+        self._stamp(ctx, "OnStart")
+```
+
+```python examples/python/sampler/sampler.py:90-104
+    def _stamp(self, ctx: mftik.Context, hook: str) -> None:
+        rng = self._rng
+        if rng is None:
+            raise RuntimeError("sampler: rand is missing")
+        now = ctx.now()
+        _log(
+            ctx,
+            {
+                "hook": hook,
+                "now": now,
+                "again": ctx.now(),
+                "same": ctx.rand() is rng,
+                "draw": rng.getrandbits(64),
+            },
+        )
+```
+
+`sampler` is started with `python -m mftik.run sampler:Sampler`. Its pack command is the same shape as `md_watch`.
+
+```bash examples/python/sampler/README.md:20-20
+python -m mftik.run sampler:Sampler
+```
+
+```bash examples/python/sampler/README.md:24-29
+python -m mftik.pack \
+  -dir examples/python/sampler \
+  -target sampler:Sampler \
+  -name sampler \
+  -repo 127.0.0.1:9/mftik/sampler \
+  -no-push
+```
+
