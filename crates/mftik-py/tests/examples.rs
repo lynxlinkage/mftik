@@ -1,8 +1,13 @@
-//! Example strategies through `python -m mftik.run` (E05-03, E05-D031).
+//! Example strategies through `python -m mftik.run` (E05-03, E05-D031), or as
+//! a strategy binary (E08-D009).
 //!
-//! `examples/python/*/test_e2e.py` writes a scenario and runs this ignored
-//! test. The shim, nats-server, and the MD, TD, and SYM peers live here.
-//! `cargo test --workspace` compiles this file and does not run it.
+//! `examples/python/*/test_e2e.py` and `examples/rust/md_watch/test_e2e.py`
+//! write a scenario and run this ignored test. The shim, nats-server, and the
+//! MD, TD, and SYM peers live here. A scenario with `program` runs that binary
+//! instead of Python, from `cwd` when it is set, with only the shim's
+//! variables, as a shim starts a packed image (PROTOCOL §4.6). Its Hello must
+//! carry [`mftik_rt::RELEASE`], which is what `mftik_rt::run(strategy, None)`
+//! sends. `cargo test --workspace` compiles this file and does not run it.
 
 use std::fs;
 use std::io::Read;
@@ -40,8 +45,14 @@ const SNAPSHOT_SEQ: u64 = 5;
 
 #[derive(Deserialize)]
 struct Scenario {
+    #[serde(default)]
     spec: String,
+    #[serde(default)]
     pythonpath: String,
+    #[serde(default)]
+    program: Option<PathBuf>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
     params: Value,
     ticker: String,
     uid: u32,
@@ -394,6 +405,23 @@ fn package_version() -> String {
     String::from_utf8(output.stdout).expect("version is utf-8")
 }
 
+/// The worker, and the `Hello.release` it must send.
+fn worker_for(scenario: &Scenario) -> (WorkerSpawn, String) {
+    if let Some(program) = &scenario.program {
+        let mut worker = WorkerSpawn::new(program).env_clear();
+        if let Some(dir) = &scenario.cwd {
+            worker = worker.current_dir(dir);
+        }
+        return (worker, mftik_rt::RELEASE.to_owned());
+    }
+    let worker = WorkerSpawn::new(python_bin())
+        .args(["-m", "mftik.run", &scenario.spec])
+        .env("PYTHONPATH", &scenario.pythonpath)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env_remove("MFTIK_RELEASE");
+    (worker, package_version())
+}
+
 fn bindings_for(scenario: &Scenario) -> Bindings {
     let mut feeds = Vec::new();
     if scenario.feeds.iter().any(|feed| feed == "trade") {
@@ -677,11 +705,7 @@ fn drive() {
     let peer = Peer::connect(&nats);
     peer.serve(&scenario);
 
-    let mut worker = WorkerSpawn::new(python_bin())
-        .args(["-m", "mftik.run", &scenario.spec])
-        .env("PYTHONPATH", &scenario.pythonpath)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .env_remove("MFTIK_RELEASE");
+    let (mut worker, release) = worker_for(&scenario);
     let input = TempDir::new("input");
     if let Some(data) = &scenario.input_data {
         let dir = input.0.join(&scenario.input_name);
@@ -694,7 +718,7 @@ fn drive() {
         fs::write(shim.volume.0.join(&scenario.volume_name), data).expect("volume seed");
     }
 
-    expect_hello(&mut shim, &package_version());
+    expect_hello(&mut shim, &release);
     init(&shim, payload_for(&nats, &scenario), 5000);
     expect_applied(&mut shim, "live-1");
     expect_done(&mut shim, Verb::Init, true, "");
