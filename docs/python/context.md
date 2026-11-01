@@ -1,6 +1,6 @@
 # Context
 
-Every hook receives a `Context`. It is the only way to read the session and to request work. The methods below raise `ContextError` when the object is used outside that hook. The subclasses of `Error` are listed in [Errors and exit codes](errors.md). Orders, the local book, and reads are also covered there when they fail.
+Every hook receives a `Context`. It is the only way to read the session and to request work. The methods below raise `ContextError` when the object is used outside that hook. `now` is the exception: outside a hook it is the time now. The subclasses of `Error` are listed in [Errors and exit codes](errors.md). Orders, the local book, and reads are also covered there when they fail.
 
 Instruments are UIDs after the first lookup. Resolve a ticker once, keep the UID, and call `info` afterwards. Do not resolve on every order.
 
@@ -15,6 +15,12 @@ Instruments are UIDs after the first lookup. Resolve a ticker once, keep the UID
 `volume_dir` returns the writable directory, kept across incarnations of the same session. It is empty when the session has none. `input_dir` returns the directory where the named input was unpacked, or an empty string when there is no input directory or `name` is not a relative path inside it. Pass that same relative file name to `read`. Writing files is described in [Volume and inputs](volume.md).
 
 `exit` requests outcome `DONE`. `fail` requests outcome `FAILED` and stores the reason. See [Lifecycle](lifecycle.md).
+
+## Time and random draws
+
+`now` returns when the hook running on this thread started, in nanoseconds on the session clock, the same origin as `md_ts_ns`. Every call in that hook returns the same value. With the event log on it is the `t_ns` of the hook's input. Outside any hook it is the time now. It does not raise `ContextError`.
+
+`rand` returns one `random.Random` for the session, seeded with the `init` frame's seed. The first call creates it; later calls return the same object. Calling it before OnInit, when there is no seed, raises `Error` with the message `sdk: the session has no seed before OnInit`. A stale context still raises `ContextError`. `sampler` logs `now` twice and one draw on every hook. See [Examples](examples.md).
 
 ## Instruments
 

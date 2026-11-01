@@ -45,11 +45,11 @@ A load failure uses the same `INIT_FAILED` ending. Its `Done.error` is `load mod
 | `NoFeed` | `sdk: the session has no such feed` |
 | `Stopping` | `sdk: the session is stopping` |
 
-`ContextError` means a `Context` or a `BookView` was used outside the hook that produced it. The messages are `mftik.Context is only valid inside the hook that received it` and `mftik.BookView is only valid inside the hook that received it`. See [Threads](threads.md).
+`ContextError` means a `Context` or a `BookView` was used outside the hook that produced it. The messages are `mftik.Context is only valid inside the hook that received it` and `mftik.BookView is only valid inside the hook that received it`. `now` does not raise `ContextError`: it is the start of the hook running on this thread, or the time now when none is. See [Threads](threads.md).
 
 `ReadError` is not raised by `tape`, `book_snapshot`, `fetch_klines`, or `fetch_open_interest`. Those methods hand it to the callback as the third argument. The message is the runtime's text. A timeout looks like `mdpath: md.view: context deadline exceeded`. A missing responder looks like `mdpath: md.fetch: nats: no responders available for request`.
 
-Other failures use the base `Error` and keep their text. A ticker `resolve` cannot find raises `Error` with a message that starts `symbol: no such instrument:`. `ValueError` and `TypeError` are used for arguments the SDK rejects before a session call, such as a bad `after` delay, a non-`Order` passed to `submit`, or a `str` passed as volume bytes. Those are Python's own exceptions, not subclasses of `Error`.
+Other failures use the base `Error` and keep their text. A ticker `resolve` cannot find raises `Error` with a message that starts `symbol: no such instrument:`. `rand` before OnInit raises `Error` with the message `sdk: the session has no seed before OnInit`. `ValueError` and `TypeError` are used for arguments the SDK rejects before a session call, such as a bad `after` delay, a non-`Order` passed to `submit`, or a `str` passed as volume bytes. Those are Python's own exceptions, not subclasses of `Error`.
 
 `submit` raises `ValueError` when `side`, `order_type`, or `tif` is an int the order path cannot store (`unknown side N`, and the same form for `order_type` and `tif`). The object may still hold that int. Proto enums such as `Side` keep an unknown int. `Origin` and `RejectedRequest` do not: constructing either with an unknown int raises `ValueError`.
 
