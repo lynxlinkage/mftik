@@ -2120,3 +2120,123 @@ fn with_the_log_the_queues_keep_inputs_and_times() {
     assert!(state.ring.keeps_times());
     assert!(state.td.keeps_inputs());
 }
+
+// ---------- Context.now (E07-D013) ----------
+
+type Starts = Arc<Mutex<Vec<(i64, i64)>>>;
+
+/// A hook that takes `hook_start_ns` before and after it moves the injected
+/// clock and, when there is one, the log's.
+fn start_twice(
+    dispatcher: &Dispatcher,
+    log: Option<&Arc<Memory>>,
+    starts: &Starts,
+) -> impl FnOnce() + Send + 'static {
+    let (inside, log, starts) = (dispatcher.clone(), log.cloned(), Arc::clone(starts));
+    move || {
+        let first = inside.hook_start_ns();
+        if let Some(log) = &log {
+            log.tick();
+        }
+        inside.set_now_ns(inside.now_ns() + MS);
+        lock(&starts).push((first, inside.hook_start_ns()));
+    }
+}
+
+/// A dispatcher whose OnStop takes `hook_start_ns` as [`start_twice`] does.
+/// Clear `me` when done: the OnStop holds it.
+fn with_start_on_stop(
+    log: Option<&Arc<Memory>>,
+    starts: &Starts,
+) -> (Dispatcher, Arc<Mutex<Option<Dispatcher>>>) {
+    let me = Arc::new(Mutex::new(None::<Dispatcher>));
+    let (stop_me, stop_log, stop_starts) = (Arc::clone(&me), log.cloned(), Arc::clone(starts));
+    let dispatcher = build(|config| {
+        if let Some(log) = log {
+            recorded(log)(config);
+        }
+        config.on_stop = Some(Box::new(move |_| {
+            let inside = lock(&stop_me).clone();
+            if let Some(inside) = inside {
+                start_twice(&inside, stop_log.as_ref(), &stop_starts)();
+            }
+            Ok(())
+        }));
+    });
+    *lock(&me) = Some(dispatcher.clone());
+    (dispatcher, me)
+}
+
+#[test]
+fn without_the_log_a_hook_starts_at_the_injected_clock_and_it_does_not_move() {
+    let starts = Starts::default();
+    let (dispatcher, me) = with_start_on_stop(None, &starts);
+    dispatcher.set_now_ns(T0 + 2 * MS);
+    dispatcher
+        .push_td(start_twice(&dispatcher, None, &starts))
+        .expect("td");
+    dispatcher
+        .post(start_twice(&dispatcher, None, &starts))
+        .expect("post");
+    let exiting = dispatcher.clone();
+    dispatcher.push_td(move || exiting.exit()).expect("exit");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    dispatcher.set_now_ns(T0 + 9 * MS);
+    assert!(stop(&dispatcher).is_ok());
+    *lock(&me) = None;
+    // Each hook moved the clock 1ms; OnStop starts where the host put it.
+    assert_eq!(
+        lock(&starts).as_slice(),
+        [
+            (T0 + 2 * MS, T0 + 2 * MS),
+            (T0 + 3 * MS, T0 + 3 * MS),
+            (T0 + 9 * MS, T0 + 9 * MS),
+        ]
+    );
+    assert_eq!(dispatcher.hook_start_ns(), T0 + 9 * MS);
+}
+
+#[test]
+fn with_the_log_a_hook_starts_at_its_inputs_t_ns_without_a_clock_read() {
+    let log = Memory::new();
+    let starts = Starts::default();
+    let (dispatcher, me) = with_start_on_stop(Some(&log), &starts);
+    let hook = || start_twice(&dispatcher, Some(&log), &starts);
+    dispatcher
+        .push_in(td_event(7, 0, b"ev-7"), hook())
+        .expect("td event");
+    // No input: the start is still taken, for record_input.
+    dispatcher.push_td(hook()).expect("td");
+    dispatcher.post(hook()).expect("post");
+    let exiting = dispatcher.clone();
+    dispatcher.push_td(move || exiting.exit()).expect("exit");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    assert!(stop(&dispatcher).is_ok());
+    *lock(&me) = None;
+    let starts: Vec<(String, String)> = lock(&starts)
+        .iter()
+        .map(|&(first, second)| (rel(first), rel(second)))
+        .collect();
+    assert_eq!(
+        starts,
+        [("0s", "0s"), ("1ms", "1ms"), ("2ms", "2ms"), ("3ms", "3ms")]
+            .map(|(first, second)| (first.to_owned(), second.to_owned()))
+    );
+    assert_eq!(
+        log.lines(),
+        [
+            r#"1 td_event ref=7 recv=0s t=0s "ev-7""#,
+            "2 hook_end ref=1 t=1ms",
+            "3 post ref=1 recv=0s t=2ms",
+            "4 hook_end ref=3 t=3ms",
+            "5 stop flags=1 recv=3ms t=3ms",
+            "6 onstop recv=3ms t=3ms",
+            "7 hook_end ref=6 t=4ms",
+        ]
+    );
+    let reads = log.reads();
+    assert_eq!(dispatcher.hook_start_ns(), T_LOG + 3 * MS);
+    assert_eq!(log.reads(), reads);
+}
