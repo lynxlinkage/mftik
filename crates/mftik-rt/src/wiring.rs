@@ -30,7 +30,8 @@
 //!   [`Wiring::watch_bindings_applied`] is what Report watches (§9.2.4,
 //!   `crate::report`).
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use mftik_core::mdpath::{ReadError, TapeQuery};
 use mftik_core::symbol::Info;
@@ -64,6 +65,8 @@ pub(crate) struct Wiring {
     applied: watch::Sender<Option<Version>>,
     pub(crate) sym: Sym,
     td: OnceLock<TdPath>,
+    /// Rows a replay seeded from recorded Resolve calls (`Info` by uid).
+    replay_infos: Mutex<HashMap<u32, Info>>,
 }
 
 impl Wiring {
@@ -156,7 +159,21 @@ impl Wiring {
     }
 
     pub(crate) fn info(&self, uid: u32) -> Result<Info, Error> {
+        if let Some(info) = lock(&self.replay_infos).get(&uid).cloned() {
+            return Ok(info);
+        }
         self.sym.info(uid).map_err(sym_error)
+    }
+
+    /// A replay's Resolve seeds the row `Info` returns and the MD path's
+    /// ticker/venue.
+    pub(crate) fn seed_info(&self, info: Info) {
+        self.rows.stored(&info);
+        lock(&self.replay_infos).insert(info.uid, info);
+    }
+
+    pub(crate) fn td(&self) -> Option<&TdPath> {
+        self.td.get()
     }
 
     pub(crate) fn submit(&self, order: Order) -> Result<String, Error> {
@@ -269,4 +286,8 @@ pub(crate) fn sym_error(err: symclient::Error) -> Error {
         symclient::Error::Closed => Error::Stopping,
         other => Error::Other(other.to_string()),
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

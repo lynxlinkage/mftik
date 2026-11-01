@@ -188,7 +188,7 @@ impl Rig {
                 clock,
                 timers,
                 disp: disp.clone(),
-                nats: client,
+                nats: Some(client),
                 recv_window: opts.recv_window,
                 hooks,
                 on_book: Arc::new(move |update| {
@@ -198,6 +198,8 @@ impl Rig {
                 log: Arc::new(move |line| {
                     let _ = lock(&md_log).send(Seen::Log(line.to_owned()));
                 }),
+                replay: false,
+                rec: None,
             },
             Arc::clone(&rows),
             applied_tx,

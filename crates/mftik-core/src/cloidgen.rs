@@ -116,6 +116,12 @@ pub fn slot() -> u64 {
     NEXT_SLOT.load(Ordering::SeqCst)
 }
 
+/// Sets the process counter to the `init` frame's slot so a replay issues
+/// the same client order ids (PROTOCOL §12.6).
+pub fn restore(slot: u64) {
+    NEXT_SLOT.store(slot, Ordering::SeqCst);
+}
+
 /// Take the next `(ts_ms, seq)`.
 ///
 /// `now_ms` before the counter, including a clock before the epoch, keeps

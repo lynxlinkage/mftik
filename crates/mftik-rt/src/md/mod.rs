@@ -43,7 +43,8 @@ use mftik_core::book::{Level, OrderBook};
 use mftik_core::bookpath::{self, Snapshot, SnapshotReply, TimerToken};
 use mftik_core::dispatch::{Dispatcher, Input};
 use mftik_core::eventlog::{
-    Kind, READ_BOOK_SNAPSHOT, READ_KLINES, READ_OPEN_INTEREST, READ_TAPE, outcome, put_str,
+    Kind, READ_BOOK_SNAPSHOT, READ_KLINES, READ_OPEN_INTEREST, READ_TAPE, Recorder, outcome,
+    put_str,
 };
 use mftik_core::mdpath::{
     self, Apply, Delivery, ReadKind, Reply, Request, RequestError, SubId, TapeQuery,
@@ -81,11 +82,13 @@ pub(crate) struct Config {
     pub(crate) clock: Clock,
     pub(crate) timers: Timers,
     pub(crate) disp: Dispatcher,
-    pub(crate) nats: async_nats::Client,
+    pub(crate) nats: Option<async_nats::Client>,
     pub(crate) recv_window: Duration,
     pub(crate) hooks: mdpath::Hooks,
     pub(crate) on_book: BookSink,
     pub(crate) log: Log,
+    pub(crate) replay: bool,
+    pub(crate) rec: Option<Arc<dyn Recorder>>,
 }
 
 /// The instruments this session has resolved, as the MD path reads them.
@@ -177,7 +180,7 @@ pub(crate) struct Md {
     clock: Clock,
     timers: Timers,
     disp: Dispatcher,
-    nats: async_nats::Client,
+    nats: Option<async_nats::Client>,
     rows: Arc<Rows>,
     applied: watch::Sender<Option<Version>>,
     on_book: BookSink,
@@ -193,7 +196,18 @@ pub(crate) struct Md {
     books: DispatcherCell<bookpath::Path>,
     /// The last read id. Counted with the event log on only, as Go's.
     reads: AtomicU64,
+    replay: bool,
+    rec: Option<Arc<dyn Recorder>>,
+    waiting: Mutex<HashMap<u64, WaitingRead>>,
     me: Weak<Md>,
+}
+
+/// A replayed read waiting for its recorded `read_reply`.
+type WaitingDone = Box<dyn FnOnce(&Md, Delivery) + Send>;
+
+struct WaitingRead {
+    ticket: mdpath::ReadTicket,
+    done: WaitingDone,
 }
 
 impl fmt::Debug for Md {
@@ -234,6 +248,9 @@ impl Md {
             subs: Mutex::default(),
             books: DispatcherCell::new(books),
             reads: AtomicU64::new(0),
+            replay: config.replay,
+            rec: config.rec,
+            waiting: Mutex::default(),
             me: me.clone(),
         }))
     }
@@ -253,16 +270,20 @@ impl Md {
             Apply::Unchanged => return Ok(()),
             Apply::Staged(subscribes) => subscribes,
         };
-        let Some(me) = self.me.upgrade() else {
-            return Err(mdpath::Error::Stopping.to_string());
-        };
-        let bound = self
-            .io
-            .block_on(async move { me.subscribe_all(subscribes).await });
-        if let Err(err) = bound {
-            let opened = lock(&self.path).apply_aborted();
-            self.unsubscribe(opened);
-            return Err(err);
+        if self.replay {
+            drop(subscribes);
+        } else {
+            let Some(me) = self.me.upgrade() else {
+                return Err(mdpath::Error::Stopping.to_string());
+            };
+            let bound = self
+                .io
+                .block_on(async move { me.subscribe_all(subscribes).await });
+            if let Err(err) = bound {
+                let opened = lock(&self.path).apply_aborted();
+                self.unsubscribe(opened);
+                return Err(err);
+            }
         }
         let (left, applied) = {
             let mut path = lock(&self.path);
@@ -284,13 +305,16 @@ impl Md {
     }
 
     async fn subscribe_all(self: Arc<Self>, effects: Vec<mdpath::Effect>) -> Result<(), String> {
+        let nats = self
+            .nats
+            .as_ref()
+            .ok_or_else(|| "mdpath: nil nats conn".to_owned())?;
         let mut any = false;
         for effect in effects {
             let mdpath::Effect::Subscribe { sub, subject } = effect else {
                 continue;
             };
-            let subscriber = self
-                .nats
+            let subscriber = nats
                 .subscribe(subject.clone())
                 .await
                 .map_err(|err| format!("mdpath: subscribe {subject}: {err}"))?;
@@ -301,7 +325,7 @@ impl Md {
             any = true;
         }
         if any {
-            flush(&self.nats).await?;
+            flush(nats).await?;
         }
         Ok(())
     }
@@ -360,7 +384,12 @@ impl Md {
         for (uid, tick) in self.rows.take_ticks() {
             books.resolve(uid, tick);
         }
-        f(&mut books, self.clock.now_ns())
+        let now = if self.replay {
+            self.disp.now_ns()
+        } else {
+            self.clock.now_ns()
+        };
+        f(&mut books, now)
     }
 
     /// bookpath's effects, in order, with the books unlocked so OnBook can
@@ -418,6 +447,15 @@ impl Md {
     /// of the same key replaces the last one, which then never fires.
     fn arm_book_timer(&self, token: TimerToken, deadline_ns: i64) {
         let me = self.me.clone();
+        if self.replay {
+            let _ = self.disp.timer(move || {
+                if let Some(md) = me.upgrade() {
+                    let effects = md.with_books(|books, now| books.on_timer(now, token));
+                    md.perform_book(effects);
+                }
+            });
+            return;
+        }
         let key = TimerKey::Book {
             uid: token.uid,
             kind: token.kind,
@@ -525,8 +563,18 @@ impl Md {
     /// `md reply dropped` line.
     fn send(&self, request: Request, done: impl FnOnce(&Md, Delivery) + Send + 'static) {
         let read = self.record_read(&request);
+        if self.replay {
+            lock(&self.waiting).insert(
+                read,
+                WaitingRead {
+                    ticket: request.ticket,
+                    done: Box::new(done),
+                },
+            );
+            return;
+        }
         let me = self.me.clone();
-        let client = self.nats.clone();
+        let client = self.nats.clone().expect("md nats");
         self.io.spawn(async move {
             let Request {
                 ticket,
@@ -566,11 +614,39 @@ impl Md {
         });
     }
 
+    /// Finish the replayed read `id` with its recorded `read_reply`.
+    pub(crate) fn replay_reply(&self, id: u64, flags: u16, body: &[u8]) -> Result<(), String> {
+        let waiting = lock(&self.waiting)
+            .remove(&id)
+            .ok_or_else(|| format!("mdpath: no replayed read waits for this reply: read {id}"))?;
+        let result = match flags {
+            outcome::OK => Ok(body),
+            outcome::TIMEOUT => Err(mdpath::RequestError::Timeout),
+            outcome::NO_RESPONDERS => Err(mdpath::RequestError::NoResponder),
+            _ => Err(mdpath::RequestError::Other(
+                String::from_utf8_lossy(body).into_owned(),
+            )),
+        };
+        let delivery = lock(&self.path).on_reply(
+            waiting.ticket,
+            result.as_ref().copied().map_err(Clone::clone),
+        );
+        let Some(delivery) = delivery else {
+            return Ok(());
+        };
+        (waiting.done)(self, delivery);
+        Ok(())
+    }
+
+    fn recorder(&self) -> Option<&Arc<dyn Recorder>> {
+        self.rec.as_ref().or_else(|| self.disp.recorder())
+    }
+
     /// Writes the `read_call` of one request and returns its read id, which
     /// the reply's `read_reply` carries. 0 with the event log off (Go
     /// `readCall`).
     fn record_read(&self, request: &Request) -> u64 {
-        let Some(rec) = self.disp.recorder() else {
+        let Some(rec) = self.recorder() else {
             return 0;
         };
         let flags = match request.kind {

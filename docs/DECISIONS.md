@@ -516,3 +516,10 @@ Yi Te 於 #473 核可。E07-05 補 `ctx.now()` 與 `ctx.rand()`（E07-D004）。
 與 Go 不同的地方。Go 的 `Now()` 是 step clock：執行中 hook 的開始，沒有 hook 時仍是上一個 hook 的開始。mftik 在 hook 外回傳當下時間（E07-D013）。Go 的 `Rand()` 是 `rand.New(rand.NewPCG(seed, 0))`；Python 是 `random.Random(seed)`（E07-D004）。關閉 log 時 hook 開始用注入的時鐘，不多讀一次（E07-D009）；Go 每次 beginHook 都讀牆鐘。
 
 測試：`mftik-core` 的 `src/dispatch/tests.rs` 測 log 關時 hook 開始是注入的時鐘且不移動、log 開時是輸入的 `t_ns` 且不讀時鐘。`mftik-rt` 的 `src/plane.rs` 測 OnInit／OnStart／OnStop 與 dispatcher hook 的開始，以及 Init 前 seed 是 `None`；`tests/eventlog_session.rs` 每個 hook 印兩次 `now_ns` 與 seed，對上輸入的 `t_ns` 與 `init` 的 `ref`。mftik-py 的 in-process 測試測同一 hook 內 `now` 不變、過期 context 的 `now` 是正在跑的 hook 的開始、hook 外會走、`rand` 在沒有 seed 時拋錯；`tests/session.rs` 以安裝的 wheel、開著 event log，確認每個 hook 的 `now` 是輸入的 `t_ns`，`rand().getrandbits(64)` 的序列與 `random.Random(init.ref)` 相同（python CI job）。
+
+## 決定（Yi Te，2026-11-01，E07-D016–E07-D019）
+
+- **E07-D016** 拆票：#474 只做 Rust 回放引擎與公開 Rust API `mftik_rt::replay`，以純 Rust conform 策略測試；Python `mftik.replay` 包裝與文件移到 E07-07 #485。
+- **E07-D017** 引擎沿用現有 frame reader 與 dispatcher，Now、Rand、Resolve、td/md 回覆、timer、Post 改為依紀錄注入，不連 NATS；行為對齊 Go PROTOCOL §12.6（比對項目、不重現的情況、cloid 自 init 計數器取號）。
+- **E07-D018** `ReplayReport` 欄位同 Go：`mismatches`、`inputs`、`skipped`、`missing`、`orders`、`reads`；每筆 mismatch 記 rec_seq、種類、紀錄值與回放值。hook 結束方式在 Rust 比 panic 訊息；Python 比例外類別與訊息（E07-07）。
+- **E07-D019** 驗收：錄製後回放零 mismatch；修改過的策略產生 mismatch；有缺號的紀錄正確計入 `missing`。phase 1 不比對 log（E07-D005）。

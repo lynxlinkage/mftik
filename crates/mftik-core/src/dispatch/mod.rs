@@ -39,6 +39,7 @@ pub(crate) mod envelope;
 mod ring;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -305,6 +306,10 @@ pub struct Config {
     /// The strategy event log (E07-D007). `None` records nothing, and the
     /// dispatcher keeps no receive times or inputs for it (E07-D009).
     pub rec: Option<Arc<dyn Recorder>>,
+    /// An offline replay: [`Dispatcher::step`] runs each recorded input.
+    /// Timers are not armed, nothing is queued, and a Post is kept for
+    /// [`Dispatcher::take_post`] (PROTOCOL §12.6).
+    pub replay: bool,
 }
 
 impl Default for Config {
@@ -322,6 +327,7 @@ impl Default for Config {
             arm_timer: None,
             disarm_timer: None,
             rec: None,
+            replay: false,
         }
     }
 }
@@ -355,6 +361,7 @@ struct Shared {
     rec: Option<Rec>,
     /// Timers numbered so far, the event log's timer ids (PROTOCOL §12.5).
     timers_made: AtomicU64,
+    replay: bool,
 }
 
 /// The event log, and the input of the hook that is running. Only the
@@ -406,6 +413,8 @@ struct State {
     exited: bool,
     /// [`Dispatcher::post`] calls with the log on, failed ones included.
     posts: u64,
+    /// Replay: each Post's fn by its number, for [`Dispatcher::take_post`].
+    kept: HashMap<u64, Box<dyn FnOnce() + Send>>,
 }
 
 struct TimerSlot {
@@ -506,6 +515,7 @@ impl Dispatcher {
                 stop_res: None,
                 exited: false,
                 posts: 0,
+                kept: HashMap::new(),
             }),
             cv: Condvar::new(),
             on_stop: Slot::new(config.on_stop),
@@ -518,6 +528,7 @@ impl Dispatcher {
             watch_name: format!("mftik-w{tag}"),
             rec: config.rec.map(Rec::new),
             timers_made: AtomicU64::new(0),
+            replay: config.replay,
         });
         Self { shared }
     }
@@ -611,9 +622,56 @@ impl Dispatcher {
 
     /// The next event log timer id, for a timer the host runs itself and
     /// queues with [`Dispatcher::push_in`]. [`Dispatcher::timer`] numbers
-    /// from the same sequence. 0 without the log.
+    /// from the same sequence. 0 without the log, unless this is a replay.
     pub fn number_timer(&self) -> u64 {
         self.shared.number_timer()
+    }
+
+    /// Runs `hook` as one replayed input whose recorded start was `t_ns`:
+    /// [`Dispatcher::now_ns`] and [`Dispatcher::hook_start_ns`] read `t_ns`
+    /// while it runs. A panic is returned instead of ending the session; the
+    /// replay compares it with the recorded `hook_end`.
+    pub fn step(&self, t_ns: i64, hook: impl FnOnce()) -> Option<Box<dyn Any + Send>> {
+        {
+            let mut state = lock(&self.shared.mu);
+            state.now_ns = t_ns;
+            state.hook_on = true;
+            state.hook_start_ns = t_ns;
+        }
+        if let Some(rec) = &self.shared.rec {
+            rec.start_ns.store(t_ns, Ordering::Relaxed);
+        }
+        let result = catch_unwind(AssertUnwindSafe(hook));
+        {
+            let mut state = lock(&self.shared.mu);
+            state.hook_on = false;
+        }
+        result.err()
+    }
+
+    /// The callback of the timer numbered `id`, for a replayed timer frame.
+    /// `None` when no such timer has been made.
+    pub fn timer_func(&self, id: u64) -> Option<Box<dyn FnOnce() + Send>> {
+        if id == 0 {
+            return None;
+        }
+        let index = {
+            let state = lock(&self.shared.mu);
+            state.timers.iter().position(|slot| slot.number == id)?
+        };
+        let shared = Arc::clone(&self.shared);
+        Some(Box::new(move || shared.invoke_timer(index)))
+    }
+
+    /// The fn of the Post numbered `id` in a replay. It is handed out once.
+    pub fn take_post(&self, id: u64) -> Option<Box<dyn FnOnce() + Send>> {
+        lock(&self.shared.mu).kept.remove(&id)
+    }
+
+    /// In a replay, the point where a session's ending closes the TD buffer:
+    /// just before OnStop. A Post from then on fails as it did.
+    pub fn close_td(&self) {
+        self.shared.close_td();
     }
 
     /// Copy one market-data message into the ring. A dropped message returns `Ok(())`.
@@ -771,7 +829,13 @@ impl Timer {
     /// Ask the host to fire at `now + delay`. A delay of zero is the current instant.
     /// A timer stopped by session shutdown returns `None` and does not arm.
     /// A run already queued is not duplicated; the host timer is still rearmed.
+    /// In a replay it does nothing: the log says when the timer ran.
     pub fn after(&self, delay: Duration) -> Option<i64> {
+        if self.shared.replay {
+            let delay_ns = duration_to_ns(delay);
+            let state = lock(&self.shared.mu);
+            return Some(state.now_ns.saturating_add(delay_ns));
+        }
         let delay_ns = duration_to_ns(delay);
         let deadline = {
             let mut state = lock(&self.shared.mu);
@@ -1304,6 +1368,19 @@ impl Shared {
     }
 
     fn post(&self, kind: TdKind) -> Result<(), PushError> {
+        if self.replay {
+            let TdKind::Once(hook) = kind else {
+                return Ok(());
+            };
+            let mut state = lock(&self.mu);
+            state.posts += 1;
+            if state.td_closed {
+                return Err(PushError::Closed);
+            }
+            let n = state.posts;
+            state.kept.insert(n, hook);
+            return Ok(());
+        }
         let result = {
             let mut state = lock(&self.mu);
             let input = self.rec.as_ref().map(|_| {
@@ -1330,7 +1407,7 @@ impl Shared {
         kind: TdKind,
         mut input: Option<Input>,
     ) -> Result<(), PushError> {
-        if state.td_closed || state.hung {
+        if self.replay || state.td_closed || state.hung {
             return Err(PushError::Closed);
         }
         if state.td.len() == TD_CAP {
@@ -1351,9 +1428,10 @@ impl Shared {
     }
 
     fn number_timer(&self) -> u64 {
-        match &self.rec {
-            Some(_) => self.timers_made.fetch_add(1, Ordering::Relaxed) + 1,
-            None => 0,
+        if self.rec.is_some() || self.replay {
+            self.timers_made.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            0
         }
     }
 
@@ -1663,6 +1741,17 @@ fn ms64(ns: i64) -> u64 {
         return 0;
     }
     u64::try_from((ns as u128) / NS_PER_MS).unwrap_or(u64::MAX)
+}
+
+/// How a hook ended, for a replay's comparison with the recorded `hook_end`.
+pub fn end_of(panicked: Option<&(dyn Any + Send)>, err: Option<&str>) -> (u16, Vec<u8>) {
+    if let Some(payload) = panicked {
+        (END_PANIC, panic_message(payload).into_bytes())
+    } else if let Some(text) = err {
+        (END_ERROR, text.as_bytes().to_vec())
+    } else {
+        (0, Vec::new())
+    }
 }
 
 fn panic_message(payload: &dyn Any) -> String {

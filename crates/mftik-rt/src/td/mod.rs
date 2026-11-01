@@ -38,7 +38,7 @@
 //!   round runs no hook. A Recon reply from `td.view` is the `td_view` input
 //!   of its OnRecon (§12.4, §12.5, E07-D011).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -50,7 +50,7 @@ use futures_util::StreamExt;
 use mftik_core::cloidgen;
 use mftik_core::dispatch::{self, Dispatcher, PushError};
 use mftik_core::eventlog::{
-    self, FROM_BATCH, Kind, OP_BATCH_CANCEL, OP_CANCEL, OP_RECON, OP_SUBMIT, outcome,
+    self, FROM_BATCH, Kind, OP_BATCH_CANCEL, OP_CANCEL, OP_RECON, OP_SUBMIT, Recorder, outcome,
 };
 use mftik_core::tdpath::{
     self, Bound, ClientOrderIdError, ClientOrderIds, Effect, Hook, ReconOutcome, RoundOutcome,
@@ -93,14 +93,21 @@ pub(crate) struct Config {
     pub(crate) session_id: String,
     pub(crate) recv_window: Duration,
     pub(crate) accounts: Vec<AccountDecl>,
-    pub(crate) nats: Client,
+    pub(crate) nats: Option<Client>,
     pub(crate) io: Io,
     pub(crate) timers: Timers,
     pub(crate) clock: Clock,
     pub(crate) disp: Dispatcher,
     pub(crate) deliver: DeliverTd,
     pub(crate) log: Log,
+    /// Offline replay: no NATS, order outputs go to [`Self::rec`].
+    pub(crate) replay: bool,
+    pub(crate) rec: Option<Arc<dyn Recorder>>,
+    /// Recorded `order_call` time and submit_gen by call id.
+    pub(crate) call: Option<ReplayCall>,
 }
+
+pub(crate) type ReplayCall = Arc<dyn Fn(u64) -> Option<(i64, u64)> + Send + Sync>;
 
 /// One session's TD path. Clones share it.
 #[derive(Clone)]
@@ -117,7 +124,7 @@ impl fmt::Debug for TdPath {
 }
 
 struct Inner {
-    nats: Client,
+    nats: Option<Client>,
     io: Io,
     timers: Timers,
     clock: Clock,
@@ -136,6 +143,9 @@ struct Inner {
     failed: AtomicBool,
     /// The last order call id. Counted with the event log on only, as Go's.
     calls: AtomicU64,
+    replay: bool,
+    rec: Option<Arc<dyn Recorder>>,
+    call: Option<ReplayCall>,
 }
 
 struct State {
@@ -148,6 +158,8 @@ struct State {
     chain: VecDeque<(Option<Hook>, Option<dispatch::Input>)>,
     /// A `resume` entry is on the TD buffer.
     queued: bool,
+    /// Replay: requests waiting for their recorded `order_reply`, by call id.
+    replay_rounds: HashMap<u64, RoundTicket>,
     #[cfg(test)]
     fed: u64,
 }
@@ -245,6 +257,7 @@ impl TdPath {
                 deferred: VecDeque::new(),
                 chain: VecDeque::new(),
                 queued: false,
+                replay_rounds: HashMap::new(),
                 #[cfg(test)]
                 fed: 0,
             }),
@@ -253,12 +266,17 @@ impl TdPath {
             closing: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             calls: AtomicU64::new(0),
+            replay: config.replay,
+            rec: config.rec,
+            call: config.call,
         });
-        inner.io.spawn(send_orders(
-            Arc::downgrade(&inner),
-            inner.nats.clone(),
-            outgoing,
-        ));
+        if !inner.replay
+            && let Some(nats) = inner.nats.clone()
+        {
+            inner
+                .io
+                .spawn(send_orders(Arc::downgrade(&inner), nats, outgoing));
+        }
         Ok(TdPath { inner })
     }
 
@@ -267,6 +285,10 @@ impl TdPath {
     /// that account's recon (Go `tdpath.Listen`). Blocks on the IO thread;
     /// call it from the plane's Start.
     pub(crate) fn listen(&self) -> Result<(), String> {
+        if self.inner.replay {
+            self.inner.lock().path.listen_replay();
+            return Ok(());
+        }
         let inner = &self.inner;
         let effects = inner.lock().path.listen().map_err(|err| err.to_string())?;
         let Some(api_ids) = effects.into_iter().find_map(|effect| match effect {
@@ -275,7 +297,10 @@ impl TdPath {
         }) else {
             return Ok(());
         };
-        let nats = inner.nats.clone();
+        let nats = inner
+            .nats
+            .clone()
+            .ok_or_else(|| "tdpath: nil nats conn".to_owned())?;
         let subscribed = inner.io.block_on(async move {
             let mut subs = Vec::with_capacity(api_ids.len());
             for api_id in api_ids {
@@ -322,6 +347,9 @@ impl TdPath {
     /// The first recon of every account, after OnStart (Go `tdpath.Recon`).
     /// Not an order call.
     pub(crate) fn recon(&self) -> Result<(), Error> {
+        if self.inner.replay {
+            return Ok(());
+        }
         self.inner.call(false, |path| path.recon_all())
     }
 
@@ -334,10 +362,13 @@ impl TdPath {
         }
         let mut state = inner.lock();
         let effects = state.path.request_recon(api_id).map_err(sdk_error)?;
-        if let Some(at_ns) = inner.disp.record_now() {
+        let (at_ns, _) = inner.call_time();
+        if inner.recorder().is_some() {
             inner.record_call(OP_RECON, at_ns, api_id, 0, &[]);
         }
-        inner.perform(&mut state, effects, None);
+        if !inner.replay {
+            inner.perform(&mut state, effects, None);
+        }
         Ok(())
     }
 
@@ -346,7 +377,7 @@ impl TdPath {
         if inner.closing() {
             return Err(Error::Stopping);
         }
-        let now_ns = inner.clock.now_ns();
+        let (now_ns, recorded_gen) = inner.call_time();
         let mut ids = ProcessIds {
             api_id: order.api_id,
         };
@@ -355,9 +386,9 @@ impl TdPath {
             .path
             .submit(order, now_ns.div_euclid(1_000_000), &mut ids)
             .map_err(sdk_error)?;
-        let call = inner.disp.recorder().map(|_| Call {
+        let call = inner.recorder().map(|_| Call {
             at_ns: now_ns,
-            submit_gen: submitted.submit_gen,
+            submit_gen: recorded_gen.unwrap_or(submitted.submit_gen),
             from_batch: false,
         });
         inner.perform(&mut state, submitted.effects, call);
@@ -397,6 +428,56 @@ impl TdPath {
         self.inner.lock().path.balance(api_id, asset)
     }
 
+    /// Apply a recorded `td_event` on the replay's hook thread.
+    pub(crate) fn replay_event(&self, api_id: i64, body: &[u8]) -> Result<(), String> {
+        let event = td::AccountEvent::decode(body).map_err(|err| err.to_string())?;
+        let effect = self
+            .inner
+            .lock()
+            .path
+            .replay_event(api_id, event)
+            .map_err(|err| err.to_string())?;
+        self.inner.replay_effect(effect)
+    }
+
+    /// Apply a recorded `td_view` Recon reply on the replay's hook thread.
+    pub(crate) fn replay_view(&self, api_id: i64, body: &[u8]) -> Result<(), String> {
+        let (generation, raw) = eventlog::parse_td_view(body).map_err(|err| err.to_string())?;
+        let reply = td::ViewReply::decode(raw).map_err(|err| err.to_string())?;
+        if !is_recon(&reply) {
+            return Err("tdpath: not a recon".into());
+        }
+        let effects = self
+            .inner
+            .lock()
+            .path
+            .replay_view(api_id, generation, reply)
+            .map_err(|err| err.to_string())?;
+        self.inner.replay_effects(effects)
+    }
+
+    /// Finish the replayed request of `call` with its recorded `order_reply`.
+    pub(crate) fn replay_reply(&self, call: u64, flags: u16, body: &[u8]) -> Result<(), String> {
+        let ticket = self
+            .inner
+            .lock()
+            .replay_rounds
+            .remove(&call)
+            .ok_or_else(|| {
+                format!("tdpath: no replayed request waits for this reply: call {call}")
+            })?;
+        let outcome = match flags {
+            outcome::OK => match td::OrderReply::decode(body) {
+                Ok(reply) => RoundOutcome::Reply(reply),
+                Err(_) => RoundOutcome::NoAnswer,
+            },
+            outcome::NO_RESPONDERS => RoundOutcome::NoResponder,
+            _ => RoundOutcome::NoAnswer,
+        };
+        let effects = self.inner.lock().path.on_order_round(ticket, outcome);
+        self.inner.replay_effects(effects)
+    }
+
     /// The dispatcher's `unsubscribe_td`, before the TD drain of `DONE` and
     /// `FAILED` (§9.2.5, E08-D003). The `td.evt` readers stop, recon backoffs
     /// are disarmed, and replies and events that arrive after this are not
@@ -430,6 +511,24 @@ impl Inner {
         self.closing.load(Ordering::SeqCst)
     }
 
+    fn replay_effects(self: &Arc<Self>, effects: Vec<Effect>) -> Result<(), String> {
+        for effect in effects {
+            if let Effect::Hook(hook) = effect {
+                self.replay_effect(Some(Effect::Hook(hook)))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_effect(self: &Arc<Self>, effect: Option<Effect>) -> Result<(), String> {
+        let Some(Effect::Hook(hook)) = effect else {
+            return Ok(());
+        };
+        (self.deliver)(*hook);
+        let _ = self.lock().path.end_hook();
+        Ok(())
+    }
+
     /// A tdpath call a hook makes. Its effects are sends, never hooks. With
     /// the event log on, its `td.order` requests are order calls at the
     /// call's clock; `from_batch` marks a BatchCancel's rounds.
@@ -443,7 +542,8 @@ impl Inner {
         }
         let mut state = self.lock();
         let effects = f(&mut state.path).map_err(sdk_error)?;
-        let call = self.disp.record_now().map(|at_ns| Call {
+        let (at_ns, _) = self.call_time();
+        let call = self.recorder().map(|_| Call {
             at_ns,
             submit_gen: 0,
             from_batch,
@@ -455,6 +555,29 @@ impl Inner {
     /// Writes one `order_call` and returns its call id, which the request's
     /// `order_publish` and `order_reply` carry. Under the state lock, so ids
     /// follow call order. 0 with the event log off (Go `Path.record`).
+    fn recorder(&self) -> Option<&Arc<dyn Recorder>> {
+        self.rec.as_ref().or_else(|| self.disp.recorder())
+    }
+
+    /// The clock of one order call. A replay reads the recorded call it is
+    /// about to repeat, so the client order id is made from that time.
+    fn call_time(&self) -> (i64, Option<u64>) {
+        if self.replay
+            && let Some(call) = &self.call
+        {
+            let next = self.calls.load(Ordering::Relaxed) + 1;
+            if let Some((ns, submit_gen)) = call(next) {
+                return (ns, Some(submit_gen));
+            }
+        }
+        let now = if self.replay {
+            self.disp.now_ns()
+        } else {
+            self.clock.now_ns()
+        };
+        (now, None)
+    }
+
     fn record_call(
         &self,
         flags: u16,
@@ -463,7 +586,7 @@ impl Inner {
         submit_gen: u64,
         cloids: &[&str],
     ) -> u64 {
-        let Some(rec) = self.disp.recorder() else {
+        let Some(rec) = self.recorder() else {
             return 0;
         };
         let mut body = Vec::new();
@@ -610,6 +733,21 @@ impl Inner {
                     wait,
                 } => {
                     let call = call.map_or(0, |call| self.record_order(call, api_id, &request));
+                    if self.replay {
+                        if let Some(rec) = self.recorder() {
+                            rec.append(
+                                Kind::ORDER_PUBLISH,
+                                0,
+                                0,
+                                rec.now_ns(),
+                                call,
+                                &request.encode_to_vec(),
+                                &[],
+                            );
+                        }
+                        state.replay_rounds.insert(call, ticket);
+                        continue;
+                    }
                     let _ = self.orders.send(Outgoing {
                         ticket,
                         call,
@@ -660,7 +798,7 @@ impl Inner {
         wait: Duration,
     ) {
         let weak = Arc::downgrade(self);
-        let nats = self.nats.clone();
+        let nats = self.nats.clone().expect("td nats");
         self.io.spawn(async move {
             let request = async_nats::Request::new()
                 .payload(body.into())
@@ -831,10 +969,10 @@ async fn send_orders(
             body,
             deadline,
         } = out;
-        let logged = this.disp.recorder().map(|_| body.clone());
+        let logged = this.recorder().map(|_| body.clone());
         match tokio::time::timeout_at(deadline, publish(&nats, subject, body)).await {
             Ok(Ok(sub)) => {
-                if let (Some(rec), Some(body)) = (this.disp.recorder(), logged) {
+                if let (Some(rec), Some(body)) = (this.recorder(), logged) {
                     rec.append(Kind::ORDER_PUBLISH, 0, 0, rec.now_ns(), call, &body, &[]);
                 }
                 let weak = Weak::clone(&inner);

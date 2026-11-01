@@ -580,6 +580,43 @@ impl Path {
         })
     }
 
+    /// Mark the path listening without subscribing, for an offline replay
+    /// (PROTOCOL §12.6). Submit and cancel then succeed; events are injected
+    /// with [`Self::replay_event`].
+    pub fn listen_replay(&mut self) {
+        self.listening = true;
+    }
+
+    /// Apply a recorded `td_event` as the hook that ran it: set the
+    /// account's seq and apply, without hold or gap checks.
+    pub fn replay_event(
+        &mut self,
+        api_id: i64,
+        event: td::AccountEvent,
+    ) -> Result<Option<Effect>, Error> {
+        if !self.accounts.contains_key(&api_id) {
+            return Err(Error::UnknownAccount);
+        }
+        if let Some(account) = self.accounts.get_mut(&api_id) {
+            account.seq = event.seq;
+        }
+        Ok(self.apply(api_id, event))
+    }
+
+    /// Apply a recorded `td_view` Recon reply without taking an in-flight
+    /// ask. The generation is the request's, as the body stored it.
+    pub fn replay_view(
+        &mut self,
+        api_id: i64,
+        generation: u64,
+        reply: td::ViewReply,
+    ) -> Result<Vec<Effect>, Error> {
+        if !self.accounts.contains_key(&api_id) {
+            return Err(Error::UnknownAccount);
+        }
+        Ok(self.accept_reply(api_id, generation, reply))
+    }
+
     /// Start listening. The returned subscribe must flush before
     /// [`Self::listen_bound`]. A second call after that is a no-op.
     #[must_use = "subscribe td.evt before listen_bound"]
