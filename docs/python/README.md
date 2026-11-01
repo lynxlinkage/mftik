@@ -13,6 +13,7 @@
 | [Pack and deploy](pack.md) | `python -m mftik.pack`, `StrategyRef.code`, and running a session with `mftiko` |
 | [Session spec](session.md) | Every field of the session file and what it means to a Python strategy |
 | [Volume and inputs](volume.md) | Durable files and read-only inputs |
+| [Replay](replay.md) | `replay`: run a strategy again over its event log and list the differences |
 | [Examples](examples.md) | `md_watch`, `maker`, `stateful`, `pretrained`, and `sampler`, quoted from `examples/python` |
 | [API reference](reference.md) | Every public name |
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import os
 import random
 from collections.abc import Callable
 from typing import Any, Self, final
@@ -24,6 +25,8 @@ __all__ = [
     "Stopping",
     "ReadError",
     "ContextError",
+    "ReplayError",
+    "ReplayReport",
     "Md",
     "Td",
     "Feed",
@@ -54,6 +57,7 @@ __all__ = [
     "_run",
     "_run_load_failed",
     "_registered_hooks",
+    "_run_replay",
     "session_contracts",
 ]
 
@@ -66,6 +70,7 @@ class NoFeed(Error): ...
 class Stopping(Error): ...
 class ReadError(Error): ...
 class ContextError(Error): ...
+class ReplayError(Error): ...
 
 class Origin(enum.IntEnum):
     from_td = 1
@@ -335,6 +340,20 @@ class Context:
     ) -> None: ...
 
 @final
+class ReplayReport:
+    session_id: str
+    incarnation: int
+    sdk_version: str
+    sdk_commit: str
+    inputs: int
+    skipped: int
+    missing: int
+    orders: int
+    reads: int
+    mismatches: tuple[str, ...]
+    def __repr__(self) -> str: ...
+
+@final
 class Poster:
     def post(self, /, callback: Callable[[Context], object]) -> None: ...
 
@@ -346,4 +365,11 @@ log: Log
 def _run(strategy: object, release: str, version: str, commit: str) -> None: ...
 def _run_load_failed(message: str, release: str) -> None: ...
 def _registered_hooks(strategy: object) -> list[str]: ...
+def _run_replay(
+    strategy: object,
+    dir: str | os.PathLike[str],
+    incarnation: int,
+    volume_dir: str,
+    input_dir: str,
+) -> ReplayReport: ...
 def session_contracts() -> list[str]: ...

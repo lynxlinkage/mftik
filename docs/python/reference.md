@@ -12,6 +12,8 @@ A name that starts with one underscore is part of the native module. Strategy co
 
 `log` is the module-level `Log`. Use it outside a hook. It does not carry `session_id`. `debug`, `info`, `warn`, and `error` take a positional-only message and keyword fields: `log.info("msg", key=value)`. A field value must be a `str`, `int`, `float`, `bool`, or `None`. Anything else, including a subclass or a list, raises `TypeError`. A call below `MFTIKO_LOG_LEVEL` returns at once without checking the message or the fields, so it raises no `TypeError`. Lines are JSON objects on stderr. `MFTIKO_LOG_LEVEL` defaults to info. `MFTIKO_LOG_FORMAT=console` selects the console layout.
 
+`replay` runs a `Strategy` class again over one incarnation of a session's event log, without NATS, and returns a `ReplayReport`. `replay(strategy_cls, dir, *, incarnation=None, volume_dir=None, input_dir=None)`. `dir` is the session volume's `eventlog` directory. `incarnation` `None` is the newest. `ReplayReport` is read-only: `session_id`, `incarnation`, `sdk_version`, `sdk_commit`, `inputs`, `skipped`, `missing`, `orders`, `reads`, and `mismatches`, a `tuple` of `str`. See [Replay](replay.md).
+
 `Strategy` is the base class. Construct it with no arguments. `on_init`, `on_start`, and `on_stop` are required. The 17 optional hooks are listed in [Lifecycle](lifecycle.md).
 
 `topic` is the market-data topic strings. `volume` is `read` and `write` for the session directories. `main` is the entry of `python -m mftik.pack`. A hook does not call it.
@@ -82,6 +84,7 @@ Every hook receives a `Context`. The methods below raise `ContextError` outside 
 | `Stopping` | The session is already stopping |
 | `ReadError` | A read callback's failure. Not raised by the method that sent the request |
 | `ContextError` | A `Context` or `BookView` used outside its hook |
+| `ReplayError` | `replay` cannot run the log at all, or is called inside a hook or a session process |
 
 The messages are in [Errors and exit codes](errors.md).
 
@@ -195,6 +198,8 @@ These names are on `mftik._mftik`. They are how the interpreter entry and the pa
 `_run` hosts a strategy until the process exits. `run` calls it after it has resolved the release string.
 
 `_run_load_failed` is the path that still speaks Hello and ends `INIT_FAILED` when `module:Class` cannot be loaded. The error text is the argument.
+
+`_run_replay` runs the replay after `replay` has checked its arguments and constructed the strategy. `incarnation` 0 is the newest, and empty directories are unset.
 
 `_registered_hooks` returns the optional hook names the class overrides. The decision matches registration: a method counts when `type(strategy).on_x is not Strategy.on_x`.
 

@@ -11,7 +11,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,7 @@ use mftik_core::symbol::PRICE_TICK;
 use mftik_core::tdpath::evt_subject;
 use mftik_proto::wire::mftiko::common::v1::{self as common, Outcome, Version};
 use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event, view_reply as md_view};
-use mftik_proto::wire::mftiko::session::v1::AccountDecl;
+use mftik_proto::wire::mftiko::session::v1::{AccountDecl, EventLog};
 use mftik_proto::wire::mftiko::stsctl::v1::{Bindings, FeedBinding, InitPayload};
 use mftik_proto::wire::mftiko::sym::v1::{self as sym, reply, request};
 use mftik_proto::wire::mftiko::td::v1::{self as td, view_reply};
@@ -79,6 +79,10 @@ struct Scenario {
     position_size: Option<f64>,
     #[serde(default = "default_batch")]
     cancel_batch: u32,
+    /// With the event log on, the volume's `eventlog/` is copied here after
+    /// the session ends (E07-D024).
+    #[serde(default)]
+    event_log_dir: Option<PathBuf>,
 }
 
 fn default_tick() -> f64 {
@@ -457,6 +461,14 @@ fn payload_for(nats: &Nats, scenario: &Scenario) -> InitPayload {
             ..Default::default()
         });
     }
+    if scenario.event_log_dir.is_some() {
+        // A session's first incarnation; the log's file names carry it.
+        payload.incarnation = 1;
+        payload.event_log = Some(EventLog {
+            enabled: true,
+            keep_mb: 0,
+        });
+    }
     payload
 }
 
@@ -663,7 +675,11 @@ fn order_value(request: &td::OrderRequest) -> Value {
     }
 }
 
-fn finish(mut shim: Shim, volume_name: &str) -> (Option<i32>, String, String, Option<String>) {
+fn finish(
+    mut shim: Shim,
+    volume_name: &str,
+    event_log_dir: Option<&Path>,
+) -> (Option<i32>, String, String, Option<String>) {
     assert!(shim.next().is_none(), "frames after the last one");
     let started = Instant::now();
     let status = loop {
@@ -676,6 +692,9 @@ fn finish(mut shim: Shim, volume_name: &str) -> (Option<i32>, String, String, Op
     let volume = fs::read(shim.volume.0.join(volume_name))
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    if let Some(out) = event_log_dir {
+        copy_dir(&shim.volume.0.join(mftik_rt::eventlog::DIR), out);
+    }
     let mut stdout = String::new();
     let mut stderr = String::new();
     let _ = shim
@@ -691,6 +710,15 @@ fn finish(mut shim: Shim, volume_name: &str) -> (Option<i32>, String, String, Op
         .expect("stderr")
         .read_to_string(&mut stderr);
     (status.code(), stdout, stderr, volume)
+}
+
+/// The files of `from`, one level deep: the event log has no subdirectories.
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("event log copy dir");
+    for entry in fs::read_dir(from).expect("eventlog dir") {
+        let entry = entry.expect("eventlog entry");
+        fs::copy(entry.path(), to.join(entry.file_name())).expect("copy event log file");
+    }
 }
 
 #[test]
@@ -740,7 +768,11 @@ fn drive() {
     stop(&shim, &mut state);
     expect_ending(&mut shim, Outcome::Done, "operator", Some(true));
     let orders: Vec<Value> = peer.requests().iter().map(order_value).collect();
-    let (code, stdout, stderr, volume) = finish(shim, &scenario.volume_name);
+    let (code, stdout, stderr, volume) = finish(
+        shim,
+        &scenario.volume_name,
+        scenario.event_log_dir.as_deref(),
+    );
     let report = json!({
         "code": code,
         "stdout": stdout,

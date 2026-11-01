@@ -1,3 +1,5 @@
+import os
+
 from mftik._mftik import (
     AlgoNotDeclared,
     BalanceEvent,
@@ -22,6 +24,8 @@ from mftik._mftik import (
     ReconEvent,
     RejectedRequest,
     RejectEvent,
+    ReplayError,
+    ReplayReport,
     Stopping,
     TapeQuery,
     Td,
@@ -62,6 +66,8 @@ __all__ = [
     "ReconEvent",
     "RejectEvent",
     "RejectedRequest",
+    "ReplayError",
+    "ReplayReport",
     "Stopping",
     "Strategy",
     "TapeQuery",
@@ -73,6 +79,7 @@ __all__ = [
     "common",
     "log",
     "md",
+    "replay",
     "run",
     "td",
     "volume",
@@ -87,3 +94,11 @@ def run(
     version: str = "",
     commit: str = "",
 ) -> None: ...
+def replay(
+    strategy_cls: type[Strategy],
+    dir: str | os.PathLike[str],
+    *,
+    incarnation: int | None = None,
+    volume_dir: str | os.PathLike[str] | None = None,
+    input_dir: str | os.PathLike[str] | None = None,
+) -> ReplayReport: ...

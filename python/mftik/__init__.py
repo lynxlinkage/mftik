@@ -26,6 +26,8 @@ from mftik._mftik import (
     ReconEvent,
     RejectedRequest,
     RejectEvent,
+    ReplayError,
+    ReplayReport,
     Stopping,
     TapeQuery,
     Td,
@@ -37,6 +39,7 @@ from mftik._mftik import (
     md,
     td,
 )
+from mftik._replay import replay
 from mftik._version import package_version
 from mftik.strategy import Strategy
 
@@ -74,6 +77,8 @@ __all__ = [
     "ReconEvent",
     "RejectEvent",
     "RejectedRequest",
+    "ReplayError",
+    "ReplayReport",
     "Stopping",
     "Strategy",
     "TapeQuery",
@@ -85,6 +90,7 @@ __all__ = [
     "common",
     "log",
     "md",
+    "replay",
     "run",
     "td",
     "volume",

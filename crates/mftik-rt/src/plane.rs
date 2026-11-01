@@ -1014,7 +1014,7 @@ fn random_seed() -> u64 {
 /// A failed resolve's flags (Go `resolveOutcome`). NotInInit, NotFound and
 /// Stopping are the SDK's own answers; the rest classify the request to
 /// SYM by its text, as an `order_reply` does.
-fn resolve_outcome(err: &symclient::Error) -> u16 {
+pub(crate) fn resolve_outcome(err: &symclient::Error) -> u16 {
     match err {
         symclient::Error::NotInInit => outcome::NOT_IN_INIT,
         symclient::Error::NotFound(_) => outcome::NOT_FOUND,
