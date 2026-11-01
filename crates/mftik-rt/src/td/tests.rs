@@ -462,7 +462,7 @@ fn rig_with(
                 ..Default::default()
             },
         ],
-        nats,
+        nats: Some(nats),
         io,
         timers,
         clock,
@@ -487,6 +487,9 @@ fn rig_with(
         log: Arc::new(move |line: &str| {
             td_logs.lock().expect("logs").push(line.to_owned());
         }),
+        replay: false,
+        rec: None,
+        call: None,
     })
     .expect("open");
     path.set(td.clone()).expect("once");

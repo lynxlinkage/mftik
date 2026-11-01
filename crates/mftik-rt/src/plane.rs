@@ -130,7 +130,11 @@ pub(crate) struct Plane<S> {
     loop_started: AtomicBool,
     dispatch_timers: Arc<Mutex<HashMap<u64, Timer>>>,
     commands: Mutex<mpsc::Sender<Relayed>>,
+    /// A replay answers Resolve from the log. `None` in a session.
+    replay_resolve: Mutex<Option<ReplayResolve>>,
 }
+
+type ReplayResolve = Arc<dyn Fn(&str) -> Result<Info, Error> + Send + Sync>;
 
 impl<S: Strategy> Plane<S> {
     /// The plane, with the thread that applies Commands in order (Go
@@ -161,6 +165,7 @@ impl<S: Strategy> Plane<S> {
             loop_started: AtomicBool::new(false),
             dispatch_timers: Arc::default(),
             commands: Mutex::new(tx),
+            replay_resolve: Mutex::new(None),
         });
         let weak = Arc::downgrade(&plane);
         thread::Builder::new()
@@ -469,7 +474,7 @@ impl<S: Strategy> Plane<S> {
                 clock: self.clock,
                 timers: self.timers.clone(),
                 disp,
-                nats: client,
+                nats: Some(client),
                 recv_window,
                 hooks: self.handlers.md_hooks(),
                 on_book: Arc::new(move |update| {
@@ -478,13 +483,16 @@ impl<S: Strategy> Plane<S> {
                     }
                 }),
                 log: Arc::new(note),
+                replay: false,
+                rec: None,
             })
             .map_err(CallError::Failed)
     }
 
     /// The dispatcher's feed callback: one `md.f` message past the prehook,
-    /// decoded for its hook (E03-D012).
-    fn on_feed(self: &Arc<Self>, msg: &[u8]) {
+    /// decoded for its hook (E03-D012). A replay runs a recorded `md_feed`
+    /// through this too.
+    pub(crate) fn on_feed(self: &Arc<Self>, msg: &[u8]) {
         match self.handlers.md_hooks().decode(msg) {
             mdpath::Decoded::Hook(event) => self.deliver_md(event),
             mdpath::Decoded::Skip => {}
@@ -622,6 +630,9 @@ impl<S: Strategy> Plane<S> {
     /// each call is a `resolve` frame, a refused one too: the ticker, then
     /// the SymbolInfo or the error the strategy got.
     pub(crate) fn resolve(&self, ticker: &str) -> Result<Info, Error> {
+        if let Some(resolve) = lock(&self.replay_resolve).clone() {
+            return resolve(ticker);
+        }
         let call_ns = self.record_now();
         let result = if self.resolve_allowed() {
             let call = self.current_call().unwrap_or_else(CallCtx::background);
@@ -730,7 +741,7 @@ impl<S: Strategy> Plane<S> {
             session_id: self.session.get().map(|s| s.id.clone()).unwrap_or_default(),
             recv_window,
             accounts,
-            nats: client,
+            nats: Some(client),
             io: self.io.clone(),
             timers: self.timers.clone(),
             clock: self.clock,
@@ -741,6 +752,9 @@ impl<S: Strategy> Plane<S> {
                 }
             }),
             log: Arc::new(note),
+            replay: false,
+            rec: None,
+            call: None,
         })
     }
 
@@ -804,7 +818,131 @@ impl<S: Strategy> Plane<S> {
             rec: self.event_log.get().map(|log| {
                 Arc::new(Recording::new(Arc::clone(log), self.clock)) as Arc<dyn Recorder>
             }),
+            replay: false,
         })
+    }
+
+    /// Builds the dispatcher and the paths for an offline replay: no NATS,
+    /// no event log writer, Post kept for the log to run (PROTOCOL §12.6).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_replay(
+        self: &Arc<Self>,
+        init: &InitPayload,
+        slot: u64,
+        seed: u64,
+        volume_dir: String,
+        input_dir: String,
+        out: Arc<dyn Recorder>,
+        call: td::ReplayCall,
+        resolve: ReplayResolve,
+    ) -> Result<(), String> {
+        if init.recv_window_ms == 0 {
+            return Err("sdk: replay: the init payload has no recv window".into());
+        }
+        crate::log::set_note_session(&init.session_id);
+        let _ = self.session.set(Session {
+            id: init.session_id.clone(),
+            params: init.params.clone(),
+            volume_dir,
+            input_dir,
+            event_log: None,
+            seed,
+        });
+        cloidgen::restore(slot);
+        *lock(&self.replay_resolve) = Some(resolve);
+        let recv_window = Duration::from_millis(u64::from(init.recv_window_ms));
+        let hook_timeout = Duration::from_secs(u64::from(init.hook_timeout_s));
+        let disp = self.new_replay_dispatcher(recv_window, hook_timeout);
+        let _ = self.disp.set(disp.clone());
+        self.open_replay_md(disp.clone(), recv_window, Arc::clone(&out))?;
+        self.open_replay_td(init.accounts.clone(), recv_window, disp, out, call)
+    }
+
+    fn new_replay_dispatcher(
+        self: &Arc<Self>,
+        recv_window: Duration,
+        hook_timeout: Duration,
+    ) -> Dispatcher {
+        let (feed_plane, book_plane) = (Arc::downgrade(self), Arc::downgrade(self));
+        Dispatcher::new(dispatch::Config {
+            recv_window,
+            hook_timeout,
+            now_ns: 0,
+            ring_bytes: 1 << 10,
+            feed: Some(Box::new(move |msg| {
+                if let Some(plane) = feed_plane.upgrade() {
+                    plane.on_feed(msg);
+                }
+            })),
+            book: Some(Box::new(move |msg| {
+                if let Some(md) = book_plane.upgrade().and_then(|p| p.wiring.md().cloned()) {
+                    md.on_book_message(msg);
+                }
+            })),
+            log: Some(Arc::new(note)),
+            replay: true,
+            ..Default::default()
+        })
+    }
+
+    fn open_replay_md(
+        self: &Arc<Self>,
+        disp: Dispatcher,
+        recv_window: Duration,
+        rec: Arc<dyn Recorder>,
+    ) -> Result<(), String> {
+        let plane = Arc::downgrade(self);
+        self.wiring.open_md(md::Config {
+            io: self.io.clone(),
+            clock: self.clock,
+            timers: self.timers.clone(),
+            disp,
+            nats: None,
+            recv_window,
+            hooks: self.handlers.md_hooks(),
+            on_book: Arc::new(move |update| {
+                if let Some(plane) = plane.upgrade() {
+                    plane.deliver_book(update);
+                }
+            }),
+            log: Arc::new(note),
+            replay: true,
+            rec: Some(rec),
+        })
+    }
+
+    fn open_replay_td(
+        self: &Arc<Self>,
+        accounts: Vec<AccountDecl>,
+        recv_window: Duration,
+        disp: Dispatcher,
+        rec: Arc<dyn Recorder>,
+        call: td::ReplayCall,
+    ) -> Result<(), String> {
+        let plane = Arc::downgrade(self);
+        self.wiring.open_td(td::Config {
+            session_id: self.session.get().map(|s| s.id.clone()).unwrap_or_default(),
+            recv_window,
+            accounts,
+            nats: None,
+            io: self.io.clone(),
+            timers: self.timers.clone(),
+            clock: self.clock,
+            disp,
+            deliver: Arc::new(move |hook| {
+                if let Some(plane) = plane.upgrade() {
+                    plane.deliver_td(hook);
+                }
+            }),
+            log: Arc::new(note),
+            replay: true,
+            rec: Some(rec),
+            call: Some(call),
+        })
+    }
+
+    pub(crate) fn set_resolve_allowed(&self, allowed: bool) {
+        self.resolve_allowed.store(allowed, Ordering::SeqCst);
     }
 
     /// A dispatcher timer that runs `f` as a hook once, `delay` from now.

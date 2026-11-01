@@ -23,6 +23,8 @@
 //!   (§9.1.4).
 //! - [`eventlog`]: the strategy event log's file format, its writer
 //!   thread and ring, and a reader (PROTOCOL §12, E07-D001–E07-D003).
+//! - [`replay`]: offline replay of one incarnation without NATS or C4
+//!   (PROTOCOL §12.6, E07-D016–E07-D019).
 //! - `pack`: the `mftiko.contracts=` marker and the Go build info record
 //!   that `mftiko-pack -bin` reads out of a strategy binary (E08-D001,
 //!   E08-D005).
@@ -50,6 +52,7 @@ pub mod nats;
 mod pack;
 mod plane;
 pub mod reader;
+mod replay;
 mod report;
 mod session;
 mod strategy;
@@ -65,6 +68,7 @@ pub use mftik_core::book::OrderBook;
 pub use mftik_core::mdpath::{ReadError, TapeQuery};
 pub use mftik_core::symbol::Info;
 pub use plane::{CLOCK_TICK, GATE_LINE, INPUT_DIR_ENV, VOLUME_DIR_ENV, in_one_hook};
+pub use replay::{ReplayError, ReplayOptions, ReplayReport, replay};
 pub use session::{RELEASE, run};
 pub use strategy::{
     AggTrade, AggTradeHandler, BalanceEvent, BalanceHandler, BestQuote, BestQuoteHandler,

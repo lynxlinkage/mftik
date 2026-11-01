@@ -1119,8 +1119,9 @@ fn revisions_of(reply: sym::Reply) -> Result<HashMap<Key, i64>, Fault> {
 
 /// `SymbolInfo` to [`Info`], with the Go SDK's checks: a canonical ticker, a
 /// valid UID, a decodable status, and no empty filter name. An unset bound
-/// is NaN (E00-D008).
-fn info_from_proto(msg: sym::SymbolInfo) -> Result<Info, String> {
+/// is NaN (E00-D008). A replay seeds rows from recorded resolve frames with
+/// this.
+pub fn info_from_proto(msg: sym::SymbolInfo) -> Result<Info, String> {
     let ticker = UniversalTicker::parse(&msg.universal_ticker)
         .map_err(|err| format!("symclient: ticker {:?}: {err}", msg.universal_ticker))?;
     if !valid_uid(msg.uid) {

@@ -533,3 +533,11 @@ Harness 給 binary 模式（E08-D009）：`crates/mftik-py/tests/examples.rs` �
 `conformance-rootfs-rust` 在 `ubuntu-22.04` 建 release 的 `conform` 與 `md_watch`，兩個都用釘住的 `mftiko-pack -bin` 打包、拉開。conform 仍跑 `mftiko-conformance`；md_watch 的 rootfs 跑 `test_e2e.py`。job 裝 nats-server 給 harness。Python job 的 ruff 也掃 `examples/rust`。
 
 `docs/rust/` 四篇英文 Markdown：入門、hook、Context、打包部署，對 `docs/python` 的同名結構，不架 mdBook。Rust 片段是完整可編譯的例子，不是從範例檔摘行；`mftik-rt` 以 `#[cfg(doctest)]` + `include_str!` 掛上，`cargo test --workspace`（含 `--doc`）編譯它們。入門寫 git tag 依賴、不上 crates.io，並註明要 1.2.0 之後的 release 才能打包（v1.2.0 沒有 E08-01 的標記與 build info），以及保持 `panic = "unwind"`。
+
+## 決定（Yi Te，2026-11-01，E07-D016–E07-D019）
+
+- **E07-D016** 拆票：#474 只做 Rust 回放引擎與公開 Rust API `mftik_rt::replay`，以純 Rust conform 策略測試；Python `mftik.replay` 包裝與文件移到 E07-07 #485。
+- **E07-D017** 引擎沿用現有 frame reader 與 dispatcher，Now、Rand、Resolve、td/md 回覆、timer、Post 改為依紀錄注入，不連 NATS；行為對齊 Go PROTOCOL §12.6（比對項目、不重現的情況、cloid 自 init 計數器取號）。
+- **E07-D018** `ReplayReport` 欄位同 Go：`mismatches`、`inputs`、`skipped`、`missing`、`orders`、`reads`；每筆 mismatch 記 rec_seq、種類、紀錄值與回放值。hook 結束方式在 Rust 比 panic 訊息；Python 比例外類別與訊息（E07-07）。
+- **E07-D019** 驗收：錄製後回放零 mismatch；修改過的策略產生 mismatch；有缺號的紀錄正確計入 `missing`。phase 1 不比對 log（E07-D005）。
+

@@ -2240,3 +2240,32 @@ fn with_the_log_a_hook_starts_at_its_inputs_t_ns_without_a_clock_read() {
     assert_eq!(dispatcher.hook_start_ns(), T_LOG + 3 * MS);
     assert_eq!(log.reads(), reads);
 }
+
+#[test]
+fn a_replay_keeps_posts_and_timers_for_the_log_to_run() {
+    let dispatcher = build(|config| config.replay = true);
+    let ran = Arc::new(AtomicUsize::new(0));
+    let posts = Arc::clone(&ran);
+    dispatcher
+        .post(move || {
+            posts.fetch_add(1, Ordering::Relaxed);
+        })
+        .expect("post");
+    let timers = Arc::clone(&ran);
+    let timer = dispatcher.timer(move || {
+        timers.fetch_add(10, Ordering::Relaxed);
+    });
+    assert_eq!(timer.id(), 0);
+    assert_eq!(
+        timer.after(Duration::from_secs(1)),
+        Some(T0 + 1_000_000_000)
+    );
+    assert_eq!(dispatcher.push_td(|| {}), Err(PushError::Closed));
+    assert!(dispatcher.take_post(2).is_none());
+    dispatcher.step(T0 + 5, || dispatcher.take_post(1).expect("post 1")());
+    assert_eq!(dispatcher.hook_start_ns(), T0 + 5);
+    dispatcher.step(T0 + 7, || dispatcher.timer_func(1).expect("timer 1")());
+    assert_eq!(ran.load(Ordering::Relaxed), 11);
+    dispatcher.close_td();
+    assert_eq!(dispatcher.post(|| {}), Err(PushError::Closed));
+}
