@@ -111,7 +111,8 @@ class MdWatchE2E(unittest.TestCase):
             self._scenario(
                 params={"ticker": _TICKER, "every_s": 30},
                 volume_data='{"trades":4,"books":2}',
-                steps=["trade", "stop"],
+                # Stop drops MD that is still on the ring. Wait for OnTrade.
+                steps=["trade", "sleep:1", "stop"],
             )
         )
         self.assertEqual(report["code"], 0, report["stderr"])
