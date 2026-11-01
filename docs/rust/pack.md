@@ -4,7 +4,7 @@
 
 Build a linux x86_64 GNU binary, then pack that file. The packer does not compile Rust. The worker's supported platform is Ubuntu 22.04 or later on x86_64 (glibc 2.35). There is no musl image. A binary built on macOS is Mach-O; the packer refuses it.
 
-Every binary that calls `mftik_rt::run` embeds what the packer reads: the `mftiko.contracts=` marker, and on Linux a Go build info record that gives the manifest's `sdk.version` (E08-D001, E08-D005). Depend on a release after 1.2.0; packing a binary linked to v1.2.0 fails because that tag does not embed them.
+Every binary that calls `mftik_rt::run` embeds what the packer reads: the `mftiko.contracts=` marker and the `mftiko.sdk=rust <version>` record, on every platform. On Linux it also embeds a Go build info record, which a packer older than mftiko E09-D099 reads instead of the `mftiko.sdk=` record (E08-D001, E08-D005). Depend on a release after 1.2.0; packing a binary linked to v1.2.0 fails because that tag embeds none of them.
 
 The command prints the image manifest digest on stdout. That digest is what the session spec stores in `strategy.ref` (PROTOCOL §8.1). The platform pulls by digest. It does not follow a tag that later moves. A tag is only a name a person can look up. Put the digest, not the tag, in the spec.
 
@@ -31,9 +31,9 @@ Credentials come from Docker's config file (`~/.docker/config.json`) for that re
 
 The image has one layer: `bin/strategy`, mode 0755, uid and gid 0, mtime 0. The bytes are the packed file.
 
-The manifest says `schema` `mftiko.worker.v1`, `kind` `strategy`, `runtime` `go`, `os` and `arch` from the ELF (linux/amd64 for this platform), and `entrypoint` `["bin/strategy"]`. `sdk.lang` is `go`. `sdk.version` is `v` plus the `mftik-rt` version the binary was built with, for example `v1.3.0`. PROTOCOL §8.2 uses `runtime` only for display and statistics; the platform does not read `runtime` or `sdk.lang`. `Hello.contracts`, and the manifest's contract list, are `worker.v1`, `stsctl.v1`, `md.v1`, and `td.v1`, taken from the marker in the binary. `-env` pairs become the manifest `env`. The platform adds its own `MFTIKO_*` variables at launch (PROTOCOL §4.6). The worker does not inherit the packer's environment.
+The manifest says `schema` `mftiko.worker.v1`, `kind` `strategy`, `runtime` `rust`, `os` and `arch` from the ELF (linux/amd64 for this platform), and `entrypoint` `["bin/strategy"]`. `sdk.lang` is `rust`. `sdk.version` is the `mftik-rt` version the binary was built with, with no `v`, for example `1.3.0`. These come from the `mftiko.sdk=` record, which the packer reads ahead of the Go build info. A packer older than mftiko E09-D099 does not read the record: it writes `runtime` and `sdk.lang` as `go` and `sdk.version` as `v1.3.0`. PROTOCOL §8.2 uses `runtime` only for display and statistics; the platform does not read `runtime` or `sdk.lang`. `Hello.contracts`, and the manifest's contract list, are `worker.v1`, `stsctl.v1`, `md.v1`, and `td.v1`, taken from the marker in the binary. `-env` pairs become the manifest `env`. The platform adds its own `MFTIKO_*` variables at launch (PROTOCOL §4.6). The worker does not inherit the packer's environment.
 
-A binary without the contracts marker fails with `artifact: no embedded contracts list`. A binary without Go build info fails with `artifact: no sdk version in buildinfo`. An ELF the packer does not accept fails with `artifact: unsupported ELF os/arch`.
+A binary without the contracts marker fails with `artifact: no embedded contracts list`. A binary with neither the `mftiko.sdk=` record nor Go build info fails with `artifact: no sdk version in buildinfo`. An ELF the packer does not accept fails with `artifact: unsupported ELF os/arch`.
 
 The platform checks the manifest before it starts the process. A contract the platform requires and the image does not list, a wrong operating system or architecture, or a rootfs that fails the archive checks ends the session `INIT_FAILED` without running the strategy.
 

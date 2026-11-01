@@ -3,8 +3,8 @@
 
 ``MFTIK_CONFORM_BIN`` (default ``target/release/conform``) and
 ``MFTIK_MD_WATCH_BIN`` (default ``target/release/md_watch``) are packed by the
-pinned ``mftiko-pack -bin``, which takes the manifest's ``contracts`` and
-``sdk.version`` out of the binary (E08-D001, E08-D005). Each image is pushed to
+pinned ``mftiko-pack -bin``, which takes the manifest's ``contracts``,
+``runtime``, and ``sdk`` out of the binary (E08-D001, E08-D005, #489). Each image is pushed to
 a registry on 127.0.0.1, then pulled and unpacked with mftiko
 ``internal/platform/artifact``. Both tools come from the E04-D076 commit, as in
 ``data_input_e2e.py``. Conformance runs in conform's rootfs as in
@@ -96,9 +96,9 @@ def binary_path(variable: str, name: str) -> Path:
 
 
 def sdk_version() -> str:
-    """``v`` and the workspace version, the replacement mftik-rt's build info names."""
+    """The workspace version, as mftik-rt's ``mftiko.sdk=`` record writes it (no ``v``)."""
     with (REPO / "Cargo.toml").open("rb") as handle:
-        return "v" + tomllib.load(handle)["workspace"]["package"]["version"]
+        return tomllib.load(handle)["workspace"]["package"]["version"]
 
 
 def build_packer(checkout: Path, home: Path) -> Path:
@@ -169,8 +169,8 @@ def require_image(
 ) -> Path:
     """The manifest mftiko-pack writes, and a rootfs that holds only the binary.
 
-    mftiko-pack writes ``runtime`` and ``sdk.lang`` as ``go`` for every binary
-    (E08-D005); PROTOCOL §8.2 uses both for display only.
+    mftiko-pack takes ``runtime`` and ``sdk`` from the binary's ``mftiko.sdk=``
+    record ahead of its Go build info (mftiko E09-D099, #489).
     """
     want: dict[str, object] = {
         "digest": digest,
@@ -181,8 +181,8 @@ def require_image(
         "contracts": CONTRACTS,
         "entrypoint": ENTRYPOINT,
         "env": {},
-        "runtime": "go",
-        "sdk_lang": "go",
+        "runtime": "rust",
+        "sdk_lang": "rust",
         "sdk_version": version,
     }
     for key, value in want.items():

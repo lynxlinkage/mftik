@@ -3,23 +3,29 @@
 //!
 //! mftiko's `artifact.PackStrategy` takes the manifest's `contracts` from the
 //! `mftiko.contracts=` marker the Go SDK embeds (mftiko E09-D035, PROTOCOL
-//! §8.2), and `sdk.version` from the binary's Go build info. It refuses a
-//! binary without either. Every binary that calls [`crate::run`] carries both:
+//! §8.2). It takes `runtime` and `sdk` from a `mftiko.sdk=` record when the
+//! binary has one, and otherwise from the binary's Go build info as `go`
+//! (mftiko E09-D099). It refuses a binary without the marker, or without both
+//! the record and the build info. Every binary that calls [`crate::run`]
+//! carries all three:
 //!
 //! - [`CONTRACTS`]: `mftiko.contracts=`, the majors of [`SESSION_CONTRACTS`]
 //!   joined with commas, and a newline, as Go `sdk.contractsMarker`. It is
 //!   built from the list `Hello.contracts` sends, so the two cannot drift.
+//! - [`SDK`]: `mftiko.sdk=rust `, this crate's version, and a newline. The
+//!   manifest's `runtime` and `sdk.lang` are then `rust`, and `sdk.version` is
+//!   the version as written, without a `v`. The record wins over the build
+//!   info, so the packer no longer reads the latter.
 //! - [`BUILD_INFO`] (Linux only): a record in the inline format Go's linker
 //!   writes since 1.18, in section `.go.buildinfo`, where `debug/buildinfo`
 //!   looks first. It says the module `github.com/BullionBear/mftiko` is
 //!   replaced by `github.com/lynxlinkage/mftik` at this crate's version, so
 //!   `sdk.version` is `v` and [`crate::RELEASE`]. Its version string, where
-//!   Go puts the toolchain's, is `mftik-rt v` and the same version.
+//!   Go puts the toolchain's, is `mftik-rt v` and the same version. A
+//!   packer older than mftiko E09-D099 reads it and writes `runtime` and
+//!   `sdk.lang` as `go`. E08-04 removes it.
 //!
-//! mftiko-pack still writes `runtime` and `sdk.lang` as `go`. PROTOCOL §8.2
-//! uses `runtime` only for display and statistics, and mftiko reads neither.
-//!
-//! Both are `#[used]` statics, and [`keep`] reads them from `run`, as Go's
+//! All three are `#[used]` statics, and [`keep`] reads them from `run`, as Go's
 //! `init` reads `embeddedContracts` and its linker references the build info:
 //! `#[used]` alone still lets the linker drop an unreferenced section.
 
@@ -54,6 +60,18 @@ static CONTRACTS: [u8; CONTRACTS_LEN] = {
         i += 1;
     }
     put(&mut out, at, b"\n");
+    out
+};
+
+const SDK_RECORD: &str = concat!("mftiko.sdk=rust ", env!("CARGO_PKG_VERSION"), "\n");
+
+/// `mftiko.sdk=rust ` and the crate version, e.g. `1.3.0`, then a newline, as
+/// mftiko's `artifact.embeddedSDK` reads it. Embedded on every platform, like
+/// [`CONTRACTS`].
+#[used]
+static SDK: [u8; SDK_RECORD.len()] = {
+    let mut out = [0; SDK_RECORD.len()];
+    put(&mut out, 0, SDK_RECORD.as_bytes());
     out
 };
 
@@ -127,9 +145,10 @@ static BUILD_INFO: BuildInfo = BuildInfo({
     out
 });
 
-/// Reads both records so the linker keeps them. [`crate::run`] calls it.
+/// Reads the records so the linker keeps them. [`crate::run`] calls it.
 pub(crate) fn keep() {
     std::hint::black_box(&CONTRACTS);
+    std::hint::black_box(&SDK);
     #[cfg(target_os = "linux")]
     std::hint::black_box(&BUILD_INFO);
 }
@@ -169,6 +188,9 @@ const fn uvarint_len(mut n: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// The prefix mftiko's `artifact.embeddedSDK` scans for.
+    const SDK_PREFIX: &str = "mftiko.sdk=";
+
     #[test]
     fn contracts_marker_matches_go_and_hello() {
         assert_eq!(
@@ -181,6 +203,28 @@ mod tests {
             .unwrap();
         let hello = mftik_core::c4::Config::session("r", 1).contracts;
         assert_eq!(list, hello.join(",").as_bytes());
+    }
+
+    /// mftiko `parseSDKRecord`: a lower-case language, one space, a version
+    /// that starts with a digit or `v`, and a newline.
+    #[test]
+    fn sdk_record_is_rust_and_the_crate_version() {
+        assert!(SDK_RECORD.starts_with(SDK_PREFIX));
+        assert_eq!(&SDK, SDK_RECORD.as_bytes());
+        let record = SDK
+            .strip_prefix(SDK_PREFIX.as_bytes())
+            .and_then(|rest| rest.strip_suffix(b"\n"))
+            .unwrap();
+        let want = format!("rust {}", crate::RELEASE);
+        assert_eq!(record, want.as_bytes());
+        let version = &record[b"rust ".len()..];
+        assert!(version[0].is_ascii_digit());
+        assert!(version.len() <= 64);
+        assert!(
+            version
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
+        );
     }
 
     #[cfg(target_os = "linux")]

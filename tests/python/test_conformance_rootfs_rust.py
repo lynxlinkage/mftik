@@ -11,7 +11,7 @@ import conformance_rootfs_rust as rust
 NAME = "conform"
 PROGRAM = b"strategy\n"
 DIGEST = "sha256:" + "0" * 64
-VERSION = "v1.0.0"
+VERSION = "1.0.0"
 
 
 def _rootfs(base: Path) -> Path:
@@ -30,8 +30,8 @@ def _report(rootfs: Path) -> dict[str, object]:
         "contracts": ["worker.v1", "stsctl.v1", "md.v1", "td.v1"],
         "entrypoint": ["bin/strategy"],
         "env": {},
-        "runtime": "go",
-        "sdk_lang": "go",
+        "runtime": "rust",
+        "sdk_lang": "rust",
         "sdk_version": VERSION,
         "rootfs": str(rootfs),
     }
@@ -49,8 +49,9 @@ class RustRootfsTests(unittest.TestCase):
         cases: tuple[tuple[str, object], ...] = (
             ("digest", "sha256:" + "1" * 64),
             ("name", "md_watch"),
-            ("runtime", "python"),
-            ("sdk_version", "v1.0.1"),
+            ("runtime", "go"),
+            ("sdk_lang", "go"),
+            ("sdk_version", "v1.0.0"),
             ("contracts", ["worker.v1", "stsctl.v1", "md.v1"]),
             ("entrypoint", ["bin/worker"]),
             ("env", {"A": "1"}),
