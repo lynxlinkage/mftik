@@ -14,6 +14,21 @@ Instruments are UIDs after the first lookup. Resolve a ticker once, keep the UID
 
 `exit` requests outcome `DONE`. `fail` requests outcome `FAILED` and stores the reason. See [Lifecycle](lifecycle.md).
 
+## Time and the session seed
+
+`now_ns` returns when the hook started, in nanoseconds on the session clock, the same origin as `md_ts_ns`. Every call in that hook returns the same value. With the event log on it is the `t_ns` of the hook's input.
+
+`seed` returns the session's random seed, recorded on the `init` frame as its `ref`. It is `None` before Init.
+
+```rust
+use mftik_rt::{Context, Strategy};
+
+fn clock<S: Strategy>(ctx: &Context<S>) {
+    let _ = ctx.now_ns();
+    let _ = ctx.seed();
+}
+```
+
 ## Instruments
 
 `resolve` looks up a universal ticker in the symbol service and returns an `Info`. Only `on_init` and `on_start` may call it. Any other hook returns `Error::NotInInit` and sends no request. The message is `sdk: only OnInit and OnStart may call this`. The call may block until the hook's deadline. There is no timeout argument. The runtime uses the hook deadline it already has.

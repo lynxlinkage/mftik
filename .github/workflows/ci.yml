@@ -401,9 +401,9 @@ jobs:
           path: report-rootfs-rust.json
           if-no-files-found: warn
 
-  # E05-D031–E05-D035: md_watch, maker, and stateful. The wheel is
-  # python-conform-wheel's mftik-abi3-wheel artifact; this job does not build
-  # one. Pack builds each image and does not push it.
+  # E05-D031–E05-D035: md_watch, maker, stateful, pretrained, and sampler.
+  # The wheel is python-conform-wheel's mftik-abi3-wheel artifact; this job
+  # does not build one. Pack builds each image and does not push it.
   examples:
     name: examples
     needs: python-conform-wheel
@@ -442,7 +442,7 @@ jobs:
           set -euo pipefail
           test -n "$MFTIK_NATS_SERVER"
           test -x "$MFTIK_PYTHON"
-          for name in md_watch maker stateful pretrained; do
+          for name in md_watch maker stateful pretrained sampler; do
             "$MFTIK_PYTHON" "examples/python/$name/test_e2e.py"
           done
       - name: Pack each example without pushing
@@ -450,7 +450,7 @@ jobs:
           set -euo pipefail
           wheel=(dist/*.whl)
           py=/tmp/mftik-examples/bin/python
-          for spec in md_watch:MdWatch maker:Maker stateful:Stateful pretrained:Pretrained; do
+          for spec in md_watch:MdWatch maker:Maker stateful:Stateful pretrained:Pretrained sampler:Sampler; do
             name="${spec%%:*}"
             "$py" -m mftik.pack \
               -dir "examples/python/$name" \

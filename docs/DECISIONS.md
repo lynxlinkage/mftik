@@ -499,6 +499,24 @@ Yi Te 於 #478 核可 E08-D001–E08-D004。純 Rust 策略：用 `mftik-rt` 的
 
 CI 的 `conformance-rootfs-rust` job 在 `ubuntu-22.04` 建 release 的 `examples/conform`，先確認 runner 的 glibc 是 2.35（同 wheel job）。`tests/python/conformance_rootfs_rust.py` 以 E04-D076 commit 的 `mftiko-pack -bin` 推到 127.0.0.1 的 registry，以同一 commit 的 `internal/platform/artifact` 拉下、解開（`tests/pack/check` 多一個 `-layers`，預設仍是 3）。它檢查 manifest：`strategy`、`linux/amd64`、四個 contracts、entrypoint `bin/strategy`、env 空、`runtime` 與 `sdk.lang` 是 `go`、`sdk.version` 是 `v` 加 workspace 版本；rootfs 只有 `bin/strategy`，與建出的 binary 逐 byte 相同。之後照 `conformance_rootfs.py` 跑 `mftiko-conformance`：rootfs 是工作目錄，`PATH` 只有工具所在的目錄，11 項都要 pass。binary 在 22.04 上跑得起來，就表示它不需要比 2.35 新的 glibc（E08-D002）。`pack.rs` 的單元測試檢查標記與 `Hello.contracts` 相同、uvarint 與 Go `binary.PutUvarint` 相同，以及 build info 的檔頭、對齊與補齊。
 
+## 決定（2026-11-01，E07-D013–E07-D015）
+
+Yi Te 於 #473 核可。E07-05 補 `ctx.now()` 與 `ctx.rand()`（E07-D004）。seed 已由 E07-04 產生並寫進 `init` 的 `ref`。本票沒有改 PROTOCOL。Replay 仍是 #474。
+
+- E07-D013 `ctx.now()`：hook 內回傳該 hook 開始時間（int ns，與 dispatcher 同一 session clock），同一 hook 內多次呼叫值相同，replay 可對上；hook 外呼叫回傳當下時間，與 Go 一致。
+- E07-D014 `ctx.rand()`：每 session 一個 `random.Random`，以 init frame 的 seed（u64）建立，首次呼叫時建立，之後回傳同一物件；OnInit 之前呼叫拋錯。
+- E07-D015 補 `.pyi`、`docs/python` 說明與一個使用 `now`/`rand` 的 example；文件 API 檢查腳本通過；測試確認 init frame seed 與 `rand()` seed 一致。同一 PR 版本升 1.3.0，不打 tag（tag 與 PyPI 由 Yi Te）。
+
+#473（E07-05）把 hook 開始時間與 session seed 從 Rust 交到 Python。`Context::now_ns` 是這個 hook 的開始：dispatcher 跑的 hook 讀 `Dispatcher::hook_start_ns`（log 開啟時是輸入的 `t_ns`，關閉時是 begin_hook 時注入的時鐘，不再讀一次，E07-D009）；OnInit、OnStart，以及 Run 之前的 OnStop，由 plane 的 `outside` 在 hook 前讀一次 session clock，同一值寫進輸入的 `t_ns`。沒有 dispatcher 時（binding 測試的 `in_one_hook`）在進 hook 時讀一次。同一 hook 內每次呼叫都是這個值。Python 的 `Context.now` 在這個執行緒有 hook 在跑時回傳那個 hook 的開始，不看手上這個 token 是不是這個 hook 的；沒有 hook 時讀 session clock 的現在時間，不拋 `ContextError`（E07-D013）。
+
+`Context::seed` 是 session 的 seed，Init 之前是 `None`。Python 的 `Context.rand` 檢查 token（過期仍是 `ContextError`），seed 還沒有時拋 `mftik.Error`，訊息 `sdk: the session has no seed before OnInit`。第一個成功的呼叫用這個 u64 建一個 `random.Random`，之後回傳同一個物件（E07-D014）。一個 process 一個 session。
+
+`.pyi` 寫 `now() -> int` 與 `rand() -> random.Random`。`docs/python` 說明時間、亂數、執行緒與錯誤。`examples/python/sampler` 在每個 hook 打 `now` 與一次 `getrandbits(64)` 抽樣。文件 API 檢查腳本通過。版本升 1.3.0，不打 tag（E07-D006、E07-D015）。
+
+與 Go 不同的地方。Go 的 `Now()` 是 step clock：執行中 hook 的開始，沒有 hook 時仍是上一個 hook 的開始。mftik 在 hook 外回傳當下時間（E07-D013）。Go 的 `Rand()` 是 `rand.New(rand.NewPCG(seed, 0))`；Python 是 `random.Random(seed)`（E07-D004）。關閉 log 時 hook 開始用注入的時鐘，不多讀一次（E07-D009）；Go 每次 beginHook 都讀牆鐘。
+
+測試：`mftik-core` 的 `src/dispatch/tests.rs` 測 log 關時 hook 開始是注入的時鐘且不移動、log 開時是輸入的 `t_ns` 且不讀時鐘。`mftik-rt` 的 `src/plane.rs` 測 OnInit／OnStart／OnStop 與 dispatcher hook 的開始，以及 Init 前 seed 是 `None`；`tests/eventlog_session.rs` 每個 hook 印兩次 `now_ns` 與 seed，對上輸入的 `t_ns` 與 `init` 的 `ref`。mftik-py 的 in-process 測試測同一 hook 內 `now` 不變、過期 context 的 `now` 是正在跑的 hook 的開始、hook 外會走、`rand` 在沒有 seed 時拋錯；`tests/session.rs` 以安裝的 wheel、開著 event log，確認每個 hook 的 `now` 是輸入的 `t_ns`，`rand().getrandbits(64)` 的序列與 `random.Random(init.ref)` 相同（python CI job）。
+
 ## 決定（2026-11-01，E08-D006–E08-D009）
 
 Yi Te 於 #480 核可。E08-02 Rust 範例與文件。本票沒有改 PROTOCOL，也沒有改 mftiko。

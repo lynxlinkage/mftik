@@ -6,14 +6,14 @@
 | --- | --- |
 | [Install and run](install.md) | The wheel, `python -m mftik.run`, and what the process has to be |
 | [Lifecycle](lifecycle.md) | `on_init`, `on_start`, `on_stop`, and the 17 optional hooks, with the Go names |
-| [Context](context.md) | What a hook may call: instruments, orders, reads, timers |
+| [Context](context.md) | What a hook may call: time, random draws, instruments, orders, reads, timers |
 | [Errors and exit codes](errors.md) | The exception hierarchy, outcomes, and process status |
 | [Threads](threads.md) | The GIL, `Poster`, and how long a `Context` or `BookView` stays valid |
 | [Runtime notes](runtime.md) | `multiprocessing`, SIGTERM, and `Limits.memory_mb` |
 | [Pack and deploy](pack.md) | `python -m mftik.pack`, `StrategyRef.code`, and running a session with `mftiko` |
 | [Session spec](session.md) | Every field of the session file and what it means to a Python strategy |
 | [Volume and inputs](volume.md) | Durable files and read-only inputs |
-| [Examples](examples.md) | `md_watch`, `maker`, `stateful`, and `pretrained`, quoted from `examples/python` |
+| [Examples](examples.md) | `md_watch`, `maker`, `stateful`, `pretrained`, and `sampler`, quoted from `examples/python` |
 | [API reference](reference.md) | Every public name |
 
 A hook runs on one thread, one at a time. It must return. The only object that may cross threads is a `Poster`. `Context` and `BookView` work only inside the hook that received them.

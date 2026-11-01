@@ -9,8 +9,13 @@
 //! OnStart is in the file before C4 hears of it. MD and TD inputs are
 //! checked against nats-server by the path tests in `src/md` and `src/td`,
 //! and every kind by `eventlog_kinds`.
+//!
+//! Each hook prints its `Context::now_ns`, read twice, and the seed: the
+//! hook's start is its input's `t_ns`, and the seed is the `init` frame's
+//! `ref` (E07-D013, E07-D014).
 
 use std::env;
+use std::io::Write;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -20,7 +25,7 @@ use mftik_proto::wire::mftiko::session::v1::EventLog;
 use mftik_proto::wire::mftiko::stsctl::v1::{EventLogStat, InitPayload};
 use mftik_proto::wire::mftiko::worker::v1::{self as worker, Verb, worker_down, worker_up};
 use mftik_rt::eventlog::{self, Kind, Reader, Record};
-use mftik_rt::{Context, HookError, Strategy};
+use mftik_rt::{Context, GATE_LINE, HookError, Strategy};
 use mftik_testkit::*;
 use prost::Message;
 use serde_json::Value;
@@ -34,6 +39,7 @@ struct Steps {
 
 impl Strategy for Steps {
     fn on_init(&mut self, ctx: &Context<Self>) -> Result<(), HookError> {
+        times("init", ctx);
         self.scenario = String::from_utf8(ctx.params().to_vec())?;
         if self.scenario == "init-panic" {
             panic!("init boom");
@@ -42,22 +48,44 @@ impl Strategy for Steps {
     }
 
     fn on_start(&mut self, ctx: &Context<Self>) -> Result<(), HookError> {
+        times("start", ctx);
         if self.scenario == "start-panic" {
             panic!("start boom");
         }
         ctx.post(|_, ctx| {
+            times("post", ctx);
             ctx.after(Duration::ZERO, |_, ctx| {
-                ctx.post(|s, _| match s.scenario.as_str() {
-                    "panic" => panic!("boom"),
-                    "hang" => thread::sleep(Duration::from_secs(30)),
-                    _ => {}
+                times("timer", ctx);
+                ctx.post(|s, ctx| {
+                    times("post", ctx);
+                    match s.scenario.as_str() {
+                        "panic" => panic!("boom"),
+                        "hang" => thread::sleep(Duration::from_secs(30)),
+                        _ => {}
+                    }
                 });
             });
         });
         Ok(())
     }
 
-    fn on_stop(&mut self, _ctx: &Context<Self>) {}
+    fn on_stop(&mut self, ctx: &Context<Self>) {
+        times("onstop", ctx);
+    }
+}
+
+/// One stdout line: the hook, its `now_ns`, `now_ns` again 1ms later, and
+/// the seed.
+fn times(hook: &str, ctx: &Context<Steps>) {
+    let now = ctx.now_ns();
+    thread::sleep(Duration::from_millis(1));
+    let (again, seed) = (ctx.now_ns(), ctx.seed().unwrap_or_default());
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(
+        out,
+        r#"{{"hook":"{hook}","now":{now},"again":{again},"seed":{seed}}}"#
+    );
+    let _ = out.flush();
 }
 
 /// The worker process's entry. In a normal test run the variable is unset
@@ -222,6 +250,24 @@ fn each_input_is_followed_by_its_hook_end_and_the_exit_writes_end() {
         InitPayload::decode(&records[0].body[8..]).expect("init payload"),
         sent
     );
+    // Every hook, OnInit and OnStart included, saw its input's t_ns twice
+    // and the init frame's seed.
+    let seed = records[0].r#ref;
+    let want: Vec<String> = records
+        .iter()
+        .filter(|r| !matches!(r.kind, Kind::HOOK_END | Kind::STOP | Kind::END))
+        .map(|r| {
+            let (hook, t) = (r.kind.name().unwrap_or("?"), r.t_ns);
+            format!(r#"{{"hook":"{hook}","now":{t},"again":{t},"seed":{seed}}}"#)
+        })
+        .collect();
+    let printed: Vec<&str> = ended
+        .lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| *line != GATE_LINE.trim_end())
+        .collect();
+    assert_eq!(printed, want);
 }
 
 #[test]

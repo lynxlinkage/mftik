@@ -20,7 +20,7 @@ A name that starts with one underscore is part of the native module. Strategy co
 
 ## Context
 
-Every hook receives a `Context`. The methods below raise `ContextError` outside that hook. Behavior is in [Context](context.md).
+Every hook receives a `Context`. The methods below raise `ContextError` outside that hook, except `now`, which is the time now. Behavior is in [Context](context.md).
 
 | Method | Role |
 | --- | --- |
@@ -31,6 +31,8 @@ Every hook receives a `Context`. The methods below raise `ContextError` outside 
 | `fail` | Request outcome `FAILED` and store the reason |
 | `volume_dir` | Writable directory, or empty |
 | `input_dir` | Directory of one named input, or empty |
+| `now` | The running hook's start, ns; the time now outside a hook |
+| `rand` | The session's `random.Random`, seeded from the `init` frame |
 | `resolve` | Look up a universal ticker; only `on_init` and `on_start` |
 | `info` | The current `Info` row for a UID this session resolved |
 | `submit` | Place an `Order`; returns the client order id |

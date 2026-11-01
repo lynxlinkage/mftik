@@ -1,7 +1,9 @@
 """Strategies the session tests drive through ``python -m mftik.run``."""
 
+import json
 import sys
 import threading
+import time
 
 from mftik import ContextError, Strategy
 
@@ -213,6 +215,42 @@ class GilGap(Strategy):
 
     def on_stop(self, ctx):
         self.stop = True
+
+
+class NowRand(Strategy):
+    """Each hook prints ``ctx.now()`` twice, 1 ms apart, and one draw."""
+
+    def on_init(self, ctx):
+        self.rng = ctx.rand()
+        self._times("init", ctx)
+
+    def on_start(self, ctx):
+        self._times("start", ctx)
+        ctx.post(self.posted)
+
+    def posted(self, ctx):
+        self._times("post", ctx)
+        ctx.after(0, self.timer)
+
+    def timer(self, ctx):
+        self._times("timer", ctx)
+        ctx.exit()
+
+    def on_stop(self, ctx):
+        self._times("onstop", ctx)
+
+    def _times(self, hook, ctx):
+        now = ctx.now()
+        time.sleep(0.001)
+        rand = ctx.rand()
+        line = {
+            "hook": hook,
+            "now": now,
+            "again": ctx.now(),
+            "same": rand is self.rng,
+            "draw": rand.getrandbits(64),
+        }
+        print(json.dumps(line, separators=(",", ":")), flush=True)
 
 
 class Plain:
