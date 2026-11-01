@@ -7,7 +7,7 @@ from pathlib import Path
 import mftik
 
 # scripts/release-check versions keeps this equal to the workspace version.
-EXPECTED_VERSION = "1.2.0"
+EXPECTED_VERSION = "1.3.0"
 
 
 def main() -> None:
