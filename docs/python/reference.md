@@ -166,6 +166,8 @@ The client order id is a decimal of version, algo id, millisecond timestamp, and
 
 `topic` does not build NATS subjects. The values are the topic strings the runtime subscribes to.
 
+Which venues support each topic, with missing fields and routes, is in the [venue × topic table](https://github.com/BullionBear/mftiko/blob/main/docs/PROTOCOL.md#2-識別碼與慣例) in mftiko's PROTOCOL §2 (E04-D061).
+
 | Name | Value |
 | --- | --- |
 | `BEST_QUOTE` | `bestquote` |
