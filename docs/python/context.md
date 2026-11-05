@@ -50,7 +50,7 @@ A submit the account worker accepts is only an acknowledgement. Later states arr
 
 `order` returns one of this strategy's orders, a copy, or `None`. Inside `on_order` a terminal order is still visible. `open_orders` returns a tuple of the account's live orders for that algo. An algo id of 0 means every algo this session declared on the account. Terminal orders are omitted. The tuple is empty when nothing is open. The order is the runtime's order. It is not sorted again. `position` returns the account's position for a UID, or `None`. `balance` returns the account's balance of an asset, or `None`. Each call returns a copy. These reads do not block.
 
-`Stopping`, message `sdk: the session is stopping`, is raised when the session is already stopping and the call cannot be accepted. `NoFeed`, message `sdk: the session has no such feed`, is raised when a read names a feed this session does not have.
+`Stopping`, message `sdk: the session is stopping`, is raised when the session is already stopping and the call cannot be accepted. `cancel` and `batch_cancel` still work in `on_stop` of `DONE` and `FAILED`; see [Orders in `on_stop`](lifecycle.md#orders-in-on_stop). `NoFeed`, message `sdk: the session has no such feed`, is raised when a read names a feed this session does not have.
 
 `maker` is the order example. Its first `on_recon` reads `position` and `open_orders`, may call `batch_cancel`, then `submit`s one limit order. `on_order` calls `cancel` when that order is accepted. See [Examples](examples.md).
 

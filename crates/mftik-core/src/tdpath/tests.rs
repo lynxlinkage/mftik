@@ -934,6 +934,140 @@ fn cancel_reject_and_timeout_leave_the_order() {
     assert!(path.order(7, &id).is_none());
 }
 
+/// Account 7 with two live orders of algo 1, `cancel_batch` 2.
+fn stop_path() -> (Path, String, String) {
+    let mut path = open(vec![decl(7, &[1])]);
+    listen(&mut path);
+    baseline(&mut path, 7, 1, 0, 2);
+    let (a, b) = (id_of(1, 3), id_of(1, 4));
+    for (seq, id) in [(1, &a), (2, &b)] {
+        let effects = path.on_account_event(
+            7,
+            order_event(
+                1,
+                seq,
+                row(id, td::OrderStatus::Accepted, 1001, 2.0),
+                td::OrderCause::Accepted,
+                0,
+                "",
+            ),
+        );
+        drive(&mut path, effects, |_, _| {});
+    }
+    (path, a, b)
+}
+
+fn cancelled(path: &mut Path, seq: u64, id: &str) {
+    let effects = path.on_account_event(
+        7,
+        order_event(
+            1,
+            seq,
+            row(id, td::OrderStatus::Cancelled, 1001, 2.0),
+            td::OrderCause::Cancelled,
+            0,
+            "",
+        ),
+    );
+    drive(path, effects, |_, _| {});
+}
+
+#[test]
+fn held_orders_refuse_every_call_and_stop_cancel_reopens_only_cancel() {
+    // mftiko E08-D067 (Go TestStopCancel).
+    let (mut path, a, _) = stop_path();
+    let mut mint = Script {
+        seqs: vec![9],
+        at: 0,
+    };
+    path.hold_orders();
+    assert_eq!(
+        path.submit(order_for(7, 1, 1001), NOW_MS, &mut mint).err(),
+        Some(Error::Stopping)
+    );
+    assert_eq!(path.cancel(7, &a).err(), Some(Error::Stopping));
+    assert_eq!(path.batch_cancel(7, 1, &[]).err(), Some(Error::Stopping));
+    assert_eq!(path.request_recon(7).err(), Some(Error::Stopping));
+    assert_eq!(path.recon_all().err(), Some(Error::Stopping));
+    assert!(path.stop_idle());
+
+    path.allow_stop_cancel();
+    assert_eq!(
+        path.submit(order_for(7, 1, 1001), NOW_MS, &mut mint).err(),
+        Some(Error::Stopping)
+    );
+    assert_eq!(path.request_recon(7).err(), Some(Error::Stopping));
+    let effects = path.cancel(7, &a).unwrap();
+    assert!(!path.stop_idle());
+    // Accepted: still waiting for the order's terminal td.evt.
+    assert!(
+        path.on_order_round(
+            ticket(&effects[0]),
+            RoundOutcome::Reply(td::OrderReply {
+                accepted: true,
+                ..Default::default()
+            }),
+        )
+        .is_empty()
+    );
+    assert!(!path.stop_idle());
+    cancelled(&mut path, 3, &a);
+    assert!(path.stop_idle());
+
+    // After OnStop the ending holds again: no new cancel.
+    path.hold_orders();
+    assert_eq!(path.batch_cancel(7, 1, &[]).err(), Some(Error::Stopping));
+}
+
+#[test]
+fn a_refused_stop_cancel_is_done_and_an_unanswered_one_waits_for_td_evt() {
+    let (mut path, a, b) = stop_path();
+    path.hold_orders();
+    path.allow_stop_cancel();
+    // cancel_batch 2: one BatchCancel round for both orders.
+    let effects = path.batch_cancel(7, 1, &[]).unwrap();
+    assert_eq!(effects.len(), 1);
+    let refused = path.on_order_round(
+        ticket(&effects[0]),
+        RoundOutcome::Reply(td::OrderReply {
+            code: i32::from(td::RejectCode::OrderNotOpen),
+            reason: "not open".to_owned(),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(names(&refused), ["reject"]);
+    assert!(path.stop_idle());
+
+    let effects = path.cancel(7, &b).unwrap();
+    assert!(
+        path.on_order_round(ticket(&effects[0]), RoundOutcome::NoAnswer)
+            .is_empty()
+    );
+    assert!(!path.stop_idle());
+    cancelled(&mut path, 3, &b);
+    assert!(path.stop_idle());
+
+    // A round whose outcome can never be queued is abandoned.
+    let effects = path.cancel(7, &a).unwrap();
+    assert!(!path.stop_idle());
+    path.abandon_round(ticket(&effects[0]));
+    assert!(path.stop_idle());
+}
+
+#[test]
+fn a_cancel_before_the_ending_is_not_waited_for() {
+    let (mut path, a, _) = stop_path();
+    let effects = path.cancel(7, &a).unwrap();
+    path.hold_orders();
+    path.allow_stop_cancel();
+    assert!(path.stop_idle());
+    assert!(
+        path.on_order_round(ticket(&effects[0]), RoundOutcome::NoAnswer)
+            .is_empty()
+    );
+    assert!(path.stop_idle());
+}
+
 #[test]
 fn batch_cancel_splits_on_cancel_batch() {
     let mut path = open(vec![decl(7, &[1])]);

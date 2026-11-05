@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use mftik_core::dispatch::{self, Dispatcher};
 use mftik_core::eventlog::{
-    self, Kind, Recorder, STOP_DELIVER, STOP_HUNG, outcome, parse_init, parse_order_call,
-    parse_read_call, parse_resolve,
+    self, Kind, Recorder, STOP_DELIVER, STOP_HUNG, STOP_KEEP_TD, outcome, parse_init,
+    parse_order_call, parse_read_call, parse_resolve,
 };
 use mftik_core::symbol::Info;
 use mftik_core::symclient;
@@ -122,6 +122,7 @@ pub fn replay<S: Strategy>(
             seed: Mutex::new(None),
         }),
         stopped: false,
+        keep_td: false,
         report: ReplayReport {
             session_id: header.session_id,
             incarnation: header.incarnation,
@@ -200,6 +201,9 @@ struct Replayer<S: Strategy> {
     ends: HashMap<u64, Record>,
     shared: Arc<Shared>,
     stopped: bool,
+    /// `STOP_KEEP_TD`: OnStop may cancel, and td.evt stays up through it
+    /// (mftiko E08-D067).
+    keep_td: bool,
     report: ReplayReport,
     opt: ReplayOptions,
 }
@@ -334,10 +338,17 @@ impl<S: Strategy> Replayer<S> {
                 Kind::BINDINGS => self.bindings(&x),
                 Kind::STOP => self.stop(&x),
                 Kind::ONSTOP => {
+                    // An older log closed the TD buffer before OnStop, so a
+                    // Post there fails. A STOP_KEEP_TD log kept it open: OnStop
+                    // may cancel, and the result frames follow the hook.
                     if self.stopped
+                        && !self.keep_td
                         && let Some(disp) = self.plane.dispatcher()
                     {
                         disp.close_td();
+                    }
+                    if self.keep_td {
+                        self.plane.wiring.allow_stop_cancel();
                     }
                     let plane = Arc::clone(&self.plane);
                     self.hook(&x, || {
@@ -346,6 +357,9 @@ impl<S: Strategy> Replayer<S> {
                             Ok(())
                         })
                     });
+                    if self.keep_td {
+                        self.plane.wiring.hold_td();
+                    }
                 }
                 kind if kind.is_input() => self.step(&x),
                 _ => {}
@@ -426,14 +440,25 @@ impl<S: Strategy> Replayer<S> {
         let _ = self.plane.wiring.recon();
     }
 
+    /// The dispatcher's ending. `STOP_DELIVER` without `STOP_KEEP_TD` is an
+    /// older log: td.evt was dropped before the buffer was delivered, so from
+    /// here on an order call is refused. `STOP_KEEP_TD` holds orders for
+    /// that delivery and opens Cancel for OnStop (mftiko E08-D067). The
+    /// buffered inputs that follow in the log still run.
     fn stop(&mut self, x: &Record) {
         if x.flags & STOP_HUNG != 0 {
             return;
         }
         self.stopped = true;
-        if x.flags & STOP_DELIVER != 0 {
-            self.plane.wiring.unsubscribe_td();
+        if x.flags & STOP_DELIVER == 0 {
+            return;
         }
+        if x.flags & STOP_KEEP_TD != 0 {
+            self.keep_td = true;
+            self.plane.wiring.hold_td();
+            return;
+        }
+        self.plane.wiring.unsubscribe_td();
     }
 
     fn bindings(&mut self, x: &Record) {

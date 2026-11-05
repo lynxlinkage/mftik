@@ -575,3 +575,16 @@ E07-D023：hook 的例外照 E04-D004、E07-D008 記成 `{type(e).__name__}: {st
 - Python 層沒有自己拼 TD subject 的地方，帳號經由 InitPayload 進 Rust，不需要改。`examples/python/maker`、`stateful` 的 `session.yaml` 與 `docs/python/session.md` 加上 `td_instance`（`SessionCreate` 必填，E21-D005）；`docs/python/install.md`、`docs/rust/pack.md` 寫明需要 mftiko v0.7.0。
 
 測試（E21-D045）：`tdsubject` 的單元測試照 Go `TestSubjects`、`TestTokenRefuses`，另加 U+0085、U+3000。`tdpath` 的 `open_rejects_a_bad_config` 檢查各種不合法的 `td_instance`；`same_api_id_on_two_instances_uses_only_its_own_subjects` 以同一個 `api_id` 分別開在 `td-a`、`td-b`，`td.evt`、`td.view`、`td.order` 都只用自己的 instance。`mftik-rt` 的 `a_second_td_instance_with_the_same_api_id_is_not_touched` 在真的 nats-server 上：另一條連線訂 `td.*.td-b.>`，session 的 recon 與 submit 都沒有送到 `td-b`；發在 `td.evt.td-b.7` 的 order seq 6 不會交給策略，接著發在 `td-a` 的 position seq 6 才是下一筆。把訂閱改成 `td.evt.*.{api_id}` 時這個測試失敗。其他測試的 peer 改訂 `td.{view,order}.td-a.*`，帳號都帶 `td_instance: td-a`。
+
+## 變更（2026-11-06，#497）
+
+#497 接上 mftiko E08-D067（BullionBear/mftiko#545，PR #546，squash `868982d`；PROTOCOL v1.107 §9.2.5、§12）：`DONE`、`FAILED` 的 `on_stop` 可以 `cancel` 與 `batch_cancel`，撤單的結果在退訂 `td.evt` 之前交付。之前 `on_stop` 裡的撤單一律回 `Error::Stopping`，GTC 掛單在 session 結束後留在交易所（prod `03be4b`，bybit-hephe）。這修訂 E03-D095 的結束順序。
+
+- 結束順序改成和 Go `dispatch.phase2` 相同：`hold_td`（Submit、Cancel、BatchCancel、Recon 都拒絕，`td.evt` 不退）→ 交付 TD buffer → `allow_stop_cancel`（只放行 Cancel、BatchCancel）→ OnStop → 再 `hold_td` → 交付 OnStop 撤單的結果，等到 `stop_idle` → `unsubscribe_td` → 執行已在 buffer 裡的項目 → 關閉 TD buffer。全程共用同一個期限（`grace_ms` 的剩餘，或自己結束時的 `hook_timeout_s`）。期限已到時只退訂、關閉，不再執行 buffer 裡的項目。`CRASHED` 照舊：OnStop 之前關閉 TD buffer，不等撤單。
+- `dispatch::Config` 加 `hold_td`、`allow_stop_cancel`、`stop_idle`，對應 Go 的 `HoldTD`、`AllowStopCancel`、`StopIdle`。等結果時在 condvar 上等，TD buffer 有新項目或注入的時鐘前進都會喚醒；`mftik-rt` 的時鐘每個 tick 都會推進，所以期限一定會到。
+- `tdpath::Path` 加 `hold_orders`、`allow_stop_cancel`、`stop_idle`、`abandon_round`。放行期間開始的撤單 round 記在 `stop_rounds`，它點名、還沒終態的單記在 `stop_wait`。回覆被拒或沒有 responder 就不再等；接受或逾時則等到那張單的終態 `td.evt`（E08-D045）。結果送不進 TD buffer 時（`mftik-rt` 的 `answer` push 失敗）以 `abandon_round` 放掉，對應 Go `enqueue` 回 false。
+- 事件紀錄的 `stop` 加 `STOP_KEEP_TD`（4），與 `STOP_DELIVER` 一起標。回放：有它就在交付時 hold、OnStop 前放行撤單、OnStop 後再 hold，不關 TD buffer；沒有它的舊檔照舊在交付前退訂、OnStop 前關 buffer。`format_version` 不變。
+- proto、conformance、`mftiko-eventlog` 的 pin 從 `55ffbfe` 改到 `868982d`。這段區間 `contract/proto` 沒有變；新 pin 的 `mftiko-eventlog` 印得出 `keep_td`。
+- Python 經由同一個 runtime，不另外改程式；`docs/python` 與 `docs/rust` 的 lifecycle 加「Orders in `on_stop`」，context 與 errors 指過去。
+
+測試：`dispatch` 的結束順序測試改成新順序，另加 OnStop 等待撤單結果、以及等不到結果時以期限結束；`a_hold_panic_skips_the_rest_of_the_stop` 取代 unsubscribe panic 的版本（unsubscribe 現在在最後）。`tdpath` 照 Go `TestStopCancel` 加 hold、放行、接受後等終態、被拒即結束、逾時等 `td.evt`、`abandon_round`，以及結束前送出的撤單不列入等待。`mftik-rt` 以真的 nats-server 測 OnStop 撤單：Submit 被拒、Cancel 送出、取消的 `td.evt` 在 `on_stop` 返回前交付；回覆逾時時仍等到 `td.evt`。原本「退訂後交付」的兩個測試改成新語意：交付期間 `td.evt` 仍收得到，結束退訂之後的事件不再收到。mftiko-conformance（`868982d`）全數通過。

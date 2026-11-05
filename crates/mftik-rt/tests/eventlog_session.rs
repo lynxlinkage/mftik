@@ -235,7 +235,7 @@ fn each_input_is_followed_by_its_hook_end_and_the_exit_writes_end() {
             "8 hook_end ref=7",
             "9 post ref=2",
             "10 hook_end ref=9",
-            "11 stop flags=1",
+            "11 stop flags=5",
             "12 onstop",
             "13 hook_end ref=12",
             "14 end",

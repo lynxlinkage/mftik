@@ -429,6 +429,7 @@ fn rig_with(
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
     let during: During = Arc::default();
     let unsubscribe = Arc::clone(&path);
+    let (hold, allow, idle) = (Arc::clone(&path), Arc::clone(&path), Arc::clone(&path));
     let disp_logs = Arc::clone(&logs);
     let on_stop = on_stop.map(|mut callback| {
         let path = Arc::clone(&path);
@@ -442,6 +443,17 @@ fn rig_with(
         hook_timeout: Duration::ZERO,
         now_ns: clock.now_ns(),
         on_stop,
+        hold_td: Some(Box::new(move || {
+            if let Some(td) = hold.get() {
+                td.hold();
+            }
+        })),
+        allow_stop_cancel: Some(Box::new(move || {
+            if let Some(td) = allow.get() {
+                td.allow_stop_cancel();
+            }
+        })),
+        stop_idle: Some(Box::new(move || idle.get().is_none_or(TdPath::stop_idle))),
         unsubscribe_td: Some(Box::new(move || {
             if let Some(td) = unsubscribe.get() {
                 td.unsubscribe();
@@ -1222,7 +1234,7 @@ fn batch_cancel_splits_by_cancel_batch_and_ids_come_from_one_counter() {
 }
 
 #[test]
-fn unsubscribe_stops_td_evt_and_the_drain_delivers_what_was_received() {
+fn the_ending_holds_orders_and_drops_td_evt_only_after_on_stop() {
     let rig = rig(Duration::from_millis(500));
     rig.peer.serve_view(View::Inject);
     rig.reconciled();
@@ -1245,8 +1257,9 @@ fn unsubscribe_stops_td_evt_and_the_drain_delivers_what_was_received() {
     go.send(()).expect("go");
     assert_eq!(rig.end(), RunEnd::Done);
 
-    // During the drain, after unsubscribe_td: seq 9 is published and is not
-    // received, and order calls are refused.
+    // During the drain, after hold_td: seq 9 is published and still arrives,
+    // since td.evt stays up until OnStop's cancels are done (mftiko
+    // E08-D067), and order calls are refused.
     let (peer_nats, peer_io) = (rig.peer.nats.clone(), rig.peer.io.clone());
     let td = rig.td.clone();
     let refused = Arc::new(Mutex::new(None));
@@ -1268,18 +1281,23 @@ fn unsubscribe_stops_td_evt_and_the_drain_delivers_what_was_received() {
     }));
     rig.disp.on_stop(&StopRequest::new(None)).expect("on_stop");
     let seqs: Vec<u64> = rig.stamps(7).iter().map(|(_, td)| td.seq).collect();
-    assert_eq!(seqs, [SNAPSHOT_SEQ, 6, 7, 8]);
+    assert_eq!(seqs, [SNAPSHOT_SEQ, 6, 7, 8, 9]);
     assert_eq!(
         *refused.lock().expect("refused"),
         Some(Err(Error::Stopping))
     );
     assert_eq!(rig.td.request_recon(7), Err(Error::Stopping));
+    // After the ending unsubscribed, seq 10 is not received.
+    rig.peer.publish(7, order_event(10, INCARNATION));
+    rig.peer.flush();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(rig.stamps(7).len(), 5);
     // Idempotent.
     rig.td.unsubscribe();
 }
 
 #[test]
-fn after_unsubscribe_a_queued_recon_is_delivered_and_its_release_stops() {
+fn a_recon_queued_before_the_ending_is_delivered_and_releases_what_it_held() {
     let rig = rig(Duration::from_millis(500));
     rig.peer.serve_view(View::Reply);
     rig.reconciled();
@@ -1308,16 +1326,167 @@ fn after_unsubscribe_a_queued_recon_is_delivered_and_its_release_stops() {
     go.send(()).expect("go");
     assert_eq!(rig.end(), RunEnd::Done);
     rig.disp.on_stop(&StopRequest::new(None)).expect("on_stop");
-    // Go: OnRecon runs (`beginReply`), then `releaseStep` sees the closed
-    // path and releases nothing.
+    // Go: OnRecon runs (`beginReply`), then `releaseStep` releases the held
+    // events: the drain only holds orders, the path is not closed until after
+    // OnStop (mftiko E08-D067).
     assert_eq!(
         rig.stamps(7),
         [
             ("recon", td_stamp(7, INCARNATION, SNAPSHOT_SEQ)),
             ("recon", td_stamp(7, INCARNATION, SNAPSHOT_SEQ)),
+            ("order", td_stamp(7, INCARNATION, 6)),
+            ("order", td_stamp(7, INCARNATION, 7)),
         ]
     );
     assert_eq!(rig.peer.views.load(Ordering::SeqCst), 3);
+}
+
+/// Account 7's order `id` cancelled, at `seq`.
+fn cancelled_event(seq: u64, id: &str) -> td::AccountEvent {
+    td::AccountEvent {
+        seq,
+        source: source(INCARNATION),
+        event: Some(td::account_event::Event::OrderUpdate(td::OrderUpdate {
+            order: Some(td::Order {
+                uid: 1001,
+                client_order_id: id.to_owned(),
+                status: td::OrderStatus::Cancelled as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+    }
+}
+
+/// What `on_stop`'s Submit returned.
+type SubmitSlot = Arc<Mutex<Option<Result<String, Error>>>>;
+
+/// The account 7 seq 6 order is live; `on_stop` cancels it and tries a Submit.
+fn stop_cancel_rig(recv_window: Duration) -> (Rig, SubmitSlot) {
+    let submitted: SubmitSlot = Arc::default();
+    let slot = Arc::clone(&submitted);
+    let id = event_id(6);
+    let rig = rig_with(
+        recv_window,
+        Some(Box::new(move |td, _| {
+            *slot.lock().expect("submit") = Some(td.submit(buy(7, 1)));
+            td.cancel(7, &id).map_err(|err| err.to_string())
+        })),
+        None,
+    );
+    rig.peer.serve_view(View::Inject);
+    (rig, submitted)
+}
+
+fn end_done(rig: &Rig) {
+    let ender = rig.disp.clone();
+    rig.disp.push_td(move || ender.exit()).expect("push");
+    assert_eq!(rig.end(), RunEnd::Done);
+}
+
+fn last_order_status(rig: &Rig) -> Option<(Td, i32)> {
+    order_hooks(&rig.seen())
+        .last()
+        .map(|(view, _)| (view.td, view.status))
+}
+
+#[test]
+fn on_stop_cancels_and_the_result_arrives_before_td_evt_is_dropped() {
+    // mftiko E08-D067: OnStop of DONE may Cancel; Submit is refused. TD
+    // accepts, then publishes the cancelled order; the ending delivers that
+    // td.evt before it unsubscribes.
+    let (rig, submitted) = stop_cancel_rig(Duration::from_secs(2));
+    let nats = rig.peer.nats.clone();
+    let mut sub = rig
+        .peer
+        .io
+        .block_on({
+            let nats = nats.clone();
+            async move { nats.subscribe("td.order.td-a.*").await }
+        })
+        .expect("subscribe td.order");
+    let requests: Arc<Mutex<Vec<td::OrderRequest>>> = Arc::default();
+    let seen_requests = Arc::clone(&requests);
+    rig.peer.io.spawn(async move {
+        while let Some(msg) = sub.next().await {
+            let request = td::OrderRequest::decode(msg.payload.as_ref()).expect("request");
+            seen_requests.lock().expect("requests").push(request);
+            let reply = td::OrderReply {
+                accepted: true,
+                ..Default::default()
+            };
+            let to = msg.reply.expect("reply subject");
+            nats.publish(to, reply.encode_to_vec().into())
+                .await
+                .expect("order reply");
+            let event = cancelled_event(7, &event_id(6)).encode_to_vec();
+            nats.publish(evt_subject(7), event.into())
+                .await
+                .expect("evt");
+        }
+    });
+    rig.peer.flush();
+    rig.reconciled();
+    wait_until("seq 6", || rig.stamps(7).len() == 2);
+    end_done(&rig);
+    rig.disp.on_stop(&StopRequest::new(None)).expect("on_stop");
+
+    assert_eq!(
+        *submitted.lock().expect("submit"),
+        Some(Err(Error::Stopping))
+    );
+    let cancels: Vec<String> = requests
+        .lock()
+        .expect("requests")
+        .iter()
+        .filter_map(|request| match &request.req {
+            Some(td::order_request::Req::Cancel(cancel)) => Some(cancel.client_order_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, [event_id(6)]);
+    assert_eq!(
+        last_order_status(&rig),
+        Some((
+            td_stamp(7, INCARNATION, 7),
+            td::OrderStatus::Cancelled as i32
+        ))
+    );
+    assert!(rig.td.open_orders(7, 0).is_empty());
+    assert_eq!(rig.td.cancel(7, &event_id(6)), Err(Error::Stopping));
+}
+
+#[test]
+fn an_unanswered_stop_cancel_waits_for_the_terminal_td_evt() {
+    // The cancel's reply times out; the ending still waits, within its
+    // budget, for the td.evt that makes the order terminal (E08-D045).
+    let (rig, _) = stop_cancel_rig(Duration::from_millis(200));
+    rig.peer.serve_orders(Orders::Silent);
+    rig.reconciled();
+    wait_until("seq 6", || rig.stamps(7).len() == 2);
+    end_done(&rig);
+    let (nats, io) = (rig.peer.nats.clone(), rig.peer.io.clone());
+    let late = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(600));
+        io.block_on(async move {
+            let event = cancelled_event(7, &event_id(6)).encode_to_vec();
+            nats.publish(evt_subject(7), event.into()).await?;
+            nats.flush().await.map_err(|err| err.to_string().into())
+        })
+        .map_err(|err: Box<dyn std::error::Error + Send + Sync>| err.to_string())
+        .expect("publish the cancelled order");
+    });
+    let started = StdInstant::now();
+    rig.disp.on_stop(&StopRequest::new(None)).expect("on_stop");
+    late.join().expect("publisher");
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    assert_eq!(
+        last_order_status(&rig),
+        Some((
+            td_stamp(7, INCARNATION, 7),
+            td::OrderStatus::Cancelled as i32
+        ))
+    );
 }
 
 /// What account 7 and 8 hold when the strategy `on_stop` runs.

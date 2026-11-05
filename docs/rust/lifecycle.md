@@ -105,7 +105,7 @@ The market-data queue is the ring described above. After each hook, a waiting ac
 
 Exit code 1 is the worker giving up before it can keep speaking the control protocol, for example when it cannot take the control file descriptor. A process killed by a signal has no outcome from this table. The platform records the signal. `HUNG` from the platform's own heartbeat watchdog is that kind of kill: the process is signaled, and the platform treats the outcome as `HUNG` with reason `no_beat`.
 
-`CRASHED` does not deliver account events that were still queued. `DONE` and `FAILED` do deliver the account events received before the stop, and then run `on_stop`. The event that overflowed the account queue is not one of those events. The reason for that overflow is `td buffer full`.
+`CRASHED` does not deliver account events that were still queued. `DONE` and `FAILED` do deliver the account events received before the stop, and then run `on_stop`, which may cancel (see [Orders in `on_stop`](#orders-in-on_stop)). The event that overflowed the account queue is not one of those events. The reason for that overflow is `td buffer full`.
 
 A deadline on init or start uses reason `deadline`, does not wait for the hook, does not run `on_stop`, and exits 10. A hook that exceeds `hook_timeout_s` uses reason `hook timeout` and exits 21. `on_stop` is not called.
 
@@ -118,3 +118,11 @@ An `Err` from `on_init` or `on_start` ends the session `INIT_FAILED`. `Done.erro
 A panic from `on_init` or `on_start` is also `INIT_FAILED`. `Done.error` is `hook panic: {message}`. A panic from any later hook, including a read callback, an `after` callback, and a `post` callback, is `CRASHED` with reason `hook panic: {message}`, and `on_stop` still runs. The message is the `&str` or `String` the panic carried, or `unknown panic`.
 
 A panic from `on_stop` does not change the outcome or the exit code. The runtime logs `on stop: hook panic: ...`. The platform records that `on_stop` did not finish.
+
+## Orders in `on_stop`
+
+On `DONE` and `FAILED`, `on_stop` may call `cancel` and `batch_cancel`. `submit` and `request_recon` return `Error::Stopping` there. The account subscription stays up until `on_stop` returns and its cancels have their results: a reject when TD refuses the cancel, or the order update that makes the order terminal. They arrive as `on_reject` and `on_order` after `on_stop` returns. A cancel whose reply times out still waits for that order update. All of this uses the stop budget: what is left of `grace_ms` for a stop from the platform, or `hook_timeout_s` when the strategy ended the session itself. When the budget runs out, the session stops waiting and the order may still be open on the exchange.
+
+While the account events received before the stop are delivered, before `on_stop`, every order call returns `Error::Stopping`.
+
+`CRASHED` delivers nothing after `on_stop`. A cancel made there is sent, but its result is not delivered and the session does not wait for it. The platform does not cancel a session's orders for it, so `HUNG`, a killed worker, or a cancel that ran out of budget can leave orders open.

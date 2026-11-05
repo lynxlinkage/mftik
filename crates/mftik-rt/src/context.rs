@@ -49,7 +49,8 @@ pub enum Error {
     AlgoNotDeclared,
     /// The session has no such feed.
     NoFeed,
-    /// The session is stopping.
+    /// The session is ending and this call is refused. OnStop of `DONE` and
+    /// `FAILED` may still cancel (mftiko E08-D067).
     Stopping,
     /// The path behind this call is not in the runtime yet: `td` (E03-07)
     /// or `sym` (E03-08).
@@ -146,19 +147,24 @@ impl<S: Strategy> Context<S> {
     /// Places an order and returns its client_order_id. The order is in
     /// [`Context::open_orders`] as `PENDING_NEW` before this returns; what
     /// happens to it comes as OrderEvents. An error means nothing was sent.
+    /// `on_stop` gets [`Error::Stopping`]: a stopping session places no
+    /// orders (mftiko E08-D067).
     pub fn submit(&self, order: Order) -> Result<String, Error> {
         self.plane.wiring.submit(order)
     }
 
     /// Asks TD to cancel one of the strategy's orders. A local refusal comes
-    /// as a RejectEvent.
+    /// as a RejectEvent. `on_stop` of `DONE` and `FAILED` may call it; the
+    /// reply and the order update that follows are delivered before the
+    /// session drops `td.evt`, within the same budget (mftiko E08-D067).
     pub fn cancel(&self, api_id: i64, client_order_id: &str) -> Result<(), Error> {
         self.plane.wiring.cancel(api_id, client_order_id)
     }
 
     /// Cancels every open order of `algo_id` on the account, only those of
     /// `uids` when it is not empty, split by the account's cancel_batch
-    /// (E06-D002, E06-D031).
+    /// (E06-D002, E06-D031). `on_stop` of `DONE` and `FAILED` may call it,
+    /// on the same terms as [`Context::cancel`].
     pub fn batch_cancel(&self, api_id: i64, algo_id: u32, uids: &[u32]) -> Result<(), Error> {
         self.plane.wiring.batch_cancel(api_id, algo_id, uids)
     }

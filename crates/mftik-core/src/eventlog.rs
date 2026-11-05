@@ -105,12 +105,18 @@ pub const END_ERROR: u16 = 2;
 /// Command's `bindings` field. Without it the body is the Live payload.
 pub const FROM_COMMAND: u16 = 1;
 
-/// `stop` flags: td.evt was dropped and the TD buffer is delivered before
-/// OnStop (DONE and FAILED). Without it the ending delivers nothing.
+/// `stop` flags: the TD buffer is delivered before OnStop (DONE and FAILED).
+/// Without it the ending delivers nothing.
 pub const STOP_DELIVER: u16 = 1;
 /// `stop` flags: the watchdog. A hook passed `hook_timeout_s`, and that hook
 /// has no `hook_end`.
 pub const STOP_HUNG: u16 = 2;
+/// `stop` flags, set with [`STOP_DELIVER`] from mftiko E08-D067 on: `td.order`
+/// and `td.evt` stay up through OnStop, Cancel and BatchCancel work there, and
+/// their results are delivered before the subscription is dropped. A
+/// [`STOP_DELIVER`] frame without it is an older log, which dropped `td.evt`
+/// before that delivery.
+pub const STOP_KEEP_TD: u16 = 4;
 
 /// `order_call` flags: the operation is in the low byte, and each round of a
 /// BatchCancel adds [`FROM_BATCH`].
