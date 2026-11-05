@@ -3,7 +3,7 @@
 import importlib.metadata
 
 # scripts/release-check versions keeps this equal to the workspace version.
-FALLBACK = "2.0.0"
+FALLBACK = "2.1.0"
 
 
 def package_version() -> str:
