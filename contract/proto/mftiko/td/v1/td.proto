@@ -44,9 +44,9 @@ enum AccountState {
   ACCOUNT_STATE_DEGRADED = 2; // 私有 websocket 斷線，或查單失敗超過 5 分鐘：新單以 102 拒絕，Cancel 與 BatchCancel 照常（E06-D003、E06-D022、E06-D027）
 }
 
-// ---------- td.order.{api_id} ----------
+// ---------- td.order.{td_instance}.{api_id} ----------
 // request／reply（E06-D010）。回覆只有兩種：ack（TD 收下了，接著送往交易所），或本地拒絕（1xx，什麼都沒送出）。
-// 之後的狀態一律從 td.evt.{api_id} 拿。
+// 之後的狀態一律從 td.evt.{td_instance}.{api_id} 拿。
 
 message OrderRequest {
   oneof req {
@@ -109,7 +109,7 @@ message OrderReply {
   string client_order_id = 4; // Submit、Cancel 的 client_order_id；BatchCancel 是空的
 }
 
-// ---------- td.view.{api_id} ----------
+// ---------- td.view.{td_instance}.{api_id} ----------
 // 只讀 account worker 的記憶體，不打交易所（E06-D006）。
 
 message ViewRequest {
@@ -149,7 +149,7 @@ message LeverageInfo {
   optional double leverage = 2; // 不設 = 快取裡沒有這個商品
 }
 
-// ---------- td.evt.{api_id} ----------
+// ---------- td.evt.{td_instance}.{api_id} ----------
 
 message AccountEvent {
   uint64 seq = 1; // 每個 incarnation 從 1 起算

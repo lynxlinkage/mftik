@@ -2,6 +2,8 @@
 
 `mftiko-pack -bin` builds a strategy image and pushes it. It ships with the `mftiko` CLI. Use mftiko v0.5.1 or later: an older `mftiko-pack` does not read the `mftiko.sdk=` record and refuses a Rust binary with `artifact: no sdk version in buildinfo`. A strategy author does not call it from a hook. The image is an OCI image used as an archive. The platform does not run it as a container. It unpacks the rootfs and executes the entrypoint.
 
+A strategy that trades needs mftiko v0.7.0 or later to run. `mftik-rt` sends to `td.{order,view,evt}.{td_instance}.{api_id}` with each session account's `td_instance` (mftiko E21-D042–E21-D044), and an older mftiko's TD does not answer there. Each `accounts[]` entry of the session file needs `td_instance`.
+
 Build a linux x86_64 GNU binary, then pack that file. The packer does not compile Rust. The worker's supported platform is Ubuntu 22.04 or later on x86_64 (glibc 2.35). There is no musl image. A binary built on macOS is Mach-O; the packer refuses it.
 
 Every binary that calls `mftik_rt::run` embeds what the packer reads: the `mftiko.contracts=` marker and the `mftiko.sdk=rust <version>` record, on every platform (E08-D001, E08-D005). It carries no Go build info, so `go version -m` reports nothing for it. Depend on a release after 1.2.0; packing a binary linked to v1.2.0 fails because that tag embeds neither.

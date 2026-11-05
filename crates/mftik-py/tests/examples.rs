@@ -21,7 +21,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use futures_util::StreamExt;
 use mftik_core::cloid::{self, EPOCH_MS};
 use mftik_core::symbol::PRICE_TICK;
-use mftik_core::tdpath::evt_subject;
 use mftik_proto::wire::mftiko::common::v1::{self as common, Outcome, Version};
 use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event, view_reply as md_view};
 use mftik_proto::wire::mftiko::session::v1::{AccountDecl, EventLog};
@@ -37,6 +36,14 @@ use mftik_testkit::{
 use prost::Message;
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// The TD instance the test accounts are on (E21-D042).
+const TD: &str = "td-a";
+
+/// `td.evt.{TD}.{api_id}`.
+fn evt_subject(api_id: i64) -> String {
+    mftik_core::tdsubject::evt(TD, api_id).expect("td.evt subject")
+}
 
 const SCENARIO_ENV: &str = "MFTIK_EXAMPLE_SCENARIO";
 const REPORT_ENV: &str = "MFTIK_EXAMPLE_REPORT";
@@ -317,7 +324,7 @@ fn serve_view(io: &Io, client: async_nats::Client, scenario: &Scenario) {
     let sub = io
         .block_on({
             let client = client.clone();
-            async move { client.subscribe("td.view.*").await }
+            async move { client.subscribe("td.view.td-a.*").await }
         })
         .expect("subscribe td.view");
     io.spawn(async move {
@@ -369,7 +376,7 @@ fn serve_orders(io: &Io, client: async_nats::Client, requests: Arc<Mutex<Vec<td:
     let sub = io
         .block_on({
             let client = client.clone();
-            async move { client.subscribe("td.order.*").await }
+            async move { client.subscribe("td.order.td-a.*").await }
         })
         .expect("subscribe td.order");
     io.spawn(async move {
@@ -457,8 +464,8 @@ fn payload_for(nats: &Nats, scenario: &Scenario) -> InitPayload {
         payload.accounts.push(AccountDecl {
             name: "main".into(),
             api_id: scenario.api_id,
+            td_instance: TD.into(),
             algo_ids: scenario.algo_ids.clone(),
-            ..Default::default()
         });
     }
     if scenario.event_log_dir.is_some() {

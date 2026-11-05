@@ -35,10 +35,8 @@ message AccountCredentials {
 
 message AccountSettings {
   uint32 cancel_on_disconnect_s = 1; // 0 = 關閉
-  // 歷史補正（DECISIONS E06-D001）。
-  uint32 backfill_interval_s = 2; // 另加 jitter；0 = 預設。必須短於交易所成交歷史的保留期。誰用見 §10 P18，不是 TD agent
-  // 手動觸發：比上次處理過的值新，就提前跑一輪。誰跑見 §10 P18，不是 TD agent。重啟後可能多跑一次，無害。
-  int64 backfill_requested_at_ns = 3;
+  reserved 2, 3;
+  reserved "backfill_interval_s", "backfill_requested_at_ns";
 }
 
 // ---------- STS agent 寫 ----------
@@ -126,7 +124,7 @@ message EntryStatus {
   EntryState state = 1;
   string reason = 2;
   // feed：完整的 subject（md.v1.f.{inst}.{topic}.{ticker}，E04-D055）。NATS topic 用人讀的名字，不用 UID。selector：成員 subject 的前綴（md.v1.f.{inst}）；
-  // 帳號：td.order.{api_id}。由 provider 決定，訂閱端不自己組（PROTOCOL §7、DECISIONS E01-D006）。
+  // 帳號：td.order.{td_instance}.{api_id}。由 provider 決定，訂閱端不自己組（PROTOCOL §7、DECISIONS E01-D006）。
   string subject = 3;
   mftiko.common.v1.WorkerRef worker = 4;
   Universe universe = 5; // 只有 selector

@@ -32,6 +32,9 @@ use mftik_testkit::*;
 use nkeys::KeyPair;
 use prost::Message;
 
+/// The TD instance the test accounts are on (E21-D042).
+const TD: &str = "td-a";
+
 // ---------- the worker side ----------
 
 /// The strategy the worker runs. `InitPayload.params` names the scenario.
@@ -344,7 +347,7 @@ fn td_recon_then_a_submit_without_a_responder() {
     let seen = Arc::clone(&views);
     let client = peer.clone();
     let mut sub = io
-        .block_on(async move { client.subscribe("td.view.7").await })
+        .block_on(async move { client.subscribe("td.view.td-a.7").await })
         .expect("subscribe td.view");
     io.spawn(async move {
         while let Some(msg) = futures_util::StreamExt::next(&mut sub).await {
@@ -366,6 +369,7 @@ fn td_recon_then_a_submit_without_a_responder() {
     let mut payload = init_payload(&nats.creds, "td");
     payload.accounts = vec![AccountDecl {
         api_id: 7,
+        td_instance: TD.into(),
         algo_ids: vec![1],
         ..Default::default()
     }];

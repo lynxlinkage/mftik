@@ -8,7 +8,7 @@ A session is created from a `SessionCreate` request. The `mftiko` CLI reads it f
 
 `md_watch` reads market data only. Its file is in [Pack and deploy](pack.md#deploy-a-session). `maker` trades on one account:
 
-```yaml examples/python/maker/session.yaml:1-22
+```yaml examples/python/maker/session.yaml:1-23
 name: maker-abc
 labels:
   owner: research
@@ -25,6 +25,7 @@ params:
 accounts:
   - name: main
     api_id: 7
+    td_instance: td-1
     algo_ids: [1]
 restart:
   mode: on_failure
@@ -35,7 +36,7 @@ grace_ms: 15000
 
 `stateful` counts fills on an account, starts from an earlier session's state, and sets limits:
 
-```yaml examples/python/stateful/session.yaml:1-20
+```yaml examples/python/stateful/session.yaml:1-21
 name: stateful-abc
 sts_instance: sts-1
 strategy:
@@ -48,6 +49,7 @@ params:
 accounts:
   - name: main
     api_id: 7
+    td_instance: td-1
     algo_ids: [2]
 inputs:
   - name: state
@@ -58,7 +60,7 @@ limits:
   hook_timeout_s: 5
 ```
 
-The registry, the account, and the input digest in these two files are placeholders. Replace them with your own.
+The registry, the account, the TD instance, and the input digest in these two files are placeholders. Replace them with your own.
 
 ## Identity
 
@@ -88,7 +90,9 @@ The registry, the account, and the input digest in these two files are placehold
 
 ## Accounts
 
-`accounts` is the trading accounts the session may use. Each entry is `name`, `api_id`, and `algo_ids`.
+`accounts` is the trading accounts the session may use. Each entry is `name`, `api_id`, `td_instance`, and `algo_ids`, and all four are required.
+
+`td_instance` is the TD instance that trades the account for this session, from `mftiko instance list` (its plane must be `td`). It is required since mftiko v0.7.0. The SDK sends orders to `td.order.{td_instance}.{api_id}`, asks `td.view.{td_instance}.{api_id}`, and listens on `td.evt.{td_instance}.{api_id}`, so the session talks only to that instance even when another TD instance runs the same `api_id`. A session whose `td_instance` is empty or contains `.`, `*`, `>`, or whitespace fails at Init.
 
 `api_id` is an account that already exists on the platform (`mftiko account list`). `algo_ids` is at least one id from 1 to 1023, without repeats. An order carries one of these algo ids. Any other id raises `AlgoNotDeclared` without sending anything. See [Context](context.md#orders).
 

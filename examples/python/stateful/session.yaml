@@ -10,6 +10,7 @@ params:
 accounts:
   - name: main
     api_id: 7
+    td_instance: td-1
     algo_ids: [2]
 inputs:
   - name: state

@@ -8,6 +8,7 @@ use mftik_proto::wire::mftiko::{common::v1 as common, td::v1 as td};
 
 use crate::cloid::algo_of;
 use crate::dispatch::Input;
+use crate::tdsubject;
 
 /// Held `td.evt` messages across every account. One more fails the session
 /// (PROTOCOL §9.6, E08-D041). The dispatcher FIFO uses the same cap.
@@ -36,9 +37,12 @@ pub struct Config {
 }
 
 /// One account this session may trade. `algo_ids` are the algos declared for it.
+/// `td_instance` is the TD instance STS put on the account record; the
+/// subjects are `td.{order,view,evt}.{td_instance}.{api_id}` (E21-D042).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountDecl {
     pub api_id: i64,
+    pub td_instance: String,
     pub algo_ids: Vec<u32>,
 }
 
@@ -47,8 +51,14 @@ pub struct AccountDecl {
 pub enum OpenError {
     EmptySessionId,
     RecvWindow,
-    ApiIdNotPositive { api_id: i64 },
-    DuplicateApiId { api_id: i64 },
+    ApiIdNotPositive {
+        api_id: i64,
+    },
+    /// `td_instance` is empty or not one NATS token (E21-D043).
+    Subject(tdsubject::Error),
+    DuplicateApiId {
+        api_id: i64,
+    },
 }
 
 impl fmt::Display for OpenError {
@@ -59,6 +69,7 @@ impl fmt::Display for OpenError {
             Self::ApiIdNotPositive { api_id } => {
                 write!(f, "tdpath: api_id {api_id} is not positive")
             }
+            Self::Subject(err) => write!(f, "tdpath: {err}"),
             Self::DuplicateApiId { api_id } => write!(f, "tdpath: duplicate api_id {api_id}"),
         }
     }
@@ -250,10 +261,11 @@ pub enum Hook {
 /// Something E03 must do. A [`Hook`] is delivered before the next [`Path::end_hook`].
 #[derive(Clone, PartialEq)]
 pub enum Effect {
-    /// Subscribe `td.evt.{api_id}` for each id, then flush. Events that arrive
-    /// before [`Path::listen_bound`] are held.
+    /// Subscribe each `(api_id, subject)`, then flush. The subject is
+    /// `td.evt.{td_instance}.{api_id}`. Events that arrive before
+    /// [`Path::listen_bound`] are held.
     SubscribeEvt {
-        api_ids: Vec<i64>,
+        subs: Vec<(i64, String)>,
     },
     UnsubscribeEvt {
         api_ids: Vec<i64>,
@@ -291,7 +303,7 @@ pub enum Effect {
 impl fmt::Debug for Effect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SubscribeEvt { api_ids } => f.debug_tuple("SubscribeEvt").field(api_ids).finish(),
+            Self::SubscribeEvt { subs } => f.debug_tuple("SubscribeEvt").field(subs).finish(),
             Self::UnsubscribeEvt { api_ids } => {
                 f.debug_tuple("UnsubscribeEvt").field(api_ids).finish()
             }
@@ -373,18 +385,6 @@ pub enum Bound {
     Stopping(Vec<Effect>),
 }
 
-pub fn order_subject(api_id: i64) -> String {
-    format!("td.order.{api_id}")
-}
-
-pub fn view_subject(api_id: i64) -> String {
-    format!("td.view.{api_id}")
-}
-
-pub fn evt_subject(api_id: i64) -> String {
-    format!("td.evt.{api_id}")
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OrderKind {
     Submit,
@@ -412,6 +412,9 @@ enum Cont {
 }
 
 struct Account {
+    order_subj: String,
+    view_subj: String,
+    evt_subj: String,
     algos: BTreeSet<u32>,
     orders: BTreeMap<String, td::Order>,
     submit_gen: HashMap<String, u64>,
@@ -437,8 +440,12 @@ struct Account {
 }
 
 impl Account {
-    fn new(algo_ids: Vec<u32>) -> Self {
+    fn new(subjects: [String; 3], algo_ids: Vec<u32>) -> Self {
+        let [order_subj, view_subj, evt_subj] = subjects;
         Self {
+            order_subj,
+            view_subj,
+            evt_subj,
             algos: algo_ids.into_iter().collect(),
             orders: BTreeMap::new(),
             submit_gen: HashMap::new(),
@@ -555,13 +562,23 @@ impl Path {
                     api_id: decl.api_id,
                 });
             }
+            // The instance is the one STS put on the decl. An empty or illegal
+            // token fails closed (E21-D042–E21-D044).
+            let build = |kind: fn(&str, i64) -> Result<String, tdsubject::Error>| {
+                kind(&decl.td_instance, decl.api_id).map_err(OpenError::Subject)
+            };
+            let subjects = [
+                build(tdsubject::order)?,
+                build(tdsubject::view)?,
+                build(tdsubject::evt)?,
+            ];
             if accounts.contains_key(&decl.api_id) {
                 return Err(OpenError::DuplicateApiId {
                     api_id: decl.api_id,
                 });
             }
             api_ids.push(decl.api_id);
-            accounts.insert(decl.api_id, Account::new(decl.algo_ids));
+            accounts.insert(decl.api_id, Account::new(subjects, decl.algo_ids));
         }
         Ok(Self {
             session_id: config.session_id,
@@ -634,9 +651,12 @@ impl Path {
         for account in self.accounts.values_mut() {
             account.holding = true;
         }
-        Ok(vec![Effect::SubscribeEvt {
-            api_ids: self.api_ids.clone(),
-        }])
+        let subs = self
+            .api_ids
+            .iter()
+            .map(|api_id| (*api_id, self.accounts[api_id].evt_subj.clone()))
+            .collect();
+        Ok(vec![Effect::SubscribeEvt { subs }])
     }
 
     /// The subscribe flushed. Events received since [`Self::listen`] stay held.
@@ -1073,7 +1093,7 @@ impl Path {
             return None;
         }
         let wait = self.recv_window;
-        let generation = {
+        let (generation, subject) = {
             let account = self.accounts.get_mut(&api_id)?;
             if !account.pending || account.asking || account.waiting_backoff {
                 return None;
@@ -1086,12 +1106,12 @@ impl Path {
             account.prev_inc = account.inc;
             account.prev_seq = account.seq;
             account.prev_have = account.have;
-            account.in_flight_gen
+            (account.in_flight_gen, account.view_subj.clone())
         };
         Some(Effect::SendRecon {
             api_id,
             generation,
-            subject: view_subject(api_id),
+            subject,
             request: recon_request(),
             wait,
         })
@@ -1486,10 +1506,16 @@ impl Path {
                 ids,
             },
         );
+        // Callers have checked the account with `ready`.
+        let subject = self
+            .accounts
+            .get(&api_id)
+            .map(|account| account.order_subj.clone())
+            .unwrap_or_default();
         Effect::SendOrder {
             ticket,
             api_id,
-            subject: order_subject(api_id),
+            subject,
             request,
             wait: self.recv_window,
         }

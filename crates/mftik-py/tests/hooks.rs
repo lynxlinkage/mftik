@@ -21,7 +21,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use mftik_core::cloid::{self, EPOCH_MS};
-use mftik_core::tdpath::evt_subject;
 use mftik_proto::wire::mftiko::common::v1::{self as common, Outcome, Version};
 use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event, view_reply as md_view};
 use mftik_proto::wire::mftiko::session::v1::AccountDecl;
@@ -35,6 +34,14 @@ use mftik_testkit::{
     init_payload, start_nats, start_with,
 };
 use prost::Message;
+
+/// The TD instance the test accounts are on (E21-D042).
+const TD: &str = "td-a";
+
+/// `td.evt.{TD}.{api_id}`.
+fn evt_subject(api_id: i64) -> String {
+    mftik_core::tdsubject::evt(TD, api_id).expect("td.evt subject")
+}
 
 const TOPICS: &[&str] = &[
     "bestquote",
@@ -107,7 +114,7 @@ impl Peer {
             .io
             .block_on({
                 let client = client.clone();
-                async move { client.subscribe("td.view.*").await }
+                async move { client.subscribe("td.view.td-a.*").await }
             })
             .expect("subscribe td.view");
         self.io.spawn(async move {
@@ -364,8 +371,8 @@ fn with_account(nats: &Nats) -> mftik_proto::wire::mftiko::stsctl::v1::InitPaylo
     payload.accounts.push(AccountDecl {
         name: "main".into(),
         api_id: 7,
+        td_instance: TD.into(),
         algo_ids: vec![1],
-        ..Default::default()
     });
     payload
 }

@@ -14,6 +14,7 @@ params:
 accounts:
   - name: main
     api_id: 7
+    td_instance: td-1
     algo_ids: [1]
 restart:
   mode: on_failure
