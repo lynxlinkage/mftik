@@ -3,14 +3,16 @@
 //! `mftik_core::tdpath` holds the OMS, the ledger, the recon watermark, and
 //! the backoff; this module performs its effects (E03-D001):
 //!
-//! - [`TdPath::listen`] subscribes `td.evt.{api_id}` for every AccountDecl
-//!   and flushes before the first `td.view` ReconRequest (§9.6.1). A reader
+//! - [`TdPath::listen`] subscribes `td.evt.{td_instance}.{api_id}` for every
+//!   AccountDecl, with the `td_instance` STS put on it (E21-D042), and
+//!   flushes before the first `td.view` ReconRequest (§9.6.1). A reader
 //!   task per account decodes each message on the IO thread and tags it with
 //!   that subscription's `api_id`, so every hook carries the account the
 //!   subject names (§9.6.2).
-//! - Submit, Cancel, and BatchCancel go to `td.order.{api_id}` in the order
-//!   tdpath returned them: one task publishes each request after the one
-//!   before it and lets the replies overlap. Each waits `recv_window`. A 503
+//! - Submit, Cancel, and BatchCancel go to `td.order.{td_instance}.{api_id}`
+//!   in the order tdpath returned them: one task publishes each request
+//!   after the one before it and lets the replies overlap. Each waits
+//!   `recv_window`. A 503
 //!   status is no responder (a 101 local reject); a timeout or a body that is
 //!   not an `OrderReply` is no answer: Submit becomes `ORDER_STATUS_UNKNOWN`,
 //!   a cancel changes nothing (§9.4.7, E08-D001, E08-D043, E08-D045).
@@ -232,6 +234,7 @@ impl TdPath {
             .iter()
             .map(|decl| tdpath::AccountDecl {
                 api_id: decl.api_id,
+                td_instance: decl.td_instance.clone(),
                 algo_ids: decl.algo_ids.clone(),
             })
             .collect::<Vec<_>>();
@@ -291,8 +294,8 @@ impl TdPath {
         }
         let inner = &self.inner;
         let effects = inner.lock().path.listen().map_err(|err| err.to_string())?;
-        let Some(api_ids) = effects.into_iter().find_map(|effect| match effect {
-            Effect::SubscribeEvt { api_ids } => Some(api_ids),
+        let Some(evts) = effects.into_iter().find_map(|effect| match effect {
+            Effect::SubscribeEvt { subs } => Some(subs),
             _ => None,
         }) else {
             return Ok(());
@@ -302,10 +305,10 @@ impl TdPath {
             .clone()
             .ok_or_else(|| "tdpath: nil nats conn".to_owned())?;
         let subscribed = inner.io.block_on(async move {
-            let mut subs = Vec::with_capacity(api_ids.len());
-            for api_id in api_ids {
+            let mut subs = Vec::with_capacity(evts.len());
+            for (api_id, subject) in evts {
                 let sub = nats
-                    .subscribe(tdpath::evt_subject(api_id))
+                    .subscribe(subject)
                     .await
                     .map_err(|err| err.to_string())?;
                 subs.push((api_id, sub));

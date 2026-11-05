@@ -23,6 +23,14 @@ use mftik_testkit::NatsServer;
 use super::*;
 use crate::eventlog::{Record, Scratch};
 
+/// The TD instance the test accounts are on (E21-D042).
+const TD: &str = "td-a";
+
+/// `td.evt.{TD}.{api_id}`.
+fn evt_subject(api_id: i64) -> String {
+    mftik_core::tdsubject::evt(TD, api_id).expect("td.evt subject")
+}
+
 const FUSE: Duration = Duration::from_secs(20);
 const SESSION: &str = "c0ffee";
 
@@ -119,7 +127,7 @@ impl Peer {
             .io
             .block_on({
                 let nats = nats.clone();
-                async move { nats.subscribe("td.view.*").await }
+                async move { nats.subscribe("td.view.td-a.*").await }
             })
             .expect("subscribe td.view");
         self.io.spawn(async move {
@@ -129,7 +137,7 @@ impl Peer {
                 if mode == View::Hold {
                     continue;
                 }
-                let api_id: i64 = msg.subject.as_str()["td.view.".len()..]
+                let api_id: i64 = msg.subject.as_str()["td.view.td-a.".len()..]
                     .parse()
                     .expect("api id");
                 if mode == View::Inject && !injected.contains(&api_id) {
@@ -143,7 +151,7 @@ impl Peer {
                         ]
                     };
                     for event in events {
-                        nats.publish(tdpath::evt_subject(api_id), event.encode_to_vec().into())
+                        nats.publish(evt_subject(api_id), event.encode_to_vec().into())
                             .await
                             .expect("evt");
                     }
@@ -164,7 +172,7 @@ impl Peer {
             .io
             .block_on({
                 let nats = nats.clone();
-                async move { nats.subscribe("td.order.*").await }
+                async move { nats.subscribe("td.order.td-a.*").await }
             })
             .expect("subscribe td.order");
         self.io.spawn(async move {
@@ -198,12 +206,12 @@ impl Peer {
             .io
             .block_on({
                 let nats = nats.clone();
-                async move { nats.subscribe("td.view.*").await }
+                async move { nats.subscribe("td.view.td-a.*").await }
             })
             .expect("subscribe td.view");
         self.io.spawn(async move {
             while let Some(msg) = views.next().await {
-                let api_id: i64 = msg.subject.as_str()["td.view.".len()..]
+                let api_id: i64 = msg.subject.as_str()["td.view.td-a.".len()..]
                     .parse()
                     .expect("api id");
                 let to = msg.reply.expect("reply subject");
@@ -222,7 +230,7 @@ impl Peer {
             .io
             .block_on({
                 let nats = nats.clone();
-                async move { nats.subscribe("td.order.*").await }
+                async move { nats.subscribe("td.order.td-a.*").await }
             })
             .expect("subscribe td.order");
         self.io.spawn(async move {
@@ -245,7 +253,7 @@ impl Peer {
         let nats = self.nats.clone();
         self.io
             .block_on(async move {
-                nats.publish(tdpath::evt_subject(api_id), event.encode_to_vec().into())
+                nats.publish(evt_subject(api_id), event.encode_to_vec().into())
                     .await
             })
             .expect("publish");
@@ -453,11 +461,13 @@ fn rig_with(
         accounts: vec![
             AccountDecl {
                 api_id: 7,
+                td_instance: TD.into(),
                 algo_ids: vec![1],
                 ..Default::default()
             },
             AccountDecl {
                 api_id: 8,
+                td_instance: TD.into(),
                 algo_ids: vec![1, 2],
                 ..Default::default()
             },
@@ -670,6 +680,66 @@ fn the_recon_watermark_releases_only_the_next_seq_and_api_id_is_the_subject() {
     assert_eq!(rig.stamps(7)[2], ("order", td_stamp(7, INCARNATION, 7)));
     assert_eq!(rig.stamps(7).len(), 3);
     assert_eq!(rig.peer.views.load(Ordering::SeqCst), 2);
+}
+
+/// E21-D045: another TD instance serves the same `api_id`. The session's
+/// recon, order, and `td.evt` use only `td.{kind}.td-a.7`; nothing reaches
+/// `td-b`, and an event published on `td.evt.td-b.7` is not delivered.
+#[test]
+fn a_second_td_instance_with_the_same_api_id_is_not_touched() {
+    let rig = rig(Duration::from_millis(500));
+    rig.peer.serve_view(View::Reply);
+    rig.peer.serve_orders(Orders::Accept);
+    let other = Peer::connect(rig._server.url());
+    let touched: Arc<Mutex<Vec<String>>> = Arc::default();
+    let mut sub = other
+        .io
+        .block_on({
+            let nats = other.nats.clone();
+            async move { nats.subscribe("td.*.td-b.>").await }
+        })
+        .expect("subscribe td-b");
+    let seen_b = Arc::clone(&touched);
+    other.io.spawn(async move {
+        while let Some(msg) = sub.next().await {
+            seen_b.lock().expect("td-b").push(msg.subject.to_string());
+        }
+    });
+    other.flush();
+
+    rig.reconciled();
+    rig.td.submit(buy(7, 1)).expect("submit");
+    wait_until("the td-a submit", || rig.peer.requests().len() == 1);
+
+    // td-b's order seq 6 would be the next seq for account 7 if it leaked.
+    let evt_b = mftik_core::tdsubject::evt("td-b", 7).expect("td-b subject");
+    let leaked = order_event(SNAPSHOT_SEQ + 1, INCARNATION);
+    other
+        .io
+        .block_on({
+            let nats = other.nats.clone();
+            async move { nats.publish(evt_b, leaked.encode_to_vec().into()).await }
+        })
+        .expect("publish td-b");
+    other.flush();
+    rig.peer
+        .publish(7, position_event(SNAPSHOT_SEQ + 1, INCARNATION));
+    rig.peer.flush();
+    wait_until("the td-a position", || {
+        rig.stamps(7).iter().any(|(k, _)| *k == "position")
+    });
+    rig.settle();
+    let after_recon: Vec<_> = rig
+        .stamps(7)
+        .into_iter()
+        .filter(|(_, td)| td.seq > SNAPSHOT_SEQ)
+        .collect();
+    assert_eq!(
+        after_recon,
+        [("position", td_stamp(7, INCARNATION, SNAPSHOT_SEQ + 1))]
+    );
+    // Only the test's own td-b publish is on td-b's subjects.
+    assert_eq!(*touched.lock().expect("td-b"), ["td.evt.td-b.7"]);
 }
 
 /// One line per frame: `rec_seq`, kind, `ref` and `flags` when set, the seq
@@ -1049,7 +1119,7 @@ fn the_hold_takes_65536_events_and_one_more_fails_the_session() {
             .block_on(async move {
                 for n in from..=from + batch - 1 {
                     let event = order_event(n, INCARNATION).encode_to_vec();
-                    nats.publish("td.evt.7", event.into()).await?;
+                    nats.publish(evt_subject(7), event.into()).await?;
                 }
                 nats.flush().await.map_err(|err| err.to_string().into())
             })
@@ -1185,7 +1255,7 @@ fn unsubscribe_stops_td_evt_and_the_drain_delivers_what_was_received() {
         peer_io
             .block_on(async move {
                 let event = order_event(9, INCARNATION).encode_to_vec();
-                peer_nats.publish("td.evt.7", event.into()).await?;
+                peer_nats.publish(evt_subject(7), event.into()).await?;
                 peer_nats
                     .flush()
                     .await
@@ -1334,7 +1404,7 @@ fn on_stop_keeps_events_applied_before_hold_full_and_drops_the_rest() {
             .block_on(async move {
                 for n in from..=from + batch - 1 {
                     let event = order_event(n, INCARNATION).encode_to_vec();
-                    nats.publish(tdpath::evt_subject(8), event.into()).await?;
+                    nats.publish(evt_subject(8), event.into()).await?;
                 }
                 nats.flush().await.map_err(|err| err.to_string().into())
             })

@@ -3,7 +3,7 @@
 //! Algorithms land here and do not do IO. The Python SDK calls this crate
 //! through `mftik-py`. The order book is [`book`]. Local sync is [`bookpath`].
 //! The session dispatcher is [`dispatch`]. The TD path is [`tdpath`].
-//! The MD path is [`mdpath`].
+//! The TD subjects are [`tdsubject`]. The MD path is [`mdpath`].
 //! Client order ids are [`cloid`] and [`cloidgen`]. Atomic volume replace is
 //! [`volume`]. The worker end of C4 is [`c4`]. Instrument rows are
 //! [`symbol`], and the session SYM client is [`symclient`]. The frames the
@@ -14,6 +14,7 @@ pub mod dispatch;
 pub mod eventlog;
 pub mod mdpath;
 pub mod tdpath;
+pub mod tdsubject;
 
 pub mod book;
 pub mod bookpath;

@@ -14,7 +14,6 @@ use std::time::Duration;
 use async_nats::Client;
 use futures_util::StreamExt;
 use mftik_core::symbol::PRICE_TICK;
-use mftik_core::tdpath::evt_subject;
 use mftik_proto::wire::mftiko::common::v1::Outcome;
 use mftik_proto::wire::mftiko::session::v1::AccountDecl;
 use mftik_proto::wire::mftiko::stsctl::v1::{InitPayload, NatsCredentials};
@@ -27,6 +26,14 @@ use mftik_testkit::{
     init_payload, start, start_nats,
 };
 use prost::Message;
+
+/// The TD instance the test accounts are on (E21-D042).
+const TD: &str = "td-a";
+
+/// `td.evt.{TD}.{api_id}`.
+fn evt_subject(api_id: i64) -> String {
+    mftik_core::tdsubject::evt(TD, api_id).expect("td.evt subject")
+}
 
 const TICKER: &str = "Bybit_Spot_BTCUSDT";
 const MISSING: &str = "Bybit_Spot_NOPE";
@@ -77,8 +84,8 @@ fn with_account(creds: &NatsCredentials) -> InitPayload {
     payload.accounts.push(AccountDecl {
         name: "main".into(),
         api_id: API,
+        td_instance: TD.into(),
         algo_ids: vec![1],
-        ..Default::default()
     });
     payload
 }
@@ -257,7 +264,7 @@ fn serve_view(io: &Io, client: Client, views: Arc<AtomicUsize>) {
     let mut sub = io
         .block_on({
             let client = client.clone();
-            async move { client.subscribe("td.view.*").await }
+            async move { client.subscribe("td.view.td-a.*").await }
         })
         .expect("subscribe td.view");
     io.spawn(async move {
@@ -288,7 +295,7 @@ fn serve_orders(io: &Io, client: Client, orders: Arc<Mutex<Vec<td::OrderRequest>
     let mut sub = io
         .block_on({
             let client = client.clone();
-            async move { client.subscribe("td.order.*").await }
+            async move { client.subscribe("td.order.td-a.*").await }
         })
         .expect("subscribe td.order");
     io.spawn(async move {

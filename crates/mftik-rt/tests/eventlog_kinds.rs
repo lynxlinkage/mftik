@@ -22,7 +22,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_nats::{Client, Subject};
 use futures_util::StreamExt;
 use mftik_core::symbol::PRICE_TICK;
-use mftik_core::tdpath::evt_subject;
 use mftik_proto::wire::mftiko::common::v1::{self as common, Outcome, Version};
 use mftik_proto::wire::mftiko::md::v1::{self as md, feed_event, fetch_reply, view_reply};
 use mftik_proto::wire::mftiko::session::v1::{AccountDecl, EventLog};
@@ -40,6 +39,14 @@ use mftik_rt::{
 use mftik_testkit::*;
 use prost::Message;
 use serde_json::Value;
+
+/// The TD instance the test accounts are on (E21-D042).
+const TD: &str = "td-a";
+
+/// `td.evt.{TD}.{api_id}`.
+fn evt_subject(api_id: i64) -> String {
+    mftik_core::tdsubject::evt(TD, api_id).expect("td.evt subject")
+}
 
 const TICKER: &str = "Bybit_Spot_BTCUSDT";
 const MISSING: &str = "Bybit_Spot_NOPE";
@@ -269,9 +276,9 @@ impl Peer {
         peer.serve(TRADE_VIEW, |_| vec![Out::Reply(tape_page())]);
         peer.serve(BOOK_VIEW, |_| vec![Out::Reply(book_body())]);
         peer.serve(FETCH, fetch_answer);
-        peer.serve("td.view.*", |_| vec![Out::Reply(recon_reply())]);
+        peer.serve("td.view.td-a.*", |_| vec![Out::Reply(recon_reply())]);
         let first = AtomicBool::new(true);
-        peer.serve("td.order.*", move |req| {
+        peer.serve("td.order.td-a.*", move |req| {
             let mut out = vec![Out::Reply(refused(req))];
             if first.swap(false, Ordering::SeqCst) {
                 out.push(Out::Publish(evt_subject(API), position_event()));
@@ -604,8 +611,8 @@ fn a_whole_session_has_every_kind_and_each_call_and_read_pairs_up() {
     payload.accounts.push(AccountDecl {
         name: "main".into(),
         api_id: API,
+        td_instance: TD.into(),
         algo_ids: vec![1],
-        ..Default::default()
     });
     payload.event_log = Some(EventLog {
         enabled: true,

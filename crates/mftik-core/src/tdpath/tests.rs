@@ -11,12 +11,12 @@ use mftik_proto::wire::mftiko::{common::v1 as common, td::v1 as td};
 use super::{
     AccountDecl, Bound, ClientOrderIdError, ClientOrderIds, Config, Effect, Error, HOLD_CAP, Hook,
     NewOrder, OpenError, Origin, Path, REASON_HOLD_FULL, REASON_OFFLINE, RECON_BACKOFF_MAX,
-    RECON_BACKOFF_MIN, ReconOutcome, RejectedRequest, RoundOutcome, RoundTicket, evt_subject,
-    order_subject, view_subject,
+    RECON_BACKOFF_MIN, ReconOutcome, RejectedRequest, RoundOutcome, RoundTicket,
 };
 use crate::cloid::{self, EPOCH_MS};
 use crate::dispatch::Input;
 use crate::eventlog::Kind;
+use crate::tdsubject;
 
 const NOW_MS: i64 = EPOCH_MS + 1_000;
 const WINDOW: Duration = Duration::from_millis(500);
@@ -71,9 +71,17 @@ impl ClientOrderIds for Script {
     }
 }
 
+/// The TD instance every account in these tests is on.
+const TD: &str = "td-a";
+
 fn decl(api_id: i64, algo_ids: &[u32]) -> AccountDecl {
+    decl_on(TD, api_id, algo_ids)
+}
+
+fn decl_on(td_instance: &str, api_id: i64, algo_ids: &[u32]) -> AccountDecl {
     AccountDecl {
         api_id,
+        td_instance: td_instance.to_owned(),
         algo_ids: algo_ids.to_vec(),
     }
 }
@@ -89,10 +97,13 @@ fn open(accounts: Vec<AccountDecl>) -> Path {
 
 fn listen(path: &mut Path) -> Vec<i64> {
     let effects = path.listen().unwrap();
-    let Effect::SubscribeEvt { api_ids } = &effects[0] else {
+    let Effect::SubscribeEvt { subs } = &effects[0] else {
         panic!("listen did not subscribe: {effects:?}");
     };
-    let api_ids = api_ids.clone();
+    let api_ids: Vec<i64> = subs.iter().map(|(api_id, _)| *api_id).collect();
+    for (api_id, subject) in subs {
+        assert_eq!(subject, &format!("td.evt.{TD}.{api_id}"));
+    }
     assert!(matches!(path.listen_bound().unwrap(), Bound::Listening));
     assert!(path.listen().unwrap().is_empty());
     api_ids
@@ -148,7 +159,7 @@ fn ask(path: &mut Path, api_id: i64) -> u64 {
             request,
         } => {
             assert_eq!(*got, api_id);
-            assert_eq!(subject, &view_subject(api_id));
+            assert_eq!(subject, &format!("td.view.{TD}.{api_id}"));
             assert_eq!(*wait, WINDOW);
             assert!(matches!(request.req, Some(td::view_request::Req::Recon(_))));
             *generation
@@ -288,9 +299,6 @@ fn id_of(algo: u32, seq: u32) -> String {
 
 #[test]
 fn subjects_and_backoff_bounds_match_the_protocol() {
-    assert_eq!(order_subject(7), "td.order.7");
-    assert_eq!(view_subject(7), "td.view.7");
-    assert_eq!(evt_subject(7), "td.evt.7");
     assert_eq!(HOLD_CAP, 65_536);
     assert_eq!(REASON_HOLD_FULL, "td buffer full");
     assert_eq!(REASON_OFFLINE, "account offline");
@@ -329,6 +337,19 @@ fn open_rejects_a_bad_config() {
     assert_eq!(
         bad("c0ffee", window, vec![decl(7, &[1]), decl(7, &[2])]),
         OpenError::DuplicateApiId { api_id: 7 }
+    );
+    // E21-D042, E21-D043: no instance, or one that is not a single NATS
+    // token, fails closed. There is no td.{kind}.{api_id} fallback.
+    for inst in ["", "td.a", "td*a", "td>a", "td a", "td\ta", "td\u{a0}a"] {
+        assert_eq!(
+            bad("c0ffee", window, vec![decl_on(inst, 7, &[1])]),
+            OpenError::Subject(tdsubject::Error::Instance(inst.to_owned())),
+            "{inst:?}"
+        );
+    }
+    assert_eq!(
+        bad("c0ffee", window, vec![decl_on("", 7, &[1])]).to_string(),
+        "tdpath: tdsubject: td_instance \"\": tdsubject: td_instance is empty or contains '.', '*', '>' or whitespace"
     );
     let path = open(vec![]);
     assert!(path.open_orders(7, 0).is_empty());
@@ -477,7 +498,7 @@ fn submit_writes_pending_new_before_the_send() {
             ..
         } => {
             assert_eq!(*api_id, 7);
-            assert_eq!(subject, "td.order.7");
+            assert_eq!(subject, "td.order.td-a.7");
             assert_eq!(*wait, WINDOW);
             let Some(td::order_request::Req::Submit(submit)) = &request.req else {
                 panic!("not a submit");
@@ -2311,4 +2332,66 @@ fn a_held_event_input_comes_back_when_its_hook_is_released() {
     assert_eq!(names(&effects), ["recon", "order"]);
     assert_eq!(released, vec![(8, Some(logged(8)))]);
     assert_eq!(path.held(), 0);
+}
+
+/// E21-D045: two TD instances serve the same `api_id`. Each session touches
+/// only its own instance's `td.evt`, `td.view`, and `td.order`.
+#[test]
+fn same_api_id_on_two_instances_uses_only_its_own_subjects() {
+    for (inst, other) in [("td-a", "td-b"), ("td-b", "td-a")] {
+        let mut path = Path::open(Config {
+            session_id: "c0ffee".to_owned(),
+            recv_window: WINDOW,
+            accounts: vec![decl_on(inst, 7, &[1])],
+        })
+        .unwrap();
+        let mut subjects = Vec::new();
+        let effects = path.listen().unwrap();
+        match effects.as_slice() {
+            [Effect::SubscribeEvt { subs }] => {
+                assert_eq!(subs, &vec![(7, format!("td.evt.{inst}.7"))]);
+                subjects.extend(subs.iter().map(|(_, subject)| subject.clone()));
+            }
+            other => panic!("listen: {other:?}"),
+        }
+        assert!(matches!(path.listen_bound().unwrap(), Bound::Listening));
+        let effects = path.recon_all().unwrap();
+        let generation = match effects.as_slice() {
+            [
+                Effect::SendRecon {
+                    subject,
+                    generation,
+                    ..
+                },
+            ] => {
+                assert_eq!(subject, &format!("td.view.{inst}.7"));
+                subjects.push(subject.clone());
+                *generation
+            }
+            other => panic!("recon: {other:?}"),
+        };
+        let effects = path.on_recon_round(7, generation, ReconOutcome::Reply(bare_view(1, 1, 1)));
+        assert_eq!(names(&drive(&mut path, effects, |_, _| {})), ["recon"]);
+        let mut mint = Mint::new();
+        let (_, effect) = submit(&mut path, &mut mint, order_for(7, 1, 1001));
+        match &effect {
+            Effect::SendOrder { subject, .. } => {
+                assert_eq!(subject, &format!("td.order.{inst}.7"));
+                subjects.push(subject.clone());
+            }
+            other => panic!("submit: {other:?}"),
+        }
+        assert_eq!(
+            subjects,
+            vec![
+                tdsubject::evt(inst, 7).unwrap(),
+                tdsubject::view(inst, 7).unwrap(),
+                tdsubject::order(inst, 7).unwrap(),
+            ]
+        );
+        for subject in &subjects {
+            assert!(!subject.contains(other), "{subject} names {other}");
+            assert_eq!(subject.split('.').count(), 4, "{subject}");
+        }
+    }
 }

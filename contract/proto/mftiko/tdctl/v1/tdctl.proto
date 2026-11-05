@@ -50,6 +50,7 @@ message Drain {
 
 message Report {
   mftiko.td.v1.AccountState state = 1; // 與 td.view 回覆的 state 相同（E06-D006）
+  // state 為 UNSPECIFIED 時，是 Start 還在重試、最近一次失敗的原因（不含憑證，最多 200 字），TD agent 寫成 PENDING ack 的 `starting: <reason>`（DECISIONS E06-D042）。
   string reason = 2;
   int64 reconciled_at_ns = 3;
   uint32 open_orders = 4;

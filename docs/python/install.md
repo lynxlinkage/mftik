@@ -4,6 +4,8 @@
 
 Install the package from PyPI with `pip install mftik`. The import name is `mftik`. `__version__` is the installed distribution's version. This release is a rewrite. Programs written for the 0.12 packages that remain on PyPI do not run on it.
 
+Strategies that trade need mftiko v0.7.0 or later. From this release the SDK addresses TD as `td.{order,view,evt}.{td_instance}.{api_id}`, with the `td_instance` of each session account (mftiko E21-D042–E21-D044). This is a breaking change with no fallback: on an older mftiko, whose TD still serves `td.order.{api_id}`, orders and recon get no answer, and an older SDK on mftiko v0.7.0 is refused by the session's NATS permissions. Stop the sessions that declare `accounts`, upgrade mftiko, then rebuild and push those strategies with this release. Each `accounts[]` entry of the session file needs `td_instance` (see [Session spec](session.md#accounts)). Market-data-only sessions are not affected.
+
 People working in this repository build the extension locally with uv and maturin (`uv sync`, then `uv run maturin develop`). A strategy author who only runs a session does not need that toolchain. The packer downloads a pinned CPython and the published wheel when it builds an image.
 
 ## The process

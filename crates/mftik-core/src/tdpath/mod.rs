@@ -64,5 +64,4 @@ pub use path::{
     FillEvent, HOLD_CAP, Hook, NewOrder, OpenError, OrderEvent, Origin, Path, PositionEvent,
     REASON_HOLD_FULL, REASON_OFFLINE, RECON_BACKOFF_MAX, RECON_BACKOFF_MIN, ReconEvent,
     ReconOutcome, RejectEvent, RejectedRequest, RoundOutcome, RoundTicket, Submitted, Td,
-    evt_subject, order_subject, view_subject,
 };
