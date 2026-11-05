@@ -23,10 +23,14 @@
 //!   middle of a chain wait in arrival order until it ends (E03-D071).
 //! - `client_order_id` comes from `cloidgen`, the process-wide counter, with
 //!   `now_ms` from the injected clock (§9.4.6, E08-D014).
-//! - [`TdPath::unsubscribe`] is the dispatcher's `unsubscribe_td` on `DONE`
-//!   and `FAILED` (§9.2.5): the readers stop, nothing that arrives later is
-//!   pushed, and the drain still feeds what the TD buffer already holds
-//!   (E03-D072).
+//! - On `DONE` and `FAILED` (§9.2.5, mftiko E08-D067): [`TdPath::hold`]
+//!   refuses order calls while the dispatcher delivers the TD buffer;
+//!   [`TdPath::allow_stop_cancel`] lets OnStop Cancel and BatchCancel, with
+//!   `td.order` and `td.evt` still up; [`TdPath::stop_idle`] tells the
+//!   dispatcher when those cancels' results are in. Only then
+//!   [`TdPath::unsubscribe`], the dispatcher's `unsubscribe_td`, stops the
+//!   readers: nothing that arrives later is pushed, and what the TD buffer
+//!   already holds is still fed (E03-D072).
 //! - With the event log on, a reader keeps each `td.evt`'s bytes and the
 //!   time it came as its `td_event` input. tdpath hands the input back with
 //!   the event's hook, held or live, and the buffer entry that runs that hook
@@ -481,12 +485,33 @@ impl TdPath {
         self.inner.replay_effects(effects)
     }
 
-    /// The dispatcher's `unsubscribe_td`, before the TD drain of `DONE` and
-    /// `FAILED` (§9.2.5, E08-D003). The `td.evt` readers stop, recon backoffs
-    /// are disarmed, and replies and events that arrive after this are not
-    /// pushed. What the TD buffer already holds is still fed and delivered
-    /// by the drain. Order calls return [`Error::Stopping`] from here on, as
-    /// Go's after `tdpath.Close`. Idempotent.
+    /// The dispatcher's `hold_td`: Submit, Cancel, BatchCancel and Recon
+    /// return [`Error::Stopping`], and `td.evt` stays subscribed (mftiko
+    /// E08-D067, Go `HoldOrders`).
+    pub(crate) fn hold(&self) {
+        self.inner.lock().path.hold_orders();
+    }
+
+    /// The dispatcher's `allow_stop_cancel`, just before OnStop of `DONE`
+    /// and `FAILED`: Cancel and BatchCancel work again, Submit and Recon do
+    /// not (Go `AllowStopCancel`).
+    pub(crate) fn allow_stop_cancel(&self) {
+        self.inner.lock().path.allow_stop_cancel();
+    }
+
+    /// The dispatcher's `stop_idle`: every cancel OnStop made has its reply
+    /// delivered, and every order it was not refused for is terminal (Go
+    /// `StopIdle`).
+    pub(crate) fn stop_idle(&self) -> bool {
+        self.inner.lock().path.stop_idle()
+    }
+
+    /// The dispatcher's `unsubscribe_td`, after OnStop of `DONE` and `FAILED`
+    /// and its cancels' results (§9.2.5, mftiko E08-D067). The `td.evt`
+    /// readers stop, recon backoffs are disarmed, and replies and events
+    /// that arrive after this are not pushed. What the TD buffer already
+    /// holds is still fed. Order calls return [`Error::Stopping`] from here
+    /// on, as Go's after `tdpath.Close`. Idempotent.
     pub(crate) fn unsubscribe(&self) {
         let inner = &self.inner;
         if inner.closing.swap(true, Ordering::SeqCst) {
@@ -860,11 +885,16 @@ impl Inner {
             body: answer.body(),
             ..dispatch::Input::default()
         });
-        self.push(Input::Order {
+        let queued = self.push(Input::Order {
             ticket,
             outcome: answer.outcome(),
             logged,
         });
+        if !queued {
+            // tdpath will never see this round: a stop cancel's orders are
+            // no longer waited for (Go `enqueue` returning false).
+            self.lock().path.abandon_round(ticket);
+        }
     }
 
     /// Reads `td.evt.{api_id}` until `unsubscribe`. The account is the

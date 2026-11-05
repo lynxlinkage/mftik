@@ -802,7 +802,12 @@ fn the_td_buffer_fails_the_session_at_65536_and_delivers_those_entries_on_stop()
 fn done_failed_and_crashed_follow_the_stop_sequence() {
     let done = ending(Kind::Done);
     assert_eq!(done.end, RunEnd::Done);
-    assert_eq!(done.order, ["hook", "unsub", "td", "onstop"]);
+    assert_eq!(
+        done.order,
+        [
+            "hook", "hold", "td", "allow", "onstop", "hold", "late", "unsub"
+        ]
+    );
     assert!(done.same_thread);
     assert!(done.md_accepted_in_hook);
     assert!(!done.queued_md_delivered);
@@ -814,7 +819,12 @@ fn done_failed_and_crashed_follow_the_stop_sequence() {
             reason: "because".to_owned(),
         }
     );
-    assert_eq!(failed.order, ["hook", "unsub", "td", "onstop"]);
+    assert_eq!(
+        failed.order,
+        [
+            "hook", "hold", "td", "allow", "onstop", "hold", "late", "unsub"
+        ]
+    );
 
     let crashed = ending(Kind::Crashed);
     assert_eq!(
@@ -825,6 +835,77 @@ fn done_failed_and_crashed_follow_the_stop_sequence() {
     );
     assert_eq!(crashed.order, ["hook", "onstop"]);
     assert!(crashed.same_thread);
+}
+
+#[test]
+fn on_stop_waits_for_an_armed_cancel_before_unsubscribing() {
+    // mftiko E08-D067 (Go TestOnStopWaitsForArmedCancel): the ending stays
+    // open until stop_idle, which the cancel's result hook flips.
+    let idle = Arc::new(AtomicBool::new(false));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let slot = Arc::new(Mutex::new(None::<Dispatcher>));
+    let (idle_check, idle_result, idle_unsub) =
+        (Arc::clone(&idle), Arc::clone(&idle), Arc::clone(&idle));
+    let (order_stop, order_unsub) = (Arc::clone(&order), Arc::clone(&order));
+    let slot_stop = Arc::clone(&slot);
+    let dispatcher = build(|config| {
+        config.on_stop = Some(Box::new(move |_| {
+            lock(&order_stop).push("onstop");
+            let dispatcher = lock(&slot_stop).clone().expect("dispatcher");
+            let (idle, order) = (Arc::clone(&idle_result), Arc::clone(&order_stop));
+            // The reply arrives later, from another thread.
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                dispatcher
+                    .push_td(move || {
+                        idle.store(true, Ordering::Relaxed);
+                        lock(&order).push("result");
+                    })
+                    .expect("push the result");
+            });
+            Ok(())
+        }));
+        config.stop_idle = Some(Box::new(move || idle_check.load(Ordering::Relaxed)));
+        config.unsubscribe_td = Some(Box::new(move || {
+            assert!(
+                idle_unsub.load(Ordering::Relaxed),
+                "unsubscribed before the cancel result"
+            );
+            lock(&order_unsub).push("unsub");
+        }));
+    });
+    *lock(&slot) = Some(dispatcher.clone());
+    let ender = dispatcher.clone();
+    dispatcher.push_td(move || ender.exit()).expect("exit");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    assert!(stop(&dispatcher).is_ok());
+    assert_eq!(lock(&order).as_slice(), ["onstop", "result", "unsub"]);
+}
+
+#[test]
+fn an_armed_cancel_without_a_result_ends_at_the_stop_deadline() {
+    let unsubscribed = Arc::new(AtomicBool::new(false));
+    let unsub = Arc::clone(&unsubscribed);
+    let dispatcher = build(|config| {
+        config.on_stop = Some(Box::new(|_| Ok(())));
+        config.stop_idle = Some(Box::new(|| false));
+        config.unsubscribe_td = Some(Box::new(move || unsub.store(true, Ordering::Relaxed)));
+    });
+    let ender = dispatcher.clone();
+    dispatcher.push_td(move || ender.exit()).expect("exit");
+    let rx = start(&dispatcher);
+    assert_eq!(recv_end(&rx), RunEnd::Done);
+    let mover = dispatcher.clone();
+    let clock = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        mover.set_now_ns(T0 + 100);
+    });
+    let err = dispatcher.on_stop(&StopRequest::new(Some(T0 + 100)));
+    clock.join().expect("clock");
+    wait_exited(&dispatcher);
+    assert_eq!(err, Err(StopError::Deadline));
+    assert!(unsubscribed.load(Ordering::Relaxed));
 }
 
 #[derive(Clone, Copy)]
@@ -848,22 +929,34 @@ fn ending(kind: Kind) -> Ending {
     let md_in_hook = Arc::new(AtomicBool::new(false));
     let md_delivered = Arc::new(AtomicBool::new(false));
     let order_unsub = Arc::clone(&order);
+    let order_hold = Arc::clone(&order);
+    let order_allow = Arc::clone(&order);
     let order_stop = Arc::clone(&order);
     let threads_stop = Arc::clone(&threads);
     let md_feed = Arc::clone(&md_delivered);
+    let slot = Arc::new(Mutex::new(None::<Dispatcher>));
+    let slot_stop = Arc::clone(&slot);
     let dispatcher = build(|config| {
         config.feed = Some(Box::new(move |_| {
             md_feed.store(true, Ordering::Relaxed);
         }));
+        config.hold_td = Some(Box::new(move || lock(&order_hold).push("hold")));
+        config.allow_stop_cancel = Some(Box::new(move || lock(&order_allow).push("allow")));
         config.unsubscribe_td = Some(Box::new(move || {
             lock(&order_unsub).push("unsub");
         }));
         config.on_stop = Some(Box::new(move |_| {
             lock(&threads_stop).push(thread::current().id());
             lock(&order_stop).push("onstop");
+            // A cancel's result queued from OnStop: DONE and FAILED deliver
+            // it before unsubscribing; CRASHED has closed the buffer.
+            let dispatcher = lock(&slot_stop).clone().expect("dispatcher");
+            let order_late = Arc::clone(&order_stop);
+            let _ = dispatcher.push_td(move || lock(&order_late).push("late"));
             Ok(())
         }));
     });
+    *lock(&slot) = Some(dispatcher.clone());
     let order_hook = Arc::clone(&order);
     let threads_hook = Arc::clone(&threads);
     let dispatcher_hook = dispatcher.clone();
@@ -913,7 +1006,7 @@ fn ending(kind: Kind) -> Ending {
 }
 
 #[test]
-fn on_stop_sees_closed_buffers_and_the_same_dispatcher_thread() {
+fn on_stop_of_done_sees_md_closed_and_td_open_on_the_same_dispatcher_thread() {
     let threads = Arc::new(Mutex::new(Vec::new()));
     let md_closed = Arc::new(AtomicBool::new(false));
     let td_closed = Arc::new(AtomicBool::new(false));
@@ -944,7 +1037,10 @@ fn on_stop_sees_closed_buffers_and_the_same_dispatcher_thread() {
     assert_eq!(recv_end(&rx), RunEnd::Done);
     assert!(stop(&dispatcher).is_ok());
     assert!(md_closed.load(Ordering::Relaxed));
-    assert!(td_closed.load(Ordering::Relaxed));
+    // DONE keeps the TD buffer open through OnStop for cancel results
+    // (E08-D067); the ending closes it after.
+    assert!(!td_closed.load(Ordering::Relaxed));
+    assert!(dispatcher.push_td(|| {}).is_err());
     let ids = lock(&threads).clone();
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0], ids[1]);
@@ -1017,13 +1113,14 @@ fn a_stop_deadline_ends_the_td_drain_before_on_stop() {
     let err = dispatcher.on_stop(&request);
     wait_exited(&dispatcher);
     assert_eq!(err, Err(StopError::Deadline));
-    assert_eq!(lock(&order).as_slice(), ["unsub", "first"]);
+    assert_eq!(lock(&order).as_slice(), ["first", "unsub"]);
 }
 
 #[test]
-fn a_stop_that_is_already_due_skips_unsubscribe_and_on_stop() {
+fn a_stop_that_is_already_due_unsubscribes_and_skips_on_stop() {
     let called = Arc::new(AtomicBool::new(false));
-    let called_unsub = Arc::clone(&called);
+    let unsubscribed = Arc::new(AtomicBool::new(false));
+    let called_unsub = Arc::clone(&unsubscribed);
     let called_stop = Arc::clone(&called);
     let dispatcher = build(|config| {
         config.unsubscribe_td = Some(Box::new(move || {
@@ -1044,6 +1141,7 @@ fn a_stop_that_is_already_due_skips_unsubscribe_and_on_stop() {
     wait_exited(&dispatcher);
     assert_eq!(err, Err(StopError::Deadline));
     assert!(!called.load(Ordering::Relaxed));
+    assert!(unsubscribed.load(Ordering::Relaxed));
     assert_eq!(
         dispatcher.push_td(|| {}).expect_err("closed"),
         PushError::Closed
@@ -1151,12 +1249,12 @@ fn an_on_stop_panic_is_returned_to_the_host() {
 }
 
 #[test]
-fn an_unsubscribe_panic_skips_the_rest_of_the_stop() {
+fn a_hold_panic_skips_the_rest_of_the_stop() {
     let stopped = Arc::new(AtomicBool::new(false));
     let stopped_hook = Arc::clone(&stopped);
     let drained = Arc::new(AtomicBool::new(false));
     let dispatcher = build(|config| {
-        config.unsubscribe_td = Some(Box::new(|| panic!("boom")));
+        config.hold_td = Some(Box::new(|| panic!("boom")));
         config.on_stop = Some(Box::new(move |_| {
             stopped_hook.store(true, Ordering::Relaxed);
             Ok(())
@@ -1744,7 +1842,7 @@ fn inputs_are_written_in_delivery_order_each_followed_by_its_hook_end() {
             "8 hook_end ref=7 t=5ms",
             r#"9 md_book recv=0s t=5ms "book-1""#,
             "10 hook_end ref=9 t=6ms",
-            "11 stop flags=1 recv=6ms t=6ms",
+            "11 stop flags=5 recv=6ms t=6ms",
         ]
     );
 }
@@ -1832,7 +1930,7 @@ fn the_stop_drain_writes_its_inputs_and_a_formatted_panic() {
     assert_eq!(
         log.lines(),
         [
-            "1 stop flags=1 recv=0s t=0s",
+            "1 stop flags=5 recv=0s t=0s",
             "2 post ref=1 recv=0s t=0s",
             r#"3 hook_end ref=2 flags=1 t=0s "ValueError: boom""#,
         ]
@@ -1915,7 +2013,7 @@ fn the_ending_writes_stop_then_the_strategy_on_stop_as_its_own_input() {
             [
                 "1 post ref=1 recv=0s t=0s",
                 "2 hook_end ref=1 t=1ms",
-                "3 stop flags=1 recv=1ms t=2ms",
+                "3 stop flags=5 recv=1ms t=2ms",
                 "4 onstop recv=2ms t=2ms",
                 ended,
             ]
@@ -2054,7 +2152,7 @@ fn posts_and_timers_are_numbered_in_call_order() {
             "8 hook_end ref=7 t=0s",
             "9 post ref=2 recv=0s t=0s",
             "10 hook_end ref=9 t=0s",
-            "11 stop flags=1 recv=0s t=0s",
+            "11 stop flags=5 recv=0s t=0s",
         ]
     );
 }
@@ -2231,7 +2329,7 @@ fn with_the_log_a_hook_starts_at_its_inputs_t_ns_without_a_clock_read() {
             "2 hook_end ref=1 t=1ms",
             "3 post ref=1 recv=0s t=2ms",
             "4 hook_end ref=3 t=3ms",
-            "5 stop flags=1 recv=3ms t=3ms",
+            "5 stop flags=5 recv=3ms t=3ms",
             "6 onstop recv=3ms t=3ms",
             "7 hook_end ref=6 t=4ms",
         ]

@@ -765,6 +765,11 @@ impl<S: Strategy> Plane<S> {
     ) -> Dispatcher {
         let on_stop = Arc::downgrade(self);
         let unsubscribe = Arc::downgrade(self);
+        let (hold, allow, idle) = (
+            Arc::downgrade(self),
+            Arc::downgrade(self),
+            Arc::downgrade(self),
+        );
         let fire_plane = Arc::downgrade(self);
         let (feed_plane, book_plane) = (Arc::downgrade(self), Arc::downgrade(self));
         let (arm_ids, arm_timers) = (Arc::clone(&self.dispatch_timers), self.timers.clone());
@@ -779,6 +784,19 @@ impl<S: Strategy> Plane<S> {
                     plane.in_hook(|s, ctx| s.on_stop(ctx));
                 }
                 Ok(())
+            })),
+            hold_td: Some(Box::new(move || {
+                if let Some(plane) = hold.upgrade() {
+                    plane.wiring.hold_td();
+                }
+            })),
+            allow_stop_cancel: Some(Box::new(move || {
+                if let Some(plane) = allow.upgrade() {
+                    plane.wiring.allow_stop_cancel();
+                }
+            })),
+            stop_idle: Some(Box::new(move || {
+                idle.upgrade().is_none_or(|plane| plane.wiring.stop_idle())
             })),
             unsubscribe_td: Some(Box::new(move || {
                 if let Some(plane) = unsubscribe.upgrade() {

@@ -1,6 +1,6 @@
 //! OMS, ledger, and recon watermark.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
@@ -537,6 +537,16 @@ pub struct Path {
     listening: bool,
     subscribing: bool,
     failed: bool,
+    /// Refuses Submit, Cancel, BatchCancel and Recon for the ending.
+    /// `cancel_open`, set for OnStop of `DONE` and `FAILED`, lets Cancel and
+    /// BatchCancel through (mftiko E08-D067).
+    orders_held: bool,
+    cancel_open: bool,
+    /// Cancel rounds started while `cancel_open` whose outcome has not been fed.
+    stop_rounds: HashSet<RoundTicket>,
+    /// Orders still waiting for a terminal `td.evt` after an accepted or
+    /// unanswered stop cancel.
+    stop_wait: HashSet<(i64, String)>,
     fail_sent: bool,
     next_ticket: u64,
     rounds: HashMap<RoundTicket, Inflight>,
@@ -588,6 +598,10 @@ impl Path {
             listening: false,
             subscribing: false,
             failed: false,
+            orders_held: false,
+            cancel_open: false,
+            stop_rounds: HashSet::new(),
+            stop_wait: HashSet::new(),
             fail_sent: false,
             next_ticket: 1,
             rounds: HashMap::new(),
@@ -689,7 +703,7 @@ impl Path {
     /// Ask every account for a snapshot. Events stay held until that account's
     /// reply has been given to the recon hook.
     pub fn recon_all(&mut self) -> Result<Vec<Effect>, Error> {
-        if self.failed {
+        if self.failed || self.orders_held {
             return Err(Error::Stopping);
         }
         if !self.listening {
@@ -740,7 +754,7 @@ impl Path {
                 ClientOrderIdError::AlgoNotDeclared => Error::AlgoNotDeclared,
                 ClientOrderIdError::Other(message) => Error::ClientOrderId(message),
             })?;
-        if self.failed {
+        if self.failed || self.orders_held {
             return Err(Error::Stopping);
         }
         let row = td::Order {
@@ -798,7 +812,7 @@ impl Path {
     /// [`Hook::Reject`] and does not change the order. A timeout changes
     /// nothing and is not reported (E08-D045).
     pub fn cancel(&mut self, api_id: i64, client_order_id: &str) -> Result<Vec<Effect>, Error> {
-        self.ready(api_id)?;
+        self.ready_call(api_id, true)?;
         self.own_algo(api_id, client_order_id)?;
         let uid = self
             .accounts
@@ -833,7 +847,7 @@ impl Path {
         algo_id: u32,
         uids: &[u32],
     ) -> Result<Vec<Effect>, Error> {
-        self.ready(api_id)?;
+        self.ready_call(api_id, true)?;
         let account = self.accounts.get(&api_id).ok_or(Error::UnknownAccount)?;
         if !account.algos.contains(&algo_id) {
             return Err(Error::AlgoNotDeclared);
@@ -930,6 +944,16 @@ impl Path {
         let Some(round) = self.rounds.remove(&ticket) else {
             return Vec::new();
         };
+        if self.stop_rounds.remove(&ticket) {
+            // A refusal is done with its reply. An accepted or unanswered
+            // cancel waits for the order's terminal td.evt.
+            let refused = match &outcome {
+                RoundOutcome::Reply(reply) => !reply.accepted,
+                RoundOutcome::NoResponder => true,
+                RoundOutcome::NoAnswer => false,
+            };
+            self.settle_stop(round.api_id, &round.ids, refused);
+        }
         if self.failed {
             return Vec::new();
         }
@@ -1005,6 +1029,8 @@ impl Path {
     pub fn close(&mut self) -> Vec<Effect> {
         self.failed = true;
         self.rounds.clear();
+        self.stop_rounds.clear();
+        self.stop_wait.clear();
         self.cont.clear();
         let unsubscribe = self.listening || self.subscribing;
         self.listening = false;
@@ -1015,6 +1041,43 @@ impl Path {
             }]
         } else {
             Vec::new()
+        }
+    }
+
+    /// Refuse Submit, Cancel, BatchCancel and Recon without dropping
+    /// `td.evt`. `DONE` and `FAILED` call it before delivering the TD buffer
+    /// already in hand, and again after OnStop (mftiko E08-D067).
+    pub fn hold_orders(&mut self) {
+        self.orders_held = true;
+        self.cancel_open = false;
+    }
+
+    /// Let Cancel and BatchCancel through after [`Self::hold_orders`]. Submit
+    /// and Recon stay refused. OnStop of a `DONE` or `FAILED` ending calls
+    /// it, and its cancels are tracked until [`Self::stop_idle`].
+    pub fn allow_stop_cancel(&mut self) {
+        if self.failed {
+            return;
+        }
+        self.orders_held = true;
+        self.cancel_open = true;
+    }
+
+    /// Every cancel started after [`Self::allow_stop_cancel`] has had its
+    /// outcome fed, and every order such a cancel was not refused for has
+    /// reached a terminal status.
+    pub fn stop_idle(&self) -> bool {
+        self.stop_rounds.is_empty() && self.stop_wait.is_empty()
+    }
+
+    /// The round for `ticket` will never be fed: its outcome could not be
+    /// queued. A stop cancel's orders are no longer waited for.
+    pub fn abandon_round(&mut self, ticket: RoundTicket) {
+        let Some(round) = self.rounds.remove(&ticket) else {
+            return;
+        };
+        if self.stop_rounds.remove(&ticket) {
+            self.settle_stop(round.api_id, &round.ids, true);
         }
     }
 
@@ -1060,7 +1123,12 @@ impl Path {
     }
 
     fn ready(&self, api_id: i64) -> Result<(), Error> {
-        if self.failed {
+        self.ready_call(api_id, false)
+    }
+
+    /// `cancel` is Cancel or BatchCancel, which OnStop may still make.
+    fn ready_call(&self, api_id: i64, cancel: bool) -> Result<(), Error> {
+        if self.failed || (self.orders_held && !(cancel && self.cancel_open)) {
             return Err(Error::Stopping);
         }
         if !self.listening {
@@ -1389,6 +1457,7 @@ impl Path {
             account.orders.insert(id.clone(), order.clone());
         }
         if terminal {
+            self.stop_wait.remove(&(api_id, id.clone()));
             self.pending_drops.push((api_id, id));
         }
         Some(hook(Hook::Order(OrderEvent {
@@ -1497,6 +1566,9 @@ impl Path {
     ) -> Effect {
         let ticket = RoundTicket(self.next_ticket);
         self.next_ticket = self.next_ticket.wrapping_add(1);
+        if kind != OrderKind::Submit && self.cancel_open {
+            self.arm_stop(ticket, api_id, &ids);
+        }
         self.rounds.insert(
             ticket,
             Inflight {
@@ -1518,6 +1590,39 @@ impl Path {
             subject,
             request,
             wait: self.recv_window,
+        }
+    }
+
+    /// Counts one cancel round OnStop must see finished, and remembers each
+    /// live order it names until a terminal `td.evt` or a refusal.
+    fn arm_stop(&mut self, ticket: RoundTicket, api_id: i64, ids: &[String]) {
+        self.stop_rounds.insert(ticket);
+        for id in ids {
+            let live = self
+                .accounts
+                .get(&api_id)
+                .and_then(|account| account.orders.get(id))
+                .is_none_or(|order| !is_terminal(order.status));
+            if live {
+                self.stop_wait.insert((api_id, id.clone()));
+            }
+        }
+    }
+
+    /// One armed round finished. `refused` stops waiting for its orders.
+    /// Otherwise an order stays until it is terminal; a missing row stays,
+    /// since the update that finishes it may not have arrived.
+    fn settle_stop(&mut self, api_id: i64, ids: &[String], refused: bool) {
+        for id in ids {
+            let done = refused
+                || self
+                    .accounts
+                    .get(&api_id)
+                    .and_then(|account| account.orders.get(id))
+                    .is_some_and(|order| is_terminal(order.status));
+            if done {
+                self.stop_wait.remove(&(api_id, id.clone()));
+            }
         }
     }
 

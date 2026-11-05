@@ -66,7 +66,10 @@ pub trait Strategy: Send + Sized + 'static {
 
     /// Runs when the session ends `DONE`, `FAILED`, or `CRASHED`, not after
     /// `HUNG` (PROTOCOL §5.3). On `DONE` and `FAILED` the TD events already
-    /// received are delivered first (E08-D003).
+    /// received are delivered first (E08-D003). There, Cancel and
+    /// BatchCancel are sent, and their results are delivered before `td.evt`
+    /// is dropped; Submit and RequestRecon return [`crate::Error::Stopping`]
+    /// (mftiko E08-D067). `CRASHED` does not wait for or deliver them.
     fn on_stop(&mut self, ctx: &Context<Self>);
 
     /// Registers the optional hooks this strategy implements. Called once,

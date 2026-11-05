@@ -13,8 +13,10 @@
 //!   path it is Go's `bindings` error.
 //! - [`Wiring::open_td`] is `tdpath.Open` in Init. [`Wiring::listen_td`] and
 //!   [`Wiring::recon`] are `tdpath.Listen` before the gate and `tdpath.Recon`
-//!   after OnStart. [`Wiring::unsubscribe_td`] is the dispatcher's
-//!   `unsubscribe_td`. The TD path is `crate::td` (E03-07).
+//!   after OnStart. [`Wiring::hold_td`], [`Wiring::allow_stop_cancel`],
+//!   [`Wiring::stop_idle`] and [`Wiring::unsubscribe_td`] are the
+//!   dispatcher's ending steps (mftiko E08-D067). The TD path is `crate::td`
+//!   (E03-07).
 //! - [`Wiring::resolve`] and [`Wiring::info`] are `symclient`, driven by
 //!   [`crate::sym::Sym`] (E03-08). Init opens it on the session's connection
 //!   with [`Wiring::open_sym`]; the connection's reconnects reach it through
@@ -143,6 +145,23 @@ impl Wiring {
     /// session `FAILED` (E08-D041).
     pub(crate) fn recon(&self) -> Result<(), Error> {
         self.td.get().map_or(Ok(()), TdPath::recon)
+    }
+
+    pub(crate) fn hold_td(&self) {
+        if let Some(td) = self.td.get() {
+            td.hold();
+        }
+    }
+
+    pub(crate) fn allow_stop_cancel(&self) {
+        if let Some(td) = self.td.get() {
+            td.allow_stop_cancel();
+        }
+    }
+
+    /// No TD path has nothing to wait for.
+    pub(crate) fn stop_idle(&self) -> bool {
+        self.td.get().is_none_or(TdPath::stop_idle)
     }
 
     pub(crate) fn unsubscribe_td(&self) {

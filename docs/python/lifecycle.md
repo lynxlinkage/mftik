@@ -75,3 +75,11 @@ The market-data queue is the ring described above. After each hook, a waiting ac
 `exit` requests outcome `DONE`. `fail` requests outcome `FAILED` and keeps the reason string. Call one of them and return. The first request wins. The session finishes the current hook, then follows the ending in [Errors and exit codes](errors.md), including `on_stop` for both of those outcomes. `sys.exit` is not `exit`. It raises `SystemExit`, and that exception is the hook failure described on that page.
 
 An exception from `on_stop` does not change the outcome or the exit code. The traceback goes to stderr. The platform records that `on_stop` did not finish.
+
+## Orders in `on_stop`
+
+On `DONE` and `FAILED`, `on_stop` may call `cancel` and `batch_cancel`. `submit` and `request_recon` raise `Stopping` there. The account subscription stays up until `on_stop` returns and its cancels have their results: a reject when TD refuses the cancel, or the order update that makes the order terminal. They arrive as `on_reject` and `on_order` after `on_stop` returns. A cancel whose reply times out still waits for that order update. All of this uses the stop budget: what is left of `grace_ms` for a stop from the platform, or `hook_timeout_s` when the strategy ended the session itself. When the budget runs out, the session stops waiting and the order may still be open on the exchange.
+
+While the account events received before the stop are delivered, before `on_stop`, every order call raises `Stopping`.
+
+`CRASHED` delivers nothing after `on_stop`. A cancel made there is sent, but its result is not delivered and the session does not wait for it. The platform does not cancel a session's orders for it, so `HUNG`, a killed worker, or a cancel that ran out of budget can leave orders open.

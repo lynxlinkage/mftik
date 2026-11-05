@@ -31,7 +31,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 # E04-D076. tests/python/pack_e2e.py uses this same commit.
-MFTIKO_COMMIT = "55ffbfe7d526b8ea3e25e3abb10b56304a16c09f"
+MFTIKO_COMMIT = "868982d72ca2ff7eb8dcc875c172d3de7d38f813"
 MFTIKO_URL = "https://github.com/BullionBear/mftiko.git"
 CONTRACTS = ["worker.v1", "stsctl.v1", "md.v1", "td.v1"]
 ENTRYPOINT = ["python/bin/python3", "-m", "mftik.run", "conform:Conform"]

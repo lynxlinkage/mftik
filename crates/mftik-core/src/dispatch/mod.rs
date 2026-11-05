@@ -50,7 +50,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use ring::Ring;
 
-use crate::eventlog::{END_ERROR, END_PANIC, Kind, Recorder, STOP_DELIVER, STOP_HUNG};
+use crate::eventlog::{
+    END_ERROR, END_PANIC, Kind, Recorder, STOP_DELIVER, STOP_HUNG, STOP_KEEP_TD,
+};
 
 /// TD buffer capacity (E08-D015). Not a session-spec field. A full buffer ends the session `FAILED`.
 pub const TD_CAP: usize = 65536;
@@ -289,8 +291,22 @@ pub struct Config {
     pub ring_bytes: usize,
     /// Strategy callback. `Err` is reported on [`StopError::OnStop`] and does not
     /// change the `Exiting` outcome. A panic is [`StopError::OnStopPanic`].
+    /// On `DONE` and `FAILED` it may cancel; the cancels' results are
+    /// delivered before [`Config::unsubscribe_td`] (mftiko E08-D067).
     pub on_stop: Option<OnStopHook>,
-    /// Runs on the dispatcher thread before the TD drain, for `DONE` and `FAILED` only.
+    /// Runs on the dispatcher thread before the `DONE` or `FAILED` TD drain.
+    /// It refuses order calls and leaves `td.evt` subscribed.
+    pub hold_td: Option<Box<dyn FnMut() + Send>>,
+    /// Runs on the dispatcher thread immediately before OnStop, for `DONE`
+    /// and `FAILED` only. Cancel and BatchCancel work; Submit stays refused.
+    pub allow_stop_cancel: Option<Box<dyn FnMut() + Send>>,
+    /// Whether the cancels issued during OnStop have delivered their results.
+    /// `None` means there is nothing to wait for. `false` is waited out
+    /// within the stop budget (E08-D067).
+    pub stop_idle: Option<Box<dyn FnMut() -> bool + Send>>,
+    /// Runs on the dispatcher thread after OnStop and after those cancel
+    /// results, for `DONE` and `FAILED` only. It is where the session drops
+    /// `td.evt`.
     pub unsubscribe_td: Option<Box<dyn FnMut() + Send>>,
     /// Market-data bytes alias the ring and are valid only for this call.
     pub feed: Option<MdHook>,
@@ -320,6 +336,9 @@ impl Default for Config {
             now_ns: 0,
             ring_bytes: 0,
             on_stop: None,
+            hold_td: None,
+            allow_stop_cancel: None,
+            stop_idle: None,
             unsubscribe_td: None,
             feed: None,
             book: None,
@@ -351,6 +370,9 @@ struct Shared {
     mu: Mutex<State>,
     cv: Condvar,
     on_stop: Slot<OnStopHook>,
+    hold_td: Slot<Box<dyn FnMut() + Send>>,
+    allow_stop_cancel: Slot<Box<dyn FnMut() + Send>>,
+    stop_idle: Slot<Box<dyn FnMut() -> bool + Send>>,
     unsubscribe_td: Slot<Box<dyn FnMut() + Send>>,
     feed: Slot<MdHook>,
     book: Slot<MdHook>,
@@ -519,6 +541,9 @@ impl Dispatcher {
             }),
             cv: Condvar::new(),
             on_stop: Slot::new(config.on_stop),
+            hold_td: Slot::new(config.hold_td),
+            allow_stop_cancel: Slot::new(config.allow_stop_cancel),
+            stop_idle: Slot::new(config.stop_idle),
             unsubscribe_td: Slot::new(config.unsubscribe_td),
             feed: Slot::new(config.feed),
             book: Slot::new(config.book),
@@ -668,8 +693,9 @@ impl Dispatcher {
         lock(&self.shared.mu).kept.remove(&id)
     }
 
-    /// In a replay, the point where a session's ending closes the TD buffer:
-    /// just before OnStop. A Post from then on fails as it did.
+    /// In a replay of a log without [`STOP_KEEP_TD`], the point where the
+    /// ending closes the TD buffer: just before OnStop. A Post from then on
+    /// fails. A [`STOP_KEEP_TD`] log leaves it open through OnStop (E08-D067).
     pub fn close_td(&self) {
         self.shared.close_td();
     }
@@ -1029,6 +1055,11 @@ impl Shared {
         }
     }
 
+    /// `DONE` and `FAILED` hold order calls and deliver the TD buffer, then
+    /// open Cancel and BatchCancel for OnStop, then deliver those cancels'
+    /// results, and only then drop `td.evt` (mftiko E08-D067). `CRASHED`
+    /// closes the buffer before OnStop and takes none of this. One budget,
+    /// the request's, covers all of it.
     fn phase2_inner(
         &self,
         request: &StopRequest,
@@ -1036,29 +1067,113 @@ impl Shared {
         asked_ns: i64,
     ) -> Result<(), StopError> {
         if self.stop_expired(request) {
-            self.close_td();
+            self.drop_td(deliver);
             return Err(self.stop_reason(request));
         }
         let delivered = if deliver {
-            let _ = self.unsubscribe_td.with_mut(|callback| callback());
+            let _ = self.hold_td.with_mut(|callback| callback());
             self.drain(request)
         } else {
+            self.close_td();
             Ok(())
         };
-        self.close_td();
         self.stop_timers();
         if self.stop_expired(request) {
+            self.drop_td(deliver);
             return Err(self.stop_reason(request));
         }
+        let mut result = Ok(());
         if self.on_stop.is_some() {
+            if deliver {
+                let _ = self.allow_stop_cancel.with_mut(|callback| callback());
+            }
             let now_ns = self.now_ns();
             let info = StopInfo {
                 deadline_ns: request.deadline_ns(),
                 now_ns,
             };
-            self.run_on_stop(&info, asked_ns)?;
+            result = self.run_on_stop(&info, asked_ns);
         }
-        delivered
+        if result.is_ok() {
+            result = delivered;
+        }
+        if deliver && self.on_stop.is_some() {
+            // Freeze cancels before the results run, so a result hook cannot
+            // start another round.
+            let _ = self.hold_td.with_mut(|callback| callback());
+            if self.stop_expired(request) {
+                self.drain_ready();
+            } else if let Err(err) = self.deliver_stop_results(request)
+                && result.is_ok()
+            {
+                result = Err(err);
+            }
+        }
+        if deliver {
+            let _ = self.unsubscribe_td.with_mut(|callback| callback());
+            self.drain_ready();
+        }
+        self.close_td();
+        result
+    }
+
+    /// The budget ran out: unsubscribe when this ending was delivering, and
+    /// close the TD buffer without running what is queued.
+    fn drop_td(&self, deliver: bool) {
+        if deliver {
+            let _ = self.unsubscribe_td.with_mut(|callback| callback());
+        }
+        self.close_td();
+    }
+
+    /// Runs the TD entries queued during OnStop, and waits for cancels armed
+    /// there, until `stop_idle` or the budget ends.
+    fn deliver_stop_results(&self, request: &StopRequest) -> Result<(), StopError> {
+        loop {
+            self.drain(request)?;
+            if self.stop_idle.with_mut(|idle| idle()).unwrap_or(true) {
+                return Ok(());
+            }
+            self.wait_td(request)?;
+        }
+    }
+
+    /// Blocks until a TD entry is queued or the budget ends. The host's clock
+    /// ticks and every push wake the condvar.
+    fn wait_td(&self, request: &StopRequest) -> Result<(), StopError> {
+        let mut state = lock(&self.mu);
+        loop {
+            if !state.td.is_empty() {
+                return Ok(());
+            }
+            let expired = request.cancel.load(Ordering::Relaxed)
+                || request
+                    .deadline_ns
+                    .is_some_and(|deadline| state.now_ns >= deadline);
+            if expired {
+                drop(state);
+                return Err(self.stop_reason(request));
+            }
+            state = wait(&self.cv, state);
+        }
+    }
+
+    /// Runs every TD entry already queued, and entries they queue. It does
+    /// not wait for more and has no budget: the entries are already here.
+    fn drain_ready(&self) {
+        loop {
+            let (item, input) = {
+                let mut state = lock(&self.mu);
+                if state.td.is_empty() {
+                    return;
+                }
+                take_td(&mut state)
+            };
+            self.run_td(item, input);
+            if self.take_stop_panic().is_some() {
+                return;
+            }
+        }
     }
 
     fn drain(&self, request: &StopRequest) -> Result<(), StopError> {
@@ -1562,11 +1677,16 @@ impl Rec {
     }
 
     /// C4 asked for OnStop: the `stop` frame, before the ending delivers
-    /// anything. `deliver` is [`STOP_DELIVER`]. Returns when C4 asked, the
-    /// frame's `t_ns`.
+    /// anything. `deliver` is [`STOP_DELIVER`], always with [`STOP_KEEP_TD`]:
+    /// `td.evt` stays up through OnStop (E08-D067). Returns when C4 asked,
+    /// the frame's `t_ns`.
     fn stop(&self, deliver: bool) -> i64 {
         let asked_ns = self.log.now_ns();
-        let flags = if deliver { STOP_DELIVER } else { 0 };
+        let flags = if deliver {
+            STOP_DELIVER | STOP_KEEP_TD
+        } else {
+            0
+        };
         let stop_at = self.stop_at.load(Ordering::Relaxed);
         self.log
             .append(Kind::STOP, flags, stop_at, asked_ns, 0, &[], &[]);

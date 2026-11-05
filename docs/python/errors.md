@@ -12,7 +12,7 @@ The process ends with one of the statuses in PROTOCOL §5.3. `run` does not retu
 
 Exit code 1 is the worker giving up before it can keep speaking the control protocol, for example when it cannot take the control file descriptor. A process killed by a signal has no outcome from this table. The platform records the signal. `HUNG` from the platform's own heartbeat watchdog is that kind of kill: the process is signaled, and the platform treats the outcome as `HUNG` with reason `no_beat`.
 
-`CRASHED` does not deliver account events that were still queued. `DONE` and `FAILED` do deliver the account events received before the stop, and then run `on_stop`. The event that overflowed the account queue is not one of those events. The reason for that overflow is `td buffer full`.
+`CRASHED` does not deliver account events that were still queued. `DONE` and `FAILED` do deliver the account events received before the stop, and then run `on_stop`, which may cancel (see [Orders in `on_stop`](lifecycle.md#orders-in-on_stop)). The event that overflowed the account queue is not one of those events. The reason for that overflow is `td buffer full`.
 
 A deadline on init or start uses reason `deadline`, does not wait for the hook, does not run `on_stop`, and exits 10. A hook that exceeds `hook_timeout_s` uses reason `hook timeout` and exits 21. `on_stop` is not called.
 
