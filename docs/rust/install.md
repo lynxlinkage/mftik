@@ -2,7 +2,32 @@
 
 `mftik-rt` is the Rust strategy SDK. A session worker is a binary that calls `mftik_rt::run`. The supported worker platform is Ubuntu 22.04 or later on x86_64 (`x86_64-unknown-linux-gnu`, glibc 2.35 or newer). There is no musl build. macOS on arm64 is for development; the packed image the platform runs is always linux amd64.
 
-The crate is not on crates.io (E08-D004). Depend on it by git tag. The tag has to be a release after 1.2.0: v1.2.0 does not embed the `mftiko.contracts=` marker or the `mftiko.sdk=` record that `mftiko-pack -bin` reads (E08-D001, E08-D005), so packing a binary linked to that tag fails. Packing needs `mftiko-pack` from mftiko v0.5.1 or later.
+The crate is not on crates.io (E08-D004). Depend on it by git tag. The tag has to be v1.3.0 or later: v1.2.0 does not embed the `mftiko.contracts=` marker or the `mftiko.sdk=` record that `mftiko-pack -bin` reads (E08-D001, E08-D005), so packing a binary linked to that tag fails. Packing needs `mftiko-pack` from mftiko v0.5.1 or later.
+
+## Toolchain
+
+`mftik-rt` needs Rust 1.99.1, the stable release pinned in this repository's [`rust-toolchain.toml`](../../rust-toolchain.toml). That file does not apply to your project. Without a pin, cargo uses your default toolchain, and an older one fails while resolving dependencies, for example with `vergen-lib@10.0.3 requires rustc 1.96.0`. Put a `rust-toolchain.toml` at your project's root:
+
+```toml
+[toolchain]
+channel = "1.99.1"
+```
+
+rustup installs that toolchain the first time cargo runs in the directory. Crates use edition 2024. `mftik-rt` pulls `mftik-core` and `mftik-proto`; `mftik-proto`'s build uses a vendored `protoc`, so no `protoc` has to be installed.
+
+## Add the dependency
+
+In a new binary crate:
+
+```bash
+cargo new hello
+cd hello
+cargo add --git https://github.com/lynxlinkage/mftik --tag v2.1.0 mftik-rt
+```
+
+Plain `cargo add mftik-rt` fails because the crate is not on crates.io. `cargo install` does not apply: `mftik-rt` is a library, and the program you pack is your own binary that calls `mftik_rt::run`.
+
+`cargo add` writes the dependency with `version = "2.1.0"`. Written by hand, the manifest looks like this:
 
 ```toml
 [package]
@@ -16,12 +41,10 @@ name = "hello"
 path = "src/main.rs"
 
 [dependencies]
-mftik-rt = { git = "https://github.com/lynxlinkage/mftik", tag = "vX.Y.Z", package = "mftik-rt" }
+mftik-rt = { git = "https://github.com/lynxlinkage/mftik", tag = "v2.1.0" }
 ```
 
-Replace `vX.Y.Z` with that later tag. `package` is required because the repository is a workspace. People working in this repository use a path dependency, as [`examples/rust/md_watch`](../../examples/rust/md_watch) does.
-
-The toolchain is the stable channel pinned in [`rust-toolchain.toml`](../../rust-toolchain.toml) (1.99.1). Crates use edition 2024. `mftik-rt` pulls `mftik-core` and `mftik-proto`; `mftik-proto`'s build uses a vendored `protoc`.
+Use a later tag to upgrade. cargo finds `mftik-rt` among the repository's workspace members by name. People working in this repository use a path dependency, as [`examples/rust/md_watch`](../../examples/rust/md_watch) does.
 
 ## The process
 
